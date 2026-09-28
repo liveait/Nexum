@@ -124,7 +124,7 @@ Sheet 只承担一条清晰流程：
 设置是一个独立页面，按分区组织内容，不是第二个任务工作流：
 
 - **Server：** 地址（默认 `127.0.0.1:39100`）、连接/测试按钮、最近连接结果和协议版本。
-- **更新：** 刷新策略（自动、手动或启用轮询后的时间间隔）。
+- **更新：** 自动策略使用事件刷新；事件流断开时回退到空闲每五秒、下载中每秒的轮询。手动策略会禁用该轮询回退。
 - **外观：** 跟随系统外观；语言和强调色选择先预留给客户端设置模型。
 - **通知：** 在本次 Desktop 会话的 Activity Center 显示任务完成、失败和重试事件；通知偏好与静音控制留待后续切片。
 - 第一版 Server 是独立进程的说明。
@@ -141,7 +141,7 @@ TaskData = { items, selectedId, lastUpdatedAt }
 OperationState = { [taskId]: idle | running }
 ```
 
-Desktop 通过 Tauri 后台线程建立独立的 `events.subscribe` TCP 连接。Server 发送带增量 Task 或 Scheduler 数据的 `events.event` JSON-RPC 通知；由于通知不包含完整 `TaskView`，React 会对通知去抖后刷新完整 Task 快照。
+Desktop 通过 Tauri 后台线程建立独立的 `events.subscribe` TCP 连接。Server 发送带增量 Task 或 Scheduler 数据的 `events.event` JSON-RPC 通知，并每 15 秒发送一次 heartbeat 保持连接。Tauri 会忽略 heartbeat；由于更新通知不包含完整 `TaskView`，React 会对 Task 和 Scheduler 通知去抖后刷新完整 Task 快照。
 
 事件流连接时使用事件驱动刷新：
 
@@ -156,7 +156,7 @@ Desktop 通过 Tauri 后台线程建立独立的 `events.subscribe` TCP 连接�
 - 窗口隐藏时停止轮询。
 - 保存 `lastUpdatedAt`，在工具栏显示“刚刚更新 / X 前更新”。
 
-事件流没有回放缓冲。重连时先获取完整 Task 快照；刷新失败时仍保留最近一次成功快照。
+事件流没有回放缓冲。重连或订阅被丢弃后先获取完整 Task 快照；刷新失败时仍保留最近一次成功快照。
 
 RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直接打开 TCP Socket 或解析 JSON-RPC 错误。
 

@@ -124,7 +124,7 @@ The current server requires an explicit task ID and destination, so the first im
 Settings is a dedicated page with grouped sections. It is not a second task workflow:
 
 - **Server:** address (default `127.0.0.1:39100`), Connect/Test, last connection result, and protocol version.
-- **Updates:** refresh policy (Automatic, Manual, or a configured interval while polling is enabled).
+- **Updates:** Automatic uses event refreshes and a five-second idle or one-second active polling fallback when the stream is disconnected; Manual disables that polling fallback.
 - **Appearance:** follow the system appearance; reserve language and accent choices for the client settings model.
 - **Notifications:** show task completion, failure, and retry events in the session Activity Center; reserve delivery preferences and mute controls for a later slice.
 - A note that the Server is a separate process in the first release.
@@ -141,7 +141,7 @@ TaskData = { items, selectedId, lastUpdatedAt }
 OperationState = { [taskId]: idle | running }
 ```
 
-The Desktop opens a dedicated `events.subscribe` TCP connection through a Tauri background thread. The Server sends `events.event` JSON-RPC notifications with incremental Task or Scheduler data; React debounces them and refreshes the full task snapshot because an event does not contain a complete `TaskView`.
+The Desktop opens a dedicated `events.subscribe` TCP connection through a Tauri background thread. The Server sends `events.event` JSON-RPC notifications with incremental Task or Scheduler data, plus a heartbeat every 15 seconds to keep the connection alive. Tauri ignores heartbeats; React debounces task and scheduler notifications and refreshes the full task snapshot because an update does not contain a complete `TaskView`.
 
 While the event stream is connected, use event-driven refreshes:
 
@@ -156,7 +156,7 @@ When the stream is disconnected, use adaptive polling as a fallback:
 - Stop polling when the window is hidden.
 - Keep `lastUpdatedAt` and show “Updated just now / X ago” in the toolbar.
 
-The stream has no replay buffer. A reconnect starts with a full task snapshot, and the UI continues to keep the last successful snapshot when a refresh fails.
+The stream has no replay buffer. A reconnect or dropped subscription starts with a full task snapshot, and the UI continues to keep the last successful snapshot when a refresh fails.
 
 The RPC boundary stays in Rust/Tauri commands. React owns presentation state and never opens a TCP socket or interprets JSON-RPC errors directly.
 
