@@ -82,8 +82,14 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Tauri 2 + React application and TCP JSON-RPC command bridge
 - [x] Task list, add, queue/start, pause/resume, and remove UI
 - [x] Editable server address and refresh after actions/address changes
-- [ ] Add periodic or event-driven updates for progress and externally changed tasks
-- [ ] Persist server settings and surface connection/action failures reliably
+- [x] Document the macOS-first sidebar, task list, inspector, add sheet, and settings flows ([Desktop UI Design](DESKTOP_UI_DESIGN.md))
+- [x] Replace the prototype tabs with the documented sidebar/list/inspector shell
+- [x] Add an Add Download sheet that creates and queues a task
+- [ ] Add a native destination chooser to the Add Download sheet
+- [x] Add periodic polling for progress and externally changed tasks; event-driven updates remain a later Server contract
+- [x] Persist server address and refresh policy through Tauri commands
+- [x] Surface connection/action failures without discarding the last successful task list
+- [ ] Add keyboard navigation, accessibility labels, system appearance, and English/Simplified Chinese UI strings
 
 ### Phase 9 - Browser Integration
 
@@ -126,4 +132,4 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 
 ## 3. Current Focus
 
-Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path.
+Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path. The macOS Desktop information architecture is documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md); the React surface now has the sidebar/list/inspector shell, Settings page, Add Download sheet, explicit RPC errors, adaptive polling, and persisted Server settings. The native destination chooser and Server event stream remain outstanding.

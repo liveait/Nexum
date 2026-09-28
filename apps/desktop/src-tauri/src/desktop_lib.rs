@@ -40,6 +40,17 @@ impl RpcResult {
             error: Some(message),
         }
     }
+
+    fn into_result(self) -> Result<Value, String> {
+        if self.success {
+            self.result
+                .ok_or_else(|| "server returned no result".to_owned())
+        } else {
+            Err(self
+                .error
+                .unwrap_or_else(|| "unknown server error".to_owned()))
+        }
+    }
 }
 
 /// Call a JSON-RPC method on the server.
@@ -106,25 +117,26 @@ pub fn call_rpc(server: &str, method: &str, params: Option<Value>, timeout_ms: u
 }
 
 /// Call server.version and return the protocol version string.
-pub fn server_version(server: &str, timeout_ms: u64) -> Option<String> {
-    let result = call_rpc(server, "server.version", None, timeout_ms);
-    result.result.and_then(|v| v.as_str().map(|s| s.to_owned()))
+pub fn server_version(server: &str, timeout_ms: u64) -> Result<String, String> {
+    call_rpc(server, "server.version", None, timeout_ms)
+        .into_result()?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "server returned an invalid protocol version".to_owned())
 }
 
 /// Call task.list and return task items.
-pub fn task_list(server: &str, timeout_ms: u64) -> Vec<Value> {
-    let result = call_rpc(server, "task.list", None, timeout_ms);
-    match result.result {
-        Some(Value::Array(tasks)) => tasks,
-        _ => vec![],
+pub fn task_list(server: &str, timeout_ms: u64) -> Result<Vec<Value>, String> {
+    match call_rpc(server, "task.list", None, timeout_ms).into_result()? {
+        Value::Array(tasks) => Ok(tasks),
+        _ => Err("server returned an invalid task list".to_owned()),
     }
 }
 
 /// Call task.get and return a single task.
-pub fn task_get(server: &str, task_id: &str, timeout_ms: u64) -> Option<Value> {
+pub fn task_get(server: &str, task_id: &str, timeout_ms: u64) -> Result<Value, String> {
     let params = serde_json::json!({"id": task_id});
-    let result = call_rpc(server, "task.get", Some(params), timeout_ms);
-    result.result
+    call_rpc(server, "task.get", Some(params), timeout_ms).into_result()
 }
 
 /// Call task.create and return the created task.
@@ -134,48 +146,53 @@ pub fn task_create(
     source: &str,
     destination: &str,
     timeout_ms: u64,
-) -> Option<Value> {
+) -> Result<Value, String> {
     let params = serde_json::json!({
         "id": id,
         "source": source,
         "destination": destination,
     });
-    let result = call_rpc(server, "task.create", Some(params), timeout_ms);
-    result.result
+    call_rpc(server, "task.create", Some(params), timeout_ms).into_result()
 }
 
 /// Call task.queue to queue a task.
-pub fn task_queue(server: &str, task_id: &str, timeout_ms: u64) -> bool {
+pub fn task_queue(server: &str, task_id: &str, timeout_ms: u64) -> Result<bool, String> {
     let params = serde_json::json!({"id": task_id});
-    let result = call_rpc(server, "task.queue", Some(params), timeout_ms);
-    result.success
+    expect_bool(call_rpc(server, "task.queue", Some(params), timeout_ms))
 }
 
 /// Call task.start to start the next queued task.
-pub fn task_start(server: &str, timeout_ms: u64) -> Option<String> {
-    let result = call_rpc(server, "task.start", None, timeout_ms);
-    result.result.and_then(|v| v.as_str().map(|s| s.to_owned()))
+pub fn task_start(server: &str, timeout_ms: u64) -> Result<String, String> {
+    call_rpc(server, "task.start", None, timeout_ms)
+        .into_result()?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "server returned an invalid task ID".to_owned())
 }
 
 /// Call task.pause to pause a task.
-pub fn task_pause(server: &str, task_id: &str, timeout_ms: u64) -> bool {
+pub fn task_pause(server: &str, task_id: &str, timeout_ms: u64) -> Result<bool, String> {
     let params = serde_json::json!({"id": task_id});
-    let result = call_rpc(server, "task.pause", Some(params), timeout_ms);
-    result.success
+    expect_bool(call_rpc(server, "task.pause", Some(params), timeout_ms))
 }
 
 /// Call task.resume to resume a task.
-pub fn task_resume(server: &str, task_id: &str, timeout_ms: u64) -> bool {
+pub fn task_resume(server: &str, task_id: &str, timeout_ms: u64) -> Result<bool, String> {
     let params = serde_json::json!({"id": task_id});
-    let result = call_rpc(server, "task.resume", Some(params), timeout_ms);
-    result.success
+    expect_bool(call_rpc(server, "task.resume", Some(params), timeout_ms))
 }
 
 /// Call task.remove to remove a task.
-pub fn task_remove(server: &str, task_id: &str, timeout_ms: u64) -> bool {
+pub fn task_remove(server: &str, task_id: &str, timeout_ms: u64) -> Result<bool, String> {
     let params = serde_json::json!({"id": task_id});
-    let result = call_rpc(server, "task.remove", Some(params), timeout_ms);
-    result.success
+    expect_bool(call_rpc(server, "task.remove", Some(params), timeout_ms))
+}
+
+fn expect_bool(result: RpcResult) -> Result<bool, String> {
+    result
+        .into_result()?
+        .as_bool()
+        .ok_or_else(|| "server returned an invalid boolean result".to_owned())
 }
 
 #[cfg(test)]

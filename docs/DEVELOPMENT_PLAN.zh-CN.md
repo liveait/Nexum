@@ -82,8 +82,14 @@
 - [x] Tauri 2 + React 应用与 TCP JSON-RPC 命令桥接
 - [x] Task 列表、添加、排队/启动、暂停/恢复与删除 UI
 - [x] 可编辑 Server 地址，操作或地址变更后刷新
-- [ ] 增加定时或事件驱动更新，反映进度和外部任务变化
-- [ ] 持久化 Server 设置，可靠呈现连接与操作失败
+- [x] 记录 macOS 优先的侧边栏、任务列表、Inspector、Add Sheet 与设置流程（[Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)）
+- [x] 用文档中的侧边栏/列表/Inspector 壳层替换原型 Tab 布局
+- [x] 增加创建并排队任务的 Add Download Sheet
+- [ ] 为 Add Download Sheet 增加原生目标选择器
+- [x] 增加定时轮询反映进度和外部任务变化；事件驱动更新留待后续 Server 合约
+- [x] 通过 Tauri 命令持久化 Server 地址和刷新策略
+- [x] 在不丢弃最近一次成功任务列表的情况下呈现连接/操作错误
+- [ ] 增加键盘导航、可访问性标签、系统外观和中英文 UI 文案
 
 ### Phase 9 - Browser 集成
 
@@ -126,4 +132,4 @@
 
 ## 3. 当前重点
 
-Phase 0-9 各自具有不同程度的脚手架和库级覆盖。运行中的 Server 使用 SQLite 持久化任务并在重启后恢复，在任务入队、启动恢复以及 Worker 完成或失败后自动派发符合条件的 HTTP/HTTPS 工作。`task.start` 仍是手动 kick 和兼容接口。Server 会节流持久化中间进度，通过任务视图返回最近一次传输错误，并在传输成功后写入最终进度与完成状态。活跃的 Server HTTP 传输支持协作式块边界暂停、同进程恢复和破坏性删除取消；阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时，`task.remove` 无法及时停止时会在等待 Worker 30 秒后返回错误。Server 现在会在进程重启后保留并校验 HTTP 部分响应。只有 sidecar 匹配且服务端返回 `206 Partial Content` 时才续传；无效或没有校验器的响应会被丢弃并从零下载。Magnet 和本地文件传输仍不受支持。Plugin 与 Media crates 已包含数据类型之外的代码，但 Provider 回调和真实处理尚未接入产品路径。
+Phase 0-9 各自具有不同程度的脚手架和库级覆盖。运行中的 Server 使用 SQLite 持久化任务并在重启后恢复，在任务入队、启动恢复以及 Worker 完成或失败后自动派发符合条件的 HTTP/HTTPS 工作。`task.start` 仍是手动 kick 和兼容接口。Server 会节流持久化中间进度，通过任务视图返回最近一次传输错误，并在传输成功后写入最终进度与完成状态。活跃的 Server HTTP 传输支持协作式块边界暂停、同进程恢复和破坏性删除取消；阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时，`task.remove` 无法及时停止时会在等待 Worker 30 秒后返回错误。Server 现在会在进程重启后保留并校验 HTTP 部分响应。只有 sidecar 匹配且服务端返回 `206 Partial Content` 时才续传；无效或没有校验器的响应会被丢弃并从零下载。Magnet 和本地文件传输仍不受支持。Plugin 与 Media crates 已包含数据类型之外的代码，但 Provider 回调和真实处理尚未接入产品路径。macOS Desktop 信息架构已记录在[Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)中；React 页面现在已有侧边栏/列表/Inspector 壳层、设置页、Add Download Sheet、明确的 RPC 错误展示、自适应轮询和持久化 Server 设置。原生目标选择器和 Server 事件流仍待完成。

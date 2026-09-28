@@ -38,6 +38,7 @@ cargo run -p nexum-cli -- task list
 - [架构设计](docs/ARCHITECTURE.zh-CN.md)
 - [开发指南](docs/DEVELOPMENT.zh-CN.md)
 - [开发计划](docs/DEVELOPMENT_PLAN.zh-CN.md)
+- [Desktop UI 设计](docs/DESKTOP_UI_DESIGN.zh-CN.md)
 - [变更日志](CHANGELOG.zh-CN.md)
 - [架构决策](docs/decisions/README.zh-CN.md)
 - [贡献指南](CONTRIBUTING.zh-CN.md)
