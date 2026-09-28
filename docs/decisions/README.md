@@ -11,6 +11,7 @@ The recorded decisions are:
 - [0001: Persist Transfer Progress and Errors](0001-persist-transfer-progress-and-errors.md)
 - [0002: Server-Owned Automatic Dispatch for HTTP Transfers](0002-auto-dispatch-http-transfers.md)
 - [0003: Cooperative Controls for Server HTTP Transfers](0003-http-transfer-controls.md)
+- [0004: Validated Cross-Restart HTTP Resume](0004-cross-restart-http-resume.md)
 
 ADR 0002 supersedes ADR 0001's temporary decision to dispatch retries manually. New decisions should use the next numbered filename.
 

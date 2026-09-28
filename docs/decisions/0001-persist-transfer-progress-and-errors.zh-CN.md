@@ -23,7 +23,7 @@ HTTP Worker 过去只持久化最终字节数，因此长时间传输通过任�
 
 - 客户端可以在传输期间观察进度，并在重启后查看最近一次失败。
 - Protocol 增加了可追加的 `error` 字段；客户端应忽略未知响应字段。
-- 在本决策作出时，传输重启后从零开始，活跃 HTTP 控制尚未实现；当前 Server 控制由 [ADR 0003](0003-http-transfer-controls.zh-CN.md) 定义，跨重启恢复仍从零开始。
+- 在本决策作出时，传输重启后从零开始，活跃 HTTP 控制尚未实现。之后的同进程控制由 [ADR 0003](0003-http-transfer-controls.zh-CN.md) 定义，当前带校验的跨重启续传由 [ADR 0004](0004-cross-restart-http-resume.zh-CN.md) 定义。
 - 中间进度会增加 SQLite 写入次数，但受字节和时间阈值限制。
 
 ## 被考虑的替代方案

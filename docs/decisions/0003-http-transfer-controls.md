@@ -25,7 +25,7 @@ The server already owns the worker, Core lock, scheduler slot, destination reser
 
 - Pause and resume work only while the same server process and HTTP response remain alive. A peer or network that closes an idle response can still make resume fail.
 - A blocking response read cannot observe a condition variable until the 30-minute HTTP request timeout expires, so `task.pause` may be delayed by that timeout. `task.remove` waits up to 30 seconds for the worker and returns an error if it is still blocked; the request can be retried after the worker exits.
-- Restart recovery still resets interrupted work to `Queued` and begins from byte zero. Range-based cross-restart resume is a later decision.
+- Restart recovery still normalizes interrupted work to `Queued`; validated cross-restart Range resume is defined by [ADR 0004](0004-cross-restart-http-resume.md), while responses without a usable validator still begin from byte zero.
 - The existing JSON-RPC shapes remain unchanged: pause and remove return `true`, while resume returns `true` or `false`.
 
 ## Alternatives Considered
