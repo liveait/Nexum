@@ -173,7 +173,7 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 
 ### Slice B — Add sheet and native settings (partially implemented)
 
-- Add URL validation, task ID derivation, and native destination chooser. [ ]
+- Add URL validation and task ID derivation. [ ]
 - Add the native destination save dialog through the Tauri dialog plugin. [x]
 - Add Tauri commands for loading and saving desktop settings. [x]
 - Queue a newly created task as part of the Add flow. [x]

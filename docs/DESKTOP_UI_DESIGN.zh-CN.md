@@ -173,7 +173,7 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 
 ### Slice B — Add Sheet 与原生设置（部分实现）
 
-- 增加 URL 校验、任务 ID 推导和原生目标选择器。[ ]
+- 增加 URL 校验和任务 ID 推导。[ ]
 - 通过 Tauri dialog plugin 增加原生目标保存对话框。[x]
 - 增加读取/保存 Desktop 设置的 Tauri 命令。[x]
 - Add 流程在创建任务后自动排队。[x]
