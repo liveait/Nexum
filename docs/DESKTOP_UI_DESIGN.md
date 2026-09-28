@@ -2,7 +2,7 @@
 
 Status: implemented macOS Desktop UI baseline; remaining items are called out as planned.
 
-This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards, Add Download sheet with a native destination selector, status bar, and planned-capability placeholders described here. Server events, keyboard shortcuts, and localization remain later slices.
+This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards, Add Download sheet with a native destination selector, status bar, event-driven refresh, and planned-capability placeholders described here. Keyboard shortcuts and localization remain later slices.
 
 For the Chinese version, see [DESKTOP_UI_DESIGN.zh-CN.md](DESKTOP_UI_DESIGN.zh-CN.md).
 
@@ -124,9 +124,9 @@ The current server requires an explicit task ID and destination, so the first im
 Settings is a dedicated page with grouped sections. It is not a second task workflow:
 
 - **Server:** address (default `127.0.0.1:39100`), Connect/Test, last connection result, and protocol version.
-- **Updates:** refresh policy (Automatic, Manual, or a configured interval while polling is enabled).
+- **Updates:** Automatic uses event refreshes and a five-second idle or one-second active polling fallback when the stream is disconnected; Manual disables that polling fallback.
 - **Appearance:** follow the system appearance; reserve language and accent choices for the client settings model.
-- **Notifications:** reserve this section for task completion and failure notifications after the notification contract is defined.
+- **Notifications:** show task completion, failure, and retry events in the session Activity Center; reserve delivery preferences and mute controls for a later slice.
 - A note that the Server is a separate process in the first release.
 
 Persist the address and refresh policy in the macOS application support directory through a Tauri command. Do not rely only on React state or browser storage. Credentials should not be displayed in this page until server-side authentication is enforced.
@@ -141,14 +141,22 @@ TaskData = { items, selectedId, lastUpdatedAt }
 OperationState = { [taskId]: idle | running }
 ```
 
-Until the server publishes events, use adaptive polling:
+The Desktop opens a dedicated `events.subscribe` TCP connection through a Tauri background thread. The Server sends `events.event` JSON-RPC notifications with incremental Task or Scheduler data, plus a heartbeat every 15 seconds to keep the connection alive. Tauri ignores heartbeats; React debounces task and scheduler notifications and refreshes the full task snapshot because an update does not contain a complete `TaskView`.
+
+While the event stream is connected, use event-driven refreshes:
+
+- Show a live-updates status when the subscription is active.
+- Refresh after a short debounce so progress bursts do not create overlapping `task.list` calls.
+- Keep manual Refresh as a recovery action.
+
+When the stream is disconnected, use adaptive polling as a fallback:
 
 - 1 second while any task is Downloading or a request is active.
 - 5 seconds while connected and idle.
-- Stop polling when the window is hidden or disconnected.
+- Stop polling when the window is hidden.
 - Keep `lastUpdatedAt` and show “Updated just now / X ago” in the toolbar.
 
-When a server event stream exists, replace active polling with event updates and retain manual Refresh as a recovery action.
+The stream has no replay buffer. A reconnect or dropped subscription starts with a full task snapshot, and the UI continues to keep the last successful snapshot when a refresh fails.
 
 The RPC boundary stays in Rust/Tauri commands. React owns presentation state and never opens a TCP socket or interprets JSON-RPC errors directly.
 
@@ -182,6 +190,7 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 
 - Add adaptive polling and refresh timestamps. [x]
 - Add progress bars, state badges, and inspector details. [x]
+- Add the dedicated Server event subscription, Tauri event bridge, and debounced task refresh. [x]
 - Add stale-data indicators, keyboard shortcuts, accessibility labels, and context menus. [ ]
 
 ### Slice D — macOS release polish
@@ -196,7 +205,7 @@ The current implementation satisfies these baseline behaviors:
 
 - A user can identify connection state and task state without opening a detail view.
 - Adding a download requires no manual JSON-RPC or CLI step.
-- Active progress updates without pressing Refresh.
+- Active progress updates without pressing Refresh when the event stream is connected, with polling fallback when it is not.
 - A failed request does not erase the last useful task list.
 - Pause, resume, and remove actions are available only in valid states and report their result.
 - Restarting the app preserves the Server address and refresh policy.

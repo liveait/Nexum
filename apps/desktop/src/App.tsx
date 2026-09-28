@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
@@ -39,6 +40,19 @@ interface Notice {
   message: string;
   tone: NoticeTone;
   createdAt: number;
+}
+
+interface ServerEvent {
+  server: string;
+  sequence: number;
+  event: string;
+  data: Record<string, unknown>;
+}
+
+interface EventStreamStatus {
+  server: string;
+  connected: boolean;
+  error: string | null;
 }
 
 const DEFAULT_SERVER = "127.0.0.1:39100";
@@ -149,6 +163,7 @@ export default function App() {
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
+  const [eventStreamConnected, setEventStreamConnected] = useState(false);
   const [loading, setLoading] = useState(false);
   const [actionByTask, setActionByTask] = useState<Record<string, TaskCommand | "start">>({});
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -165,6 +180,7 @@ export default function App() {
   const [addLoading, setAddLoading] = useState(false);
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
+  const eventRefreshTimer = useRef<number | null>(null);
 
   const pushNotification = (message: string, tone: NoticeTone) => {
     const item = { id: Date.now(), message, tone, createdAt: Date.now() };
@@ -178,14 +194,17 @@ export default function App() {
     }
   };
 
-  const refreshTasks = async (address = server): Promise<void> => {
+  const refreshTasks = async (address = server, options: { silent?: boolean } = {}): Promise<void> => {
+    const silent = options.silent ?? false;
     if (!address.trim()) {
       setConnection("error");
       pushNotification("Enter a Server address first.", "error");
       return;
     }
-    setLoading(true);
-    setConnection("connecting");
+    if (!silent) {
+      setLoading(true);
+      setConnection("connecting");
+    }
     setError("");
     try {
       const result = await invoke<TaskItem[]>("task_list", { server: address });
@@ -197,7 +216,7 @@ export default function App() {
       setConnection("error");
       setError(errorMessage(caught));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -217,6 +236,76 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!settingsReady || !server.trim()) return undefined;
+    let active = true;
+    let eventUnlisten: UnlistenFn | undefined;
+    let statusUnlisten: UnlistenFn | undefined;
+    let streamGeneration: number | undefined;
+
+    const scheduleRefresh = () => {
+      if (!active || eventRefreshTimer.current !== null) return;
+      eventRefreshTimer.current = window.setTimeout(() => {
+        eventRefreshTimer.current = null;
+        if (active) void refreshTasks(server, { silent: true });
+      }, 120);
+    };
+
+    const handleServerEvent = (payload: ServerEvent) => {
+      if (payload.server !== server) return;
+      if (!payload.event.startsWith("task.") && !payload.event.startsWith("scheduler.")) return;
+      scheduleRefresh();
+      const taskId = typeof payload.data.task_id === "string" ? payload.data.task_id : "Task";
+      if (payload.event === "scheduler.completed") pushNotification(`${taskId} completed`, "success");
+      if (payload.event === "scheduler.failed") pushNotification(`${taskId} failed`, "error");
+      if (payload.event === "scheduler.retrying") pushNotification(`${taskId} will retry`, "error");
+    };
+
+    const handleEventStreamStatus = (payload: EventStreamStatus) => {
+      if (!active || payload.server !== server) return;
+      setEventStreamConnected(payload.connected);
+      if (payload.connected) scheduleRefresh();
+    };
+
+    void Promise.all([
+      listen<ServerEvent>("server-event", ({ payload }) => { if (active) handleServerEvent(payload); }),
+      listen<EventStreamStatus>("server-event-status", ({ payload }) => handleEventStreamStatus(payload)),
+    ])
+      .then(([removeEvent, removeStatus]) => {
+        if (!active) {
+          removeEvent();
+          removeStatus();
+          return;
+        }
+        eventUnlisten = removeEvent;
+        statusUnlisten = removeStatus;
+        return invoke<number>("start_event_stream", { server }).then((generation) => {
+          if (!active) {
+            return invoke("stop_event_stream", { generation });
+          }
+          streamGeneration = generation;
+          return undefined;
+        });
+      })
+      .catch((caught) => { if (active) { setEventStreamConnected(false); setError(errorMessage(caught)); } });
+
+    return () => {
+      active = false;
+      if (eventRefreshTimer.current !== null) {
+        window.clearTimeout(eventRefreshTimer.current);
+        eventRefreshTimer.current = null;
+      }
+      eventUnlisten?.();
+      statusUnlisten?.();
+      setEventStreamConnected(false);
+      if (streamGeneration !== undefined) {
+        void invoke("stop_event_stream", { generation: streamGeneration }).catch(() => undefined);
+      }
+    };
+    // Event subscriptions follow the active server and settings only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server, settingsReady]);
+
+  useEffect(() => {
     if (settingsReady) void refreshTasks();
     // refreshTasks intentionally follows the active server only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -226,14 +315,14 @@ export default function App() {
   const pollingSeconds = refreshSeconds > 0 && activeDownload ? 1 : refreshSeconds;
 
   useEffect(() => {
-    if (!settingsReady || pollingSeconds <= 0 || connection === "error") return undefined;
+    if (!settingsReady || eventStreamConnected || pollingSeconds <= 0) return undefined;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void refreshTasks();
     }, pollingSeconds * 1000);
     return () => window.clearInterval(timer);
     // refreshTasks is intentionally kept behind the active server/settings inputs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connection, pollingSeconds, server, settingsReady]);
+  }, [connection, eventStreamConnected, pollingSeconds, server, settingsReady]);
 
   const counts = useMemo(() => DOWNLOAD_FILTERS.reduce<Record<TaskFilter, number>>((result, item) => {
     result[item.id] = tasks.filter((task) => matchesFilter(task, item.id)).length;
@@ -374,6 +463,7 @@ export default function App() {
             selectedTask={selectedTask}
             actionByTask={actionByTask}
             connection={connection}
+            eventStreamConnected={eventStreamConnected}
             server={server}
             loading={loading}
             error={error}
@@ -422,7 +512,7 @@ export default function App() {
 }
 
 function DownloadsView({
-  tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
+  tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, eventStreamConnected, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
   onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onAdd, onPause, onResume, onRemove, onQueue, onStart,
 }: {
   tasks: TaskItem[];
@@ -432,6 +522,7 @@ function DownloadsView({
   selectedTask: TaskItem | null;
   actionByTask: Record<string, TaskCommand | "start">;
   connection: ConnectionState;
+  eventStreamConnected: boolean;
   server: string;
   loading: boolean;
   error: string;
@@ -465,7 +556,7 @@ function DownloadsView({
       <div className="download-content">
         {visibleTasks.length === 0 ? <EmptyDownloads onAdd={onAdd} hasFilter={filter !== "all" || Boolean(searchQuery)} /> : <div className="download-layout"><section className="task-list" aria-label="Downloads">{visibleTasks.map((task) => <TaskRow key={task.id} task={task} selected={selectedTask?.id === task.id} action={actionByTask[task.id]} onSelect={() => onSelect(task.id)} onPause={() => onPause(task.id)} onResume={() => onResume(task.id)} onRemove={() => onRemove(task.id)} onQueue={() => onQueue(task.id)} onStart={() => onStart(task.id)} />)}</section>{showInspector && <TaskInspector task={selectedTask} server={server} />}</div>}
       </div>
-      <footer className="status-bar"><span className="status-mode">HTTP/HTTPS</span><span className="status-transfer"><span>↓ —</span><span>↑ —</span></span><span className="status-spacer" /><span className="status-item"><span className={`status-light ${connection}`} />{connection === "connected" ? "Server connected" : "Server unavailable"}</span><span className="status-item"><span className="status-light ready" />{loading ? "Syncing" : formatUpdatedAt(lastUpdatedAt)}</span></footer>
+      <footer className="status-bar"><span className="status-mode">HTTP/HTTPS</span><span className="status-transfer"><span>↓ —</span><span>↑ —</span></span><span className="status-spacer" /><span className="status-item"><span className={`status-light ${connection}`} />{connection === "connected" ? "Server connected" : "Server unavailable"}</span><span className="status-item"><span className={`status-light ${eventStreamConnected ? "ready" : "connecting"}`} />{eventStreamConnected ? "Live updates" : "Polling fallback"}</span><span className="status-item"><span className="status-light ready" />{loading ? "Syncing" : formatUpdatedAt(lastUpdatedAt)}</span></footer>
       <button className="floating-add" onClick={onAdd} title="Add download">＋</button>
       <span className="sr-only">{title}</span>
     </>

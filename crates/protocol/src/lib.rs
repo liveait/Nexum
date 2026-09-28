@@ -416,6 +416,41 @@ impl EventEnvelope {
     }
 }
 
+/// A JSON-RPC notification sent on a subscribed event connection.
+///
+/// Event notifications intentionally carry incremental data. Clients should
+/// refresh their task snapshot after receiving one instead of trying to build a
+/// complete TaskView from the event payload.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct EventNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: EventNotificationParams,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct EventNotificationParams {
+    pub sequence: u64,
+    pub event: String,
+    pub data: Value,
+}
+
+impl EventNotification {
+    pub const METHOD: &'static str = "events.event";
+
+    pub fn new(sequence: u64, event: EventEnvelope) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.into(),
+            method: Self::METHOD.into(),
+            params: EventNotificationParams {
+                sequence,
+                event: event.event,
+                data: event.data,
+            },
+        }
+    }
+}
+
 pub fn serialize_response(response: &RpcResponse) -> Result<String, RpcError> {
     serde_json::to_string(response).map_err(|error| RpcError::Parse(error.to_string()))
 }
@@ -675,6 +710,20 @@ mod tests {
         buffer.collect_core(&mut core);
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.drain()[0].event, "task.created");
+    }
+
+    #[test]
+    fn event_notification_serializes_as_json_rpc_notification() {
+        let notification = EventNotification::new(
+            7,
+            EventEnvelope::new("task.created", json!({"task_id": "t1"})),
+        );
+        let value = serde_json::to_value(notification).unwrap();
+        assert_eq!(value["jsonrpc"], "2.0");
+        assert_eq!(value["method"], "events.event");
+        assert_eq!(value["params"]["sequence"], 7);
+        assert_eq!(value["params"]["event"], "task.created");
+        assert_eq!(value["params"]["data"]["task_id"], "t1");
     }
 
     #[test]

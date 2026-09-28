@@ -2,7 +2,7 @@
 
 状态：已实现 macOS Desktop UI 基线；剩余项目已标注为计划项。
 
-本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、Settings 卡片、带原生目标选择器的 Add Download Sheet、状态栏和计划能力占位。Server 事件、快捷键和本地化仍属于后续切片。
+本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、Settings 卡片、带原生目标选择器的 Add Download Sheet、状态栏、事件驱动刷新和计划能力占位。快捷键和本地化仍属于后续切片。
 
 英文版见 [DESKTOP_UI_DESIGN.md](DESKTOP_UI_DESIGN.md)。
 
@@ -124,9 +124,9 @@ Sheet 只承担一条清晰流程：
 设置是一个独立页面，按分区组织内容，不是第二个任务工作流：
 
 - **Server：** 地址（默认 `127.0.0.1:39100`）、连接/测试按钮、最近连接结果和协议版本。
-- **更新：** 刷新策略（自动、手动或启用轮询后的时间间隔）。
+- **更新：** 自动策略使用事件刷新；事件流断开时回退到空闲每五秒、下载中每秒的轮询。手动策略会禁用该轮询回退。
 - **外观：** 跟随系统外观；语言和强调色选择先预留给客户端设置模型。
-- **通知：** Server 定义任务完成和失败通知契约后，再加入通知设置。
+- **通知：** 在本次 Desktop 会话的 Activity Center 显示任务完成、失败和重试事件；通知偏好与静音控制留待后续切片。
 - 第一版 Server 是独立进程的说明。
 
 通过 Tauri 命令将地址和刷新策略保存到 macOS Application Support 目录。不能只依赖 React state 或浏览器存储。Server 认证真正执行前，不在此页面展示 Credential。
@@ -141,14 +141,22 @@ TaskData = { items, selectedId, lastUpdatedAt }
 OperationState = { [taskId]: idle | running }
 ```
 
-在 Server 发布事件之前使用自适应轮询：
+Desktop 通过 Tauri 后台线程建立独立的 `events.subscribe` TCP 连接。Server 发送带增量 Task 或 Scheduler 数据的 `events.event` JSON-RPC 通知，并每 15 秒发送一次 heartbeat 保持连接。Tauri 会忽略 heartbeat；由于更新通知不包含完整 `TaskView`，React 会对 Task 和 Scheduler 通知去抖后刷新完整 Task 快照。
+
+事件流连接时使用事件驱动刷新：
+
+- 订阅有效时显示实时更新状态。
+- 对进度事件做短暂去抖，避免并发发起多个 `task.list` 请求。
+- 保留手动 Refresh 作为恢复手段。
+
+事件流断开时使用自适应轮询回退：
 
 - 有任务处于 Downloading 或有请求进行中时，每 1 秒轮询。
 - 已连接且空闲时，每 5 秒轮询。
-- 窗口隐藏或断开时停止轮询。
+- 窗口隐藏时停止轮询。
 - 保存 `lastUpdatedAt`，在工具栏显示“刚刚更新 / X 前更新”。
 
-Server 事件流完成后，用事件更新替代活动轮询，同时保留手动刷新作为恢复手段。
+事件流没有回放缓冲。重连或订阅被丢弃后先获取完整 Task 快照；刷新失败时仍保留最近一次成功快照。
 
 RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直接打开 TCP Socket 或解析 JSON-RPC 错误。
 
@@ -182,6 +190,7 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 
 - 增加自适应轮询和刷新时间。[x]
 - 增加进度条、状态徽标和 Inspector 详情。[x]
+- 增加独立 Server 事件订阅、Tauri 事件桥接和去抖任务刷新。[x]
 - 增加过期数据标记、快捷键、可访问性标签和上下文菜单。[ ]
 
 ### Slice D — macOS 发布打磨
@@ -196,7 +205,7 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 
 - 不打开详情也能识别连接状态和任务状态。
 - 添加下载不需要手写 JSON-RPC 或执行 CLI。
-- 活动进度无需按 Refresh 就会更新。
+- 事件流连接时，活动进度无需按 Refresh 就会更新；事件流不可用时回退到轮询。
 - 请求失败不会清空最近一次有用的任务列表。
 - 只有合法状态显示暂停、恢复和删除操作，并报告执行结果。
 - 重启应用后保留 Server 地址和刷新策略。
