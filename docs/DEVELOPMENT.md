@@ -74,6 +74,8 @@ pnpm dev
 
 Vite uses port `1420`. The frontend calls Tauri commands, so testing the full application requires a running Nexum server and a native Tauri window. With the Tauri 2 CLI installed, keep Vite running and start `cargo tauri dev` from `apps/desktop` in another terminal. `pnpm build` runs the TypeScript compiler and Vite build; this is a separate check from Rust CI.
 
+The macOS-first information architecture, task states, add flow, settings, polling behavior, and implementation slices are documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md).
+
 ## Browser Extension
 
 From `apps/extension`:

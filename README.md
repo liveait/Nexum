@@ -38,6 +38,7 @@ cargo run -p nexum-cli -- task list
 - [Architecture](docs/ARCHITECTURE.md)
 - [Development Guide](docs/DEVELOPMENT.md)
 - [Development Plan](docs/DEVELOPMENT_PLAN.md)
+- [Desktop UI Design](docs/DESKTOP_UI_DESIGN.md)
 - [Changelog](CHANGELOG.md)
 - [Architecture Decisions](docs/decisions/README.md)
 - [Contributing](CONTRIBUTING.md)
