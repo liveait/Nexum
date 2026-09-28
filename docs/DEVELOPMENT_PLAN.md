@@ -63,7 +63,7 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Task/scheduler event envelopes and buffering
 - [x] Credential, TLS, and rate-limit types with protocol/security unit tests
 - [ ] Enforce protocol compatibility beyond envelope validation
-- [ ] Publish events through a server transport and expose them to clients
+- [x] Publish events through a dedicated TCP subscription and expose them to clients; reconnects begin with a full task snapshot because the stream has no replay buffer
 - [ ] Validate credentials and enforce authentication/TLS/rate limiting where configured
 
 ### Phase 7 - Server and CLI
@@ -86,7 +86,7 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Replace the prototype tabs with the documented sidebar/list/inspector shell
 - [x] Add an Add Download sheet that creates and queues a task
 - [x] Add a native destination chooser to the Add Download sheet through the Tauri dialog plugin
-- [x] Add periodic polling for progress and externally changed tasks; event-driven updates remain a later Server contract
+- [x] Add a Tauri event subscription with debounced task refreshes and retain periodic polling as a disconnected-stream fallback
 - [x] Persist server address and refresh policy through Tauri commands
 - [x] Surface connection/action failures without discarding the last successful task list
 - [ ] Add keyboard navigation, accessibility labels, system appearance, and English/Simplified Chinese UI strings
@@ -121,8 +121,8 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 
 ## 2. Delivery Order From Current Code
 
-1. Complete server/client contracts: authenticated transport where configured, observable events, and a browser-compatible endpoint or bridge.
-   - Publish the buffered task and scheduler events through a client subscription or stream.
+1. Complete the remaining server/client contracts: authenticated transport where configured, durable event-delivery semantics, and a browser-compatible endpoint or bridge.
+   - Specify reconnect, dropped-event, and replay behavior for the bounded event stream.
    - Decide whether the browser uses an HTTP JSON-RPC endpoint or a TCP bridge, then connect the extension send flow.
    - Enforce `require_auth`, `max_connections`, and configured TLS/rate-limit behavior.
 2. Finish the Desktop release layer: keyboard navigation, accessibility labels, reduced-motion/system appearance behavior, and English/Simplified Chinese strings.
@@ -131,4 +131,4 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 
 ## 3. Current Focus
 
-Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path. The macOS Desktop information architecture is documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md); the React surface now has the sidebar/list/inspector shell, Settings page, Add Download sheet with a native destination chooser, explicit RPC errors, adaptive polling, and persisted Server settings. The Server event stream, keyboard/accessibility layer, and localization remain outstanding.
+Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Task and Scheduler events now leave Core through the server event pump and a dedicated `events.subscribe` TCP stream; Desktop refreshes a full task snapshot after debounced notifications and falls back to polling when the stream is unavailable. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path. The macOS Desktop information architecture is documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md); the React surface now has the sidebar/list/inspector shell, Settings page, Add Download sheet with a native destination chooser, explicit RPC errors, adaptive event-driven refresh, and persisted Server settings. Keyboard/accessibility polish, localization, authentication, and browser transport remain outstanding.

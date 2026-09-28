@@ -114,6 +114,21 @@ impl ServerProcess {
         response["result"].clone()
     }
 
+    fn subscribe_events(&self) -> BufReader<TcpStream> {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "events.subscribe"});
+        writeln!(stream, "{request}").unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["result"]["subscribed"], true);
+        reader
+    }
+
     fn task_state(&self, id: &str) -> String {
         self.call("task.get", Some(json!({"id": id})))["state"]
             .as_str()
@@ -918,4 +933,45 @@ fn startup_fails_when_database_cannot_be_opened() {
     let output = server_output_with_timeout(dir.path(), None);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("nexum.sqlite"));
+}
+
+#[test]
+fn event_subscription_broadcasts_task_changes() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let mut events = server.subscribe_events();
+
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "streamed",
+            "source": "https://example.com/file",
+            "destination": dir.output_path("streamed").to_string_lossy(),
+        })),
+    );
+    server.call("task.queue", Some(json!({"id": "streamed"})));
+
+    let mut observed = Vec::new();
+    for _ in 0..12 {
+        let mut line = String::new();
+        events.read_line(&mut line).unwrap();
+        if line.trim().is_empty() {
+            continue;
+        }
+        let message: Value = serde_json::from_str(&line).unwrap();
+        if message["method"] == "events.event" {
+            observed.push(message["params"]["event"].as_str().unwrap().to_owned());
+        }
+        if observed.iter().any(|event| event == "task.created")
+            && observed.iter().any(|event| event == "scheduler.enqueued")
+        {
+            break;
+        }
+    }
+
+    assert!(observed.iter().any(|event| event == "task.created"));
+    assert!(observed.iter().any(|event| event == "task.state_changed"));
+    assert!(observed.iter().any(|event| event == "scheduler.enqueued"));
+    server.stop();
 }

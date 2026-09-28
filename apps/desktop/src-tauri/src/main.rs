@@ -112,10 +112,32 @@ fn task_remove(server: String, task_id: String) -> Result<bool, String> {
     desktop_lib::task_remove(&server, &task_id, 5000)
 }
 
+#[tauri::command]
+fn start_event_stream(
+    app: AppHandle,
+    state: tauri::State<'_, desktop_lib::EventSubscriptionManager>,
+    server: String,
+) -> Result<u64, String> {
+    if server.trim().is_empty() {
+        return Err("server address must not be empty".to_owned());
+    }
+    Ok(state.start(app, server))
+}
+
+#[tauri::command]
+fn stop_event_stream(
+    state: tauri::State<'_, desktop_lib::EventSubscriptionManager>,
+    generation: u64,
+) -> Result<(), String> {
+    state.stop(generation);
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .manage(desktop_lib::EventSubscriptionManager::default())
         .invoke_handler(tauri::generate_handler![
             server_version,
             task_list,
@@ -126,6 +148,8 @@ fn main() {
             task_pause,
             task_resume,
             task_remove,
+            start_event_stream,
+            stop_event_stream,
             load_settings,
             save_settings,
         ])

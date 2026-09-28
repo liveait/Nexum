@@ -13,8 +13,8 @@ use nexum_core::{
     nexum_task::TaskState,
 };
 use nexum_protocol::{
-    Credential, RpcDispatcher, RpcErrorObject, RpcRequest, RpcResponse, parse_request,
-    serialize_response,
+    Credential, EventBuffer, EventEnvelope, EventNotification, RpcDispatcher, RpcErrorObject,
+    RpcRequest, RpcResponse, parse_request, serialize_response,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -22,6 +22,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,64 @@ struct ServerState {
     data_dir: PathBuf,
     active_http: HashMap<TaskId, HttpTransfer>,
     active_destinations: HashSet<PathBuf>,
+    events: EventHub,
+}
+
+#[derive(Default)]
+struct EventHub {
+    next_sequence: u64,
+    next_subscriber: u64,
+    subscribers: HashMap<u64, SyncSender<EventNotification>>,
+}
+
+impl EventHub {
+    fn subscribe(&mut self) -> (u64, Receiver<EventNotification>) {
+        let (sender, receiver) = mpsc::sync_channel(256);
+        let id = self.next_subscriber;
+        self.next_subscriber = self.next_subscriber.saturating_add(1);
+        self.subscribers.insert(id, sender);
+        (id, receiver)
+    }
+
+    fn unsubscribe(&mut self, id: u64) {
+        self.subscribers.remove(&id);
+    }
+
+    fn publish(&mut self, events: Vec<EventEnvelope>) {
+        let mut closed = Vec::new();
+        for event in events {
+            self.next_sequence = self.next_sequence.saturating_add(1);
+            let notification = EventNotification::new(self.next_sequence, event);
+            for (&id, sender) in &self.subscribers {
+                match sender.try_send(notification.clone()) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                        closed.push(id)
+                    }
+                }
+            }
+        }
+        closed.sort_unstable();
+        closed.dedup();
+        for id in closed {
+            self.subscribers.remove(&id);
+        }
+    }
+
+    fn current_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    #[cfg(test)]
+    fn subscriber_count(&self) -> usize {
+        self.subscribers.len()
+    }
+}
+
+fn collect_core_events(state: &mut ServerState) {
+    let mut buffer = EventBuffer::new();
+    buffer.collect_core(&mut state.core);
+    state.events.publish(buffer.drain());
 }
 
 #[derive(Clone)]
@@ -745,6 +804,93 @@ fn dispatch_server_request(
     response
 }
 
+const EVENT_PUMP_INTERVAL: Duration = Duration::from_millis(50);
+const EVENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+fn spawn_event_pump(state: Arc<Mutex<ServerState>>) {
+    let result = std::thread::Builder::new()
+        .name("nexum-events".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(EVENT_PUMP_INTERVAL);
+                let mut locked = state.lock().expect("server state mutex poisoned");
+                collect_core_events(&mut locked);
+            }
+        });
+    if let Err(error) = result {
+        eprintln!("could not start event pump: {error}");
+    }
+}
+
+fn write_json_line(stream: &mut TcpStream, encoded: &str) -> io::Result<()> {
+    stream.write_all(encoded.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()
+}
+
+fn handle_event_subscription(
+    mut stream: TcpStream,
+    state: Arc<Mutex<ServerState>>,
+    request: RpcRequest,
+) -> io::Result<()> {
+    let (subscriber_id, receiver) = {
+        let mut locked = state.lock().expect("server state mutex poisoned");
+        locked.events.subscribe()
+    };
+
+    let acknowledged = request.id.clone().map(|id| {
+        RpcResponse::success(
+            Some(id),
+            serde_json::json!({"subscribed": true, "method": EventNotification::METHOD}),
+        )
+    });
+    if let Some(response) = acknowledged {
+        let encoded =
+            serialize_response(&response).map_err(|error| io::Error::other(error.to_string()))?;
+        if let Err(error) = write_json_line(&mut stream, &encoded) {
+            let mut locked = state.lock().expect("server state mutex poisoned");
+            locked.events.unsubscribe(subscriber_id);
+            return Err(error);
+        }
+    }
+
+    loop {
+        match receiver.recv_timeout(EVENT_HEARTBEAT_INTERVAL) {
+            Ok(notification) => {
+                let encoded = serde_json::to_string(&notification)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                if let Err(error) = write_json_line(&mut stream, &encoded) {
+                    let mut locked = state.lock().expect("server state mutex poisoned");
+                    locked.events.unsubscribe(subscriber_id);
+                    return Err(error);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let sequence = {
+                    let locked = state.lock().expect("server state mutex poisoned");
+                    locked.events.current_sequence()
+                };
+                let heartbeat = EventNotification::new(
+                    sequence,
+                    EventEnvelope::new("events.heartbeat", serde_json::json!({})),
+                );
+                let encoded = serde_json::to_string(&heartbeat)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                if let Err(error) = write_json_line(&mut stream, &encoded) {
+                    let mut locked = state.lock().expect("server state mutex poisoned");
+                    locked.events.unsubscribe(subscriber_id);
+                    return Err(error);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let mut locked = state.lock().expect("server state mutex poisoned");
+    locked.events.unsubscribe(subscriber_id);
+    Ok(())
+}
+
 fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) -> io::Result<()> {
     let reader_stream = stream.try_clone()?;
     let reader = BufReader::new(reader_stream);
@@ -768,6 +914,9 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) -> i
         }
 
         let response = match parse_request(&line) {
+            Ok(request) if request.method == "events.subscribe" => {
+                return handle_event_subscription(stream, state, request);
+            }
             Ok(request) => dispatch_server_request(&state, &request),
             Err(error) => {
                 let response =
@@ -948,10 +1097,12 @@ fn main() -> io::Result<()> {
         data_dir: std::fs::canonicalize(&config.data_dir)?,
         active_http: HashMap::new(),
         active_destinations: HashSet::new(),
+        events: EventHub::default(),
     }));
     let address = format!("127.0.0.1:{}", config.port);
     let listener = TcpListener::bind(&address)?;
 
+    spawn_event_pump(Arc::clone(&state));
     dispatch_available_http_tasks(&state);
 
     eprintln!("Nexum server listening on {address}");
@@ -1062,5 +1213,29 @@ mod tests {
         assert!(config_path.is_empty());
         assert!(!show_version);
         assert!(!show_help);
+    }
+
+    #[test]
+    fn event_hub_broadcasts_sequenced_notifications_and_cleans_closed_subscribers() {
+        let mut hub = EventHub::default();
+        let (_, first) = hub.subscribe();
+        let (_, second) = hub.subscribe();
+
+        hub.publish(vec![EventEnvelope::new(
+            "task.created",
+            serde_json::json!({"task_id": "one"}),
+        )]);
+
+        assert_eq!(first.recv().unwrap().params.sequence, 1);
+        assert_eq!(second.recv().unwrap().params.event, "task.created");
+        assert_eq!(hub.subscriber_count(), 2);
+
+        drop(first);
+        hub.publish(vec![EventEnvelope::new(
+            "task.removed",
+            serde_json::json!({"task_id": "one"}),
+        )]);
+        assert_eq!(hub.subscriber_count(), 1);
+        assert_eq!(second.recv().unwrap().params.sequence, 2);
     }
 }

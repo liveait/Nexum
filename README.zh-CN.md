@@ -11,7 +11,7 @@ Nexum 仍在开发中。目前可运行的主线是用于创建和管理任务�
 
 ## 当前状态
 
-CLI 和早期 Tauri Desktop 客户端可调用本地 Server；Desktop 需要单独运行 Server。Server 在数据目录（默认 `./data`）下打开 `nexum.sqlite`，启动时恢复已保存的任务。排队支持的 HTTP/HTTPS 任务、带排队任务重启 Server，或活动 HTTP 传输完成/失败后，Server 都会自动填充可用的 Scheduler 槽位。中断的 HTTP 响应在稳定的部分文件、sidecar 以及 ETag 或 Last-Modified 校验器仍与服务端确认的范围匹配时，可以在重启后续传。`task.start` 仍可作为手动 kick 和兼容接口，用于启动一个排队的 HTTP/HTTPS 任务，之后同一派发器会继续填充其他可用槽位。Magnet 和本地文件来源可以创建任务，但尚无传输路径。Browser Extension 原型请求 HTTP `/jsonrpc`，而 Server 仅提供 TCP，因此扩展目前无法向它提交任务。
+CLI 和早期 Tauri Desktop 客户端可调用本地 Server；Desktop 需要单独运行 Server。Server 在数据目录（默认 `./data`）下打开 `nexum.sqlite`，启动时恢复已保存的任务。排队支持的 HTTP/HTTPS 任务、带排队任务重启 Server，或活动 HTTP 传输完成/失败后，Server 都会自动填充可用的 Scheduler 槽位。中断的 HTTP 响应在稳定的部分文件、sidecar 以及 ETag 或 Last-Modified 校验器仍与服务端确认的范围匹配时，可以在重启后续传。`task.start` 仍可作为手动 kick 和兼容接口，用于启动一个排队的 HTTP/HTTPS 任务，之后同一派发器会继续填充其他可用槽位。Desktop 现在通过独立 TCP 事件流订阅进行去抖的实时任务刷新；事件流不可用时回退到轮询。Magnet 和本地文件来源可以创建任务，但尚无传输路径。Browser Extension 原型请求 HTTP `/jsonrpc`，而 Server 仅提供 TCP，因此扩展目前无法向它提交任务。
 
 运行中的 Server 尚未启用认证、TLS、限流、可执行插件或真实媒体处理。代码边界与调用路径见[架构设计](docs/ARCHITECTURE.zh-CN.md)，后续集成工作见[开发计划](docs/DEVELOPMENT_PLAN.zh-CN.md)。
 

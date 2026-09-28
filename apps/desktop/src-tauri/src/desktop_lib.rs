@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter};
 
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -23,6 +27,239 @@ pub struct RpcResult {
     pub result: Option<Value>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ServerEvent {
+    #[serde(default)]
+    pub server: String,
+    pub sequence: u64,
+    pub event: String,
+    pub data: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct EventStreamStatus {
+    pub server: String,
+    pub connected: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Default)]
+pub struct EventSubscriptionManager {
+    next_generation: AtomicU64,
+    active: Mutex<Option<ActiveSubscription>>,
+}
+
+struct ActiveSubscription {
+    generation: u64,
+    stop: Arc<AtomicBool>,
+}
+
+impl EventSubscriptionManager {
+    pub fn start(&self, app: AppHandle, server: String) -> u64 {
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let stop = Arc::new(AtomicBool::new(false));
+        let previous = self
+            .active
+            .lock()
+            .expect("event subscription mutex poisoned")
+            .replace(ActiveSubscription {
+                generation,
+                stop: Arc::clone(&stop),
+            });
+        if let Some(previous) = previous {
+            previous.stop.store(true, Ordering::Release);
+        }
+
+        std::thread::Builder::new()
+            .name("nexum-events".to_owned())
+            .spawn(move || run_event_subscription(app, server, stop))
+            .expect("could not start desktop event subscription");
+        generation
+    }
+
+    pub fn stop(&self, generation: u64) {
+        let mut active = self
+            .active
+            .lock()
+            .expect("event subscription mutex poisoned");
+        if active
+            .as_ref()
+            .is_some_and(|subscription| subscription.generation == generation)
+            && let Some(subscription) = active.take()
+        {
+            subscription.stop.store(true, Ordering::Release);
+        }
+    }
+}
+
+const EVENT_CONNECT_RETRY_MIN: Duration = Duration::from_millis(250);
+const EVENT_CONNECT_RETRY_MAX: Duration = Duration::from_secs(5);
+const EVENT_READ_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn run_event_subscription(app: AppHandle, server: String, stop: Arc<AtomicBool>) {
+    let mut retry_delay = EVENT_CONNECT_RETRY_MIN;
+    while !stop.load(Ordering::Acquire) {
+        match connect_event_stream(&server, &stop) {
+            Ok(mut reader) => {
+                retry_delay = EVENT_CONNECT_RETRY_MIN;
+                let _ = app.emit(
+                    "server-event-status",
+                    EventStreamStatus {
+                        server: server.clone(),
+                        connected: true,
+                        error: None,
+                    },
+                );
+                let disconnected_error;
+                loop {
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => {
+                            disconnected_error = Some("event stream closed".to_owned());
+                            break;
+                        }
+                        Ok(_) => {
+                            if let Some(mut event) = parse_server_event(&line)
+                                && event.event != "events.heartbeat"
+                            {
+                                event.server = server.clone();
+                                let _ = app.emit("server-event", event);
+                            }
+                        }
+                        Err(error) if is_timeout(&error) => continue,
+                        Err(error) => {
+                            disconnected_error = Some(format!("event stream read failed: {error}"));
+                            break;
+                        }
+                    }
+                }
+                let _ = app.emit(
+                    "server-event-status",
+                    EventStreamStatus {
+                        server: server.clone(),
+                        connected: false,
+                        error: disconnected_error,
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    "server-event-status",
+                    EventStreamStatus {
+                        server: server.clone(),
+                        connected: false,
+                        error: Some(error),
+                    },
+                );
+            }
+        }
+
+        if wait_for_stop(&stop, retry_delay) {
+            return;
+        }
+        retry_delay = std::cmp::min(retry_delay.saturating_mul(2), EVENT_CONNECT_RETRY_MAX);
+    }
+}
+
+fn connect_event_stream(server: &str, stop: &AtomicBool) -> Result<BufReader<TcpStream>, String> {
+    if stop.load(Ordering::Acquire) {
+        return Err("event subscription stopped".to_owned());
+    }
+    let mut stream = TcpStream::connect(server).map_err(|error| format!("connect: {error}"))?;
+    stream
+        .set_read_timeout(Some(EVENT_READ_TIMEOUT))
+        .map_err(|error| format!("read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(EVENT_READ_TIMEOUT))
+        .map_err(|error| format!("write timeout: {error}"))?;
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "events.subscribe"
+    });
+    let payload = serde_json::to_string(&request).map_err(|error| format!("serialize: {error}"))?;
+    stream
+        .write_all(payload.as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
+        .and_then(|_| stream.flush())
+        .map_err(|error| format!("write: {error}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let ack = read_line_until_available(&mut reader, stop)?
+        .ok_or_else(|| "event stream closed before acknowledgement".to_owned())?;
+    let response: Value =
+        serde_json::from_str(&ack).map_err(|error| format!("parse ack: {error}"))?;
+    if let Some(error) = response.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("event subscription rejected");
+        return Err(message.to_owned());
+    }
+    if response
+        .get("result")
+        .and_then(|result| result.get("subscribed"))
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("server returned an invalid event subscription acknowledgement".to_owned());
+    }
+    Ok(reader)
+}
+
+fn read_line_until_available(
+    reader: &mut BufReader<TcpStream>,
+    stop: &AtomicBool,
+) -> Result<Option<String>, String> {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return Ok(None),
+            Ok(_) => return Ok(Some(line)),
+            Err(error) if is_timeout(&error) => continue,
+            Err(error) => return Err(format!("read: {error}")),
+        }
+    }
+}
+
+fn parse_server_event(line: &str) -> Option<ServerEvent> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    if value.get("jsonrpc")?.as_str()? != "2.0" || value.get("method")?.as_str()? != "events.event"
+    {
+        return None;
+    }
+    let mut event: ServerEvent = serde_json::from_value(value.get("params")?.clone()).ok()?;
+    event.server.clear();
+    Some(event)
+}
+
+fn is_timeout(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
+fn wait_for_stop(stop: &AtomicBool, duration: Duration) -> bool {
+    let mut remaining = duration;
+    while !remaining.is_zero() {
+        if stop.load(Ordering::Acquire) {
+            return true;
+        }
+        let slice = std::cmp::min(remaining, Duration::from_millis(50));
+        std::thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
+    }
+    stop.load(Ordering::Acquire)
 }
 
 impl RpcResult {
@@ -218,5 +455,15 @@ mod tests {
         // We can't actually test with a real server without one running,
         // but this test verifies the function signature is correct.
         let _ = call_rpc("127.0.0.1:1", "server.version", None, 1000);
+    }
+
+    #[test]
+    fn parses_event_notification_and_ignores_other_lines() {
+        let line = r#"{"jsonrpc":"2.0","method":"events.event","params":{"sequence":4,"event":"task.created","data":{"task_id":"t1"}}}"#;
+        let event = parse_server_event(line).expect("event notification should parse");
+        assert_eq!(event.sequence, 4);
+        assert_eq!(event.event, "task.created");
+        assert_eq!(event.data["task_id"], "t1");
+        assert!(parse_server_event(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#).is_none());
     }
 }
