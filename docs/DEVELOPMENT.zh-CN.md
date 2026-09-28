@@ -72,7 +72,7 @@ pnpm install
 pnpm dev
 ```
 
-Vite 使用 `1420` 端口。前端调用 Tauri 命令，因此测试完整应用还需要运行中的 Nexum Server 和原生 Tauri 窗口。安装 Tauri 2 CLI 后，保持 Vite 运行，并在另一个终端从 `apps/desktop` 执行 `cargo tauri dev`。`pnpm build` 会执行 TypeScript 编译和 Vite 构建；这是 Rust CI 之外的检查。
+Vite 使用 `1420` 端口。前端调用 Tauri 命令和 Tauri dialog plugin，因此测试完整应用还需要运行中的 Nexum Server 和原生 Tauri 窗口。安装 Tauri 2 CLI 后，保持 Vite 运行，并在另一个终端从 `apps/desktop` 执行 `cargo tauri dev`。`pnpm build` 会执行 TypeScript 编译和 Vite 构建；这是 Rust CI 之外的检查。
 
 macOS 优先的信息架构、任务状态、添加流程、设置、轮询行为和实现切片见 [Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)。
 

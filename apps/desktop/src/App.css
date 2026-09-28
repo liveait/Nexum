@@ -1154,6 +1154,24 @@ input::placeholder {
   font-size: 12px;
 }
 
+.input-with-action {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.input-with-action input {
+  min-width: 0;
+  flex: 1;
+}
+
+.chooser-button {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding-inline: 11px;
+  white-space: nowrap;
+}
+
 .settings-card input,
 .settings-card select,
 .modal input {
