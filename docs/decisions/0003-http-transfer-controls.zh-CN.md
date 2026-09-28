@@ -25,7 +25,7 @@ Server 已经同时拥有 Worker、Core 锁、Scheduler 槽位、目标登记和
 
 - 暂停和恢复只在同一 Server 进程以及 HTTP 响应仍保持有效时生效。远端或网络关闭空闲响应时，恢复仍可能失败。
 - 阻塞中的响应读取无法立即观察 Condvar，因此 `task.pause` 可能要等到 30 分钟 HTTP 请求超时。`task.remove` 最多等待 Worker 30 秒；Worker 仍阻塞时返回错误，退出后可以重试删除。
-- 重启恢复仍会将中断任务重置为 `Queued` 并从零开始。基于 Range 的跨重启续传另行决策。
+- 重启恢复仍会将中断任务归一为 `Queued`；带校验的跨重启 Range 续传由[ADR 0004](0004-cross-restart-http-resume.zh-CN.md)定义，没有可用校验器的响应仍从零开始。
 - 现有 JSON-RPC 返回形状不变：暂停和删除返回 `true`，恢复返回 `true` 或 `false`。
 
 ## 被考虑的替代方案

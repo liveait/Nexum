@@ -3,7 +3,10 @@
 use nexum_core::{
     Core,
     nexum_domain::TaskId,
-    nexum_engine::{EngineError, HttpEngine, HttpTransferControl},
+    nexum_engine::{
+        EngineError, HttpEngine, HttpTransferControl, remove_resumable_files,
+        resumable_partial_progress,
+    },
     nexum_resolver::ResolveKind,
     nexum_scheduler::SchedulerConfig,
     nexum_storage::SqliteRepository,
@@ -39,6 +42,7 @@ struct HttpTransfer {
     source: String,
     destination: String,
     destination_path: PathBuf,
+    partial_path: PathBuf,
     control: HttpTransferControl,
     completion: Arc<HttpWorkerCompletion>,
     latest_progress: Arc<Mutex<nexum_core::nexum_domain::Progress>>,
@@ -90,6 +94,14 @@ impl HttpWorkerCompletion {
 const PROGRESS_MIN_BYTES: u64 = 1024 * 1024;
 const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
 const HTTP_CONTROL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn resumable_partial_path(destination: &Path) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .expect("checked destination has a file name")
+        .to_string_lossy();
+    destination.with_file_name(format!(".{file_name}.nexum.part"))
+}
 
 #[derive(Default)]
 struct ProgressReporter {
@@ -186,9 +198,10 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
     let latest_progress = Arc::clone(&transfer.latest_progress);
     let control = transfer.control.clone();
     let mut progress_reporter = ProgressReporter::default();
-    let result = HttpEngine::new().download_to_with_control(
+    let result = HttpEngine::new().download_to_resumable_with_control(
         &transfer.source,
         &transfer.destination,
+        &transfer.partial_path,
         &control,
         move |progress| {
             *latest_progress
@@ -365,20 +378,32 @@ fn claim_next_http_transfer(
         .to_str()
         .expect("RPC destination path is valid UTF-8")
         .to_owned();
+    let partial_path = resumable_partial_path(&destination_path);
+    let resume_progress = resumable_partial_progress(&source, &destination, &partial_path)
+        .ok()
+        .flatten();
     let id = match state.core.claim_queued(&next_id) {
         Ok(true) => next_id,
         Ok(false) => return Ok(None),
         Err(error) => return Err(RpcErrorObject::internal_error(format!("{error:?}"))),
     };
+    if let Some(progress) = resume_progress.clone()
+        && let Err(error) = state.core.update_progress(&id, progress)
+    {
+        return Err(RpcErrorObject::internal_error(format!(
+            "could not restore HTTP resume progress: {error:?}"
+        )));
+    }
     let active_destination = destination_path.clone();
     let transfer = HttpTransfer {
         id: id.clone(),
         source,
         destination,
         destination_path,
+        partial_path,
         control: HttpTransferControl::new(),
         completion: Arc::new(HttpWorkerCompletion::default()),
-        latest_progress: Arc::new(Mutex::new(nexum_core::nexum_domain::Progress::default())),
+        latest_progress: Arc::new(Mutex::new(resume_progress.unwrap_or_default())),
         remove_requested: Arc::new(AtomicBool::new(false)),
     };
     state.active_http.insert(id, transfer.clone());
@@ -615,6 +640,7 @@ fn remove_active_http_task(
     id: &TaskId,
 ) -> Option<RpcResponse> {
     let mut destination_path = None;
+    let mut partial_path = None;
     loop {
         let active = {
             let locked = state.lock().expect("server state mutex poisoned");
@@ -625,6 +651,7 @@ fn remove_active_http_task(
         };
 
         destination_path = Some(active.destination_path.clone());
+        partial_path = Some(active.partial_path.clone());
         active.remove_requested.store(true, Ordering::Release);
         active.control.cancel();
         if active.completion.wait(HTTP_CONTROL_WAIT_TIMEOUT).is_none() {
@@ -647,6 +674,11 @@ fn remove_active_http_task(
                         destination_path =
                             checked_destination(task.destination.as_str(), &locked.data_dir).ok();
                     }
+                    if partial_path.is_none()
+                        && let Some(path) = destination_path.as_ref()
+                    {
+                        partial_path = Some(resumable_partial_path(path));
+                    }
                     None
                 }
                 Err(error) => {
@@ -665,6 +697,9 @@ fn remove_active_http_task(
     if let Some(path) = destination_path {
         let mut locked = state.lock().expect("server state mutex poisoned");
         locked.active_destinations.remove(&path);
+    }
+    if let Some(path) = partial_path {
+        remove_resumable_files(path);
     }
     dispatch_available_http_tasks(state);
     reply_bool(request, true)

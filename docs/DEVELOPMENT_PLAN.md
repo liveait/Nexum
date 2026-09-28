@@ -52,7 +52,8 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Run the HTTP engine from the server dispatcher; CLI and Desktop use the same RPC and may still call `task.start` as a manual kick
 - [x] Stage HTTP downloads in a `.part` file and rename only a complete response to the destination
 - [x] Add incremental progress reporting and persistence for real transfers
-- [x] Add cooperative cancellation and same-process pause/resume behavior for server HTTP transfers; cross-restart Range resume remains planned
+- [x] Add cooperative cancellation and same-process pause/resume behavior for server HTTP transfers
+- [x] Add cross-restart HTTP resume with a stable destination-side partial file, atomic sidecar metadata, ETag/Last-Modified validation, and `Range`/`If-Range` requests; restart from zero when the validator or response range does not match
 
 ### Phase 6 - Nexum Protocol and Security
 
@@ -114,11 +115,15 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 
 ## 2. Delivery Order From Current Code
 
-1. Add cross-restart HTTP resume with stable partial files, validators, and Range requests.
+1. Complete cross-restart HTTP resume with stable partial files, validators, and Range requests.
+   - Keep one hidden partial file beside each destination and an atomic JSON sidecar containing the source, destination, validator, and expected length.
+   - Resume only when the sidecar matches the task and the server confirms the requested range; a changed or missing validator falls back to a fresh response.
+   - Preserve resumable partial data across process exit, but remove it with the sidecar on successful commit, cancellation, or task removal.
+   - Keep this protocol inside the server-owned HTTP worker path; the synchronous `EngineAdapter` contract remains unchanged.
 2. Complete server/client contracts: authenticated transport where configured, observable events, and a browser-compatible endpoint or bridge.
 3. Connect plugin providers and enforce their declared permissions.
 4. Replace simulated media operations with real processing, then expose automation and remote-device workflows.
 
 ## 3. Current Focus
 
-Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them on restart, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. Restart recovery still starts from byte zero. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path.
+Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path.

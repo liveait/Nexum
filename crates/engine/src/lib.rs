@@ -2,6 +2,9 @@
 
 use nexum_domain::{Progress, TaskId};
 use nexum_task::TaskState;
+use reqwest::StatusCode;
+use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -384,6 +387,176 @@ impl HttpTransferControl {
         wake.notify_all();
         Ok(())
     }
+
+    fn finish_resumable_download(
+        &self,
+        temporary: ResumableDownload,
+        destination: &Path,
+    ) -> Result<(), EngineError> {
+        let (lock, wake) = &*self.inner;
+        let mut state = lock.lock().expect("HTTP transfer control mutex poisoned");
+        if state.cancelled {
+            return Err(EngineError::Cancelled);
+        }
+
+        temporary.finish(destination)?;
+        state.committed = true;
+        state.finished = true;
+        state.pause_requested = false;
+        state.paused = false;
+        wake.notify_all();
+        Ok(())
+    }
+}
+
+/// The validator that makes a partial HTTP response safe to continue.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum HttpResumeValidator {
+    Etag(String),
+    LastModified(String),
+}
+
+impl HttpResumeValidator {
+    fn from_headers(headers: &reqwest::header::HeaderMap) -> Option<Self> {
+        headers
+            .get(ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| Self::Etag(value.to_owned()))
+            .or_else(|| {
+                headers
+                    .get(LAST_MODIFIED)
+                    .and_then(|value| value.to_str().ok())
+                    .map(|value| Self::LastModified(value.to_owned()))
+            })
+    }
+
+    fn value(&self) -> &str {
+        match self {
+            Self::Etag(value) | Self::LastModified(value) => value,
+        }
+    }
+}
+
+/// Metadata persisted next to a resumable partial response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HttpResumeMetadata {
+    pub source: String,
+    pub destination: String,
+    pub validator: HttpResumeValidator,
+    pub expected_length: Option<u64>,
+}
+
+/// Returns the stable JSON sidecar path for a resumable partial file.
+pub fn resumable_metadata_path(partial_path: impl AsRef<Path>) -> PathBuf {
+    let partial_path = partial_path.as_ref();
+    let file_name = partial_path
+        .file_name()
+        .map(|name| {
+            let mut name = name.to_os_string();
+            name.push(".json");
+            name
+        })
+        .unwrap_or_else(|| "nexum-resume.json".into());
+    partial_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(file_name)
+}
+
+/// Removes a stable partial response and its metadata sidecar.
+pub fn remove_resumable_files(partial_path: impl AsRef<Path>) {
+    let partial_path = partial_path.as_ref();
+    let _ = std::fs::remove_file(partial_path);
+    let _ = std::fs::remove_file(resumable_metadata_path(partial_path));
+}
+
+fn read_resume_metadata(partial_path: &Path) -> Result<Option<HttpResumeMetadata>, EngineError> {
+    let metadata_path = resumable_metadata_path(partial_path);
+    match std::fs::read(&metadata_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| EngineError::Failed(format!("invalid HTTP resume metadata: {error}"))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(EngineError::Failed(error.to_string())),
+    }
+}
+
+fn write_resume_metadata(
+    partial_path: &Path,
+    metadata: &HttpResumeMetadata,
+) -> Result<(), EngineError> {
+    let metadata_path = resumable_metadata_path(partial_path);
+    let parent = metadata_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| EngineError::Failed(error.to_string()))?;
+    let bytes = serde_json::to_vec(metadata).map_err(|error| {
+        EngineError::Failed(format!("could not encode HTTP resume metadata: {error}"))
+    })?;
+
+    for attempt in 0..16u32 {
+        let mut temporary_name = metadata_path
+            .file_name()
+            .map(|name| name.to_os_string())
+            .unwrap_or_else(|| "nexum-resume.json".into());
+        temporary_name.push(format!(".tmp-{}-{attempt}", std::process::id()));
+        let temporary_path = parent.join(temporary_name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+        {
+            Ok(mut file) => {
+                let result = (|| {
+                    file.write_all(&bytes)
+                        .map_err(|error| EngineError::Failed(error.to_string()))?;
+                    file.sync_all()
+                        .map_err(|error| EngineError::Failed(error.to_string()))?;
+                    drop(file);
+                    std::fs::rename(&temporary_path, &metadata_path)
+                        .map_err(|error| EngineError::Failed(error.to_string()))
+                })();
+                let _ = std::fs::remove_file(&temporary_path);
+                return result;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(EngineError::Failed(error.to_string())),
+        }
+    }
+
+    Err(EngineError::Failed(
+        "could not allocate a temporary HTTP resume metadata file".into(),
+    ))
+}
+
+/// Reads a valid partial response's progress without changing it.
+pub fn resumable_partial_progress(
+    source: &str,
+    destination: &str,
+    partial_path: impl AsRef<Path>,
+) -> Result<Option<Progress>, EngineError> {
+    let partial_path = partial_path.as_ref();
+    let Some(metadata) = read_resume_metadata(partial_path)? else {
+        return Ok(None);
+    };
+    if metadata.source != source || metadata.destination != destination {
+        return Ok(None);
+    }
+    let downloaded = match std::fs::symlink_metadata(partial_path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(EngineError::Failed(error.to_string())),
+    };
+    if downloaded == 0
+        || metadata
+            .expected_length
+            .is_some_and(|total| downloaded > total)
+    {
+        return Ok(None);
+    }
+    Ok(Some(Progress::new(downloaded, metadata.expected_length)))
 }
 
 struct TemporaryDownload {
@@ -442,6 +615,60 @@ impl Drop for TemporaryDownload {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+struct ResumableDownload {
+    path: PathBuf,
+    metadata_path: PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl ResumableDownload {
+    fn open(partial_path: &Path, append: bool) -> Result<Self, EngineError> {
+        let parent = partial_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|error| EngineError::Failed(error.to_string()))?;
+        let file = if append {
+            std::fs::OpenOptions::new().append(true).open(partial_path)
+        } else {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(partial_path)
+        }
+        .map_err(|error| EngineError::Failed(error.to_string()))?;
+        Ok(Self {
+            path: partial_path.to_owned(),
+            metadata_path: resumable_metadata_path(partial_path),
+            file: Some(file),
+        })
+    }
+
+    fn finish(mut self, destination: &Path) -> Result<(), EngineError> {
+        self.file
+            .as_ref()
+            .expect("resumable download file is open")
+            .sync_all()
+            .map_err(|error| EngineError::Failed(error.to_string()))?;
+        drop(self.file.take());
+        std::fs::rename(&self.path, destination)
+            .map_err(|error| EngineError::Failed(error.to_string()))?;
+        let _ = std::fs::remove_file(&self.metadata_path);
+        Ok(())
+    }
+}
+
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let value = value.strip_prefix("bytes ")?;
+    let (range, total) = value.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = start.parse().ok()?;
+    let end = end.parse().ok()?;
+    let total = total.parse().ok()?;
+    (end >= start && total > end).then_some((start, end, total))
 }
 
 impl Default for HttpEngine {
@@ -516,6 +743,259 @@ impl HttpEngine {
         let result =
             self.download_to_with_control_inner(source, destination, control, &mut on_progress);
         control.mark_finished();
+        result
+    }
+
+    /// Downloads an HTTP response into a stable partial file and resumes it
+    /// after a process restart when the saved validator and server range match.
+    ///
+    /// The partial file is renamed to `destination` only after the complete
+    /// response has been received. Ordinary transfer errors keep a validated
+    /// partial response; cancellation removes it together with its sidecar.
+    pub fn download_to_resumable<F>(
+        &self,
+        source: &str,
+        destination: &str,
+        partial_path: impl AsRef<Path>,
+        on_progress: F,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        let control = HttpTransferControl::new();
+        self.download_to_resumable_with_control(
+            source,
+            destination,
+            partial_path,
+            &control,
+            on_progress,
+        )
+    }
+
+    /// Downloads an HTTP response with cooperative pause and cancel control
+    /// using a stable partial file and validator sidecar.
+    pub fn download_to_resumable_with_control<F>(
+        &self,
+        source: &str,
+        destination: &str,
+        partial_path: impl AsRef<Path>,
+        control: &HttpTransferControl,
+        mut on_progress: F,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        let partial_path = partial_path.as_ref();
+        let result = self.download_to_resumable_inner(
+            source,
+            destination,
+            partial_path,
+            control,
+            &mut on_progress,
+        );
+        if matches!(result, Err(EngineError::Cancelled))
+            || (control.is_cancelled() && !control.is_committed())
+        {
+            remove_resumable_files(partial_path);
+        }
+        control.mark_finished();
+        result
+    }
+
+    fn download_to_resumable_inner<F>(
+        &self,
+        source: &str,
+        destination: &str,
+        partial_path: &Path,
+        control: &HttpTransferControl,
+        on_progress: &mut F,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        control.check_cancelled()?;
+
+        let mut candidate = match read_resume_metadata(partial_path) {
+            Ok(Some(metadata)) => {
+                let valid_identity =
+                    metadata.source == source && metadata.destination == destination;
+                let partial_length = std::fs::symlink_metadata(partial_path)
+                    .ok()
+                    .filter(|metadata| metadata.file_type().is_file())
+                    .map(|metadata| metadata.len());
+                if valid_identity
+                    && partial_length.is_some_and(|length| {
+                        length > 0 && metadata.expected_length.is_none_or(|total| length <= total)
+                    })
+                {
+                    Some((
+                        metadata,
+                        partial_length.expect("partial length was checked"),
+                    ))
+                } else {
+                    remove_resumable_files(partial_path);
+                    None
+                }
+            }
+            Ok(None) => {
+                if partial_path.exists() {
+                    remove_resumable_files(partial_path);
+                }
+                None
+            }
+            Err(_) => {
+                remove_resumable_files(partial_path);
+                None
+            }
+        };
+        let mut preserve_partial = candidate.is_some();
+
+        let mut request = self.client.get(source);
+        if let Some((metadata, offset)) = candidate.as_ref() {
+            let range = format!("bytes={offset}-");
+            request = request
+                .header(RANGE, range)
+                .header(IF_RANGE, metadata.validator.value());
+        }
+        let mut response = request
+            .send()
+            .map_err(|error| EngineError::Failed(error.to_string()))?;
+
+        let (offset, total, append) = if let Some((saved, offset)) = candidate.take() {
+            let response_validator = HttpResumeValidator::from_headers(response.headers());
+            let valid_range = response.status().is_success()
+                && response.status() == StatusCode::PARTIAL_CONTENT
+                && response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_content_range)
+                    .is_some_and(|(start, end, total)| {
+                        start == offset
+                            && saved
+                                .expected_length
+                                .is_none_or(|expected| expected == total)
+                            && response
+                                .content_length()
+                                .is_none_or(|length| length == end - start + 1)
+                    })
+                && response_validator.as_ref() == Some(&saved.validator);
+
+            if valid_range {
+                let (_, _, total) = response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_content_range)
+                    .expect("validated content range");
+                let metadata = HttpResumeMetadata {
+                    source: source.to_owned(),
+                    destination: destination.to_owned(),
+                    validator: saved.validator,
+                    expected_length: Some(total),
+                };
+                write_resume_metadata(partial_path, &metadata)?;
+                (offset, Some(total), true)
+            } else if response.status() == StatusCode::OK
+                || response.status() == StatusCode::PARTIAL_CONTENT
+            {
+                remove_resumable_files(partial_path);
+                preserve_partial = false;
+                response = self
+                    .client
+                    .get(source)
+                    .send()
+                    .map_err(|error| EngineError::Failed(error.to_string()))?;
+                if !response.status().is_success() {
+                    return Err(EngineError::Failed(format!(
+                        "HTTP GET returned {}",
+                        response.status()
+                    )));
+                }
+                let validator = HttpResumeValidator::from_headers(response.headers());
+                let total = response.content_length();
+                let metadata = validator.map(|validator| HttpResumeMetadata {
+                    source: source.to_owned(),
+                    destination: destination.to_owned(),
+                    validator,
+                    expected_length: total,
+                });
+                if let Some(metadata) = metadata.as_ref() {
+                    write_resume_metadata(partial_path, metadata)?;
+                    preserve_partial = true;
+                } else {
+                    let _ = std::fs::remove_file(resumable_metadata_path(partial_path));
+                }
+                (0, total, false)
+            } else {
+                return Err(EngineError::Failed(format!(
+                    "HTTP GET returned {}",
+                    response.status()
+                )));
+            }
+        } else {
+            if !response.status().is_success() {
+                return Err(EngineError::Failed(format!(
+                    "HTTP GET returned {}",
+                    response.status()
+                )));
+            }
+            let validator = HttpResumeValidator::from_headers(response.headers());
+            let total = response.content_length();
+            let metadata = validator.map(|validator| HttpResumeMetadata {
+                source: source.to_owned(),
+                destination: destination.to_owned(),
+                validator,
+                expected_length: total,
+            });
+            if let Some(metadata) = metadata.as_ref() {
+                write_resume_metadata(partial_path, metadata)?;
+                preserve_partial = true;
+            } else {
+                let _ = std::fs::remove_file(resumable_metadata_path(partial_path));
+            }
+            (0, total, false)
+        };
+
+        let mut temporary = ResumableDownload::open(partial_path, append)?;
+        let mut downloaded = offset;
+        let mut buffer = [0u8; 32 * 1024];
+        let result = (|| {
+            loop {
+                control.wait_if_paused()?;
+                let read = response
+                    .read(&mut buffer)
+                    .map_err(|error| EngineError::Failed(error.to_string()))?;
+                if read == 0 {
+                    break;
+                }
+                control.check_cancelled()?;
+                temporary
+                    .file
+                    .as_mut()
+                    .expect("resumable download file is open")
+                    .write_all(&buffer[..read])
+                    .map_err(|error| EngineError::Failed(error.to_string()))?;
+                downloaded += read as u64;
+                on_progress(Progress::new(downloaded, total))?;
+                control.wait_if_paused()?;
+            }
+
+            control.check_cancelled()?;
+            if total.is_some_and(|expected| downloaded != expected) {
+                return Err(EngineError::Failed(format!(
+                    "incomplete HTTP response: expected {} bytes, received {downloaded}",
+                    total.expect("total was checked")
+                )));
+            }
+            control.check_cancelled()?;
+            control.finish_resumable_download(temporary, Path::new(destination))?;
+            Ok(Progress::new(downloaded, total))
+        })();
+
+        if result.is_err() && (!preserve_partial || matches!(result, Err(EngineError::Cancelled))) {
+            remove_resumable_files(partial_path);
+        }
         result
     }
 
@@ -783,6 +1263,60 @@ mod tests {
         (address, server)
     }
 
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        String::from_utf8(request).unwrap()
+    }
+
+    fn serve_dynamic<F>(responses: usize, mut handler: F) -> (String, thread::JoinHandle<()>)
+    where
+        F: FnMut(usize, &str) -> Vec<u8> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}/file", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            for index in 0..responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let request = read_http_request(&mut stream);
+                let response = handler(index, &request);
+                stream.write_all(&response).unwrap();
+            }
+        });
+        (address, server)
+    }
+
+    fn http_response(status: &str, headers: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn http_response_with_declared_length(
+        status: &str,
+        headers: &str,
+        declared_length: usize,
+        body: &[u8],
+    ) -> Vec<u8> {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
     fn serve_in_chunks(
         first: Vec<u8>,
         second: Vec<u8>,
@@ -1014,6 +1548,254 @@ mod tests {
         assert!(matches!(result, Err(EngineError::Failed(_))));
         assert_eq!(std::fs::read(&destination).unwrap(), b"old bytes");
         assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn resumable_http_download_uses_matching_etag_range() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let partial = dir.0.join(".file.bin.nexum.part");
+        let body = b"hello resumable world";
+        let offset = 6;
+        std::fs::write(&partial, &body[..offset]).unwrap();
+        let body_for_server = body.to_vec();
+        let (url, server) = serve_dynamic(1, move |_, request| {
+            let request = request.to_ascii_lowercase();
+            assert!(request.contains("range: bytes=6-"), "{request}");
+            assert!(request.contains("if-range: \"v1\""), "{request}");
+            http_response(
+                "206 Partial Content",
+                &format!(
+                    "ETag: \"v1\"\r\nContent-Range: bytes 6-{end}/{total}\r\n",
+                    end = body_for_server.len() - 1,
+                    total = body_for_server.len()
+                ),
+                &body_for_server[6..],
+            )
+        });
+        write_resume_metadata(
+            &partial,
+            &HttpResumeMetadata {
+                source: url.clone(),
+                destination: destination.to_string_lossy().into_owned(),
+                validator: HttpResumeValidator::Etag("\"v1\"".into()),
+                expected_length: Some(body.len() as u64),
+            },
+        )
+        .unwrap();
+        let result = HttpEngine::new().download_to_resumable_with_control(
+            &url,
+            destination.to_str().unwrap(),
+            &partial,
+            &HttpTransferControl::new(),
+            |_| Ok(()),
+        );
+        server.join().unwrap();
+        assert_eq!(
+            result.unwrap(),
+            Progress::new(body.len() as u64, Some(body.len() as u64))
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), body);
+        assert!(!partial.exists());
+        assert!(!resumable_metadata_path(&partial).exists());
+    }
+
+    #[test]
+    fn resumable_http_download_uses_last_modified_validator() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let partial = dir.0.join(".file.bin.nexum.part");
+        let body = b"last modified body";
+        std::fs::write(&partial, &body[..5]).unwrap();
+        let body_for_server = body.to_vec();
+        let (url, server) = serve_dynamic(1, move |_, request| {
+            let request = request.to_ascii_lowercase();
+            assert!(request.contains("range: bytes=5-"), "{request}");
+            assert!(
+                request.contains("if-range: wed, 21 oct 2015 07:28:00 gmt"),
+                "{request}"
+            );
+            http_response(
+                "206 Partial Content",
+                &format!(
+                    "Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nContent-Range: bytes 5-{end}/{total}\r\n",
+                    end = body_for_server.len() - 1,
+                    total = body_for_server.len()
+                ),
+                &body_for_server[5..],
+            )
+        });
+        write_resume_metadata(
+            &partial,
+            &HttpResumeMetadata {
+                source: url.clone(),
+                destination: destination.to_string_lossy().into_owned(),
+                validator: HttpResumeValidator::LastModified(
+                    "Wed, 21 Oct 2015 07:28:00 GMT".into(),
+                ),
+                expected_length: Some(body.len() as u64),
+            },
+        )
+        .unwrap();
+        let result = HttpEngine::new().download_to_resumable_with_control(
+            &url,
+            destination.to_str().unwrap(),
+            &partial,
+            &HttpTransferControl::new(),
+            |_| Ok(()),
+        );
+        server.join().unwrap();
+        assert!(result.is_ok());
+        assert_eq!(std::fs::read(&destination).unwrap(), body);
+    }
+
+    #[test]
+    fn resumable_http_download_restarts_after_200_or_validator_change() {
+        for changed_validator in [false, true] {
+            let dir = TestDir::new();
+            let destination = dir.0.join("file.bin");
+            let partial = dir.0.join(".file.bin.nexum.part");
+            let body: &[u8] = if changed_validator {
+                b"new body"
+            } else {
+                b"full body"
+            };
+            std::fs::write(&partial, b"old ").unwrap();
+            let body_for_server = body.to_vec();
+            let (url, server) = serve_dynamic(2, move |index, request| {
+                let request = request.to_ascii_lowercase();
+                if index == 0 {
+                    assert!(request.contains("range: bytes=4-"), "{request}");
+                    if changed_validator {
+                        http_response(
+                            "206 Partial Content",
+                            "ETag: \"new\"\r\nContent-Range: bytes 4-7/8\r\n",
+                            b"body",
+                        )
+                    } else {
+                        http_response("200 OK", "ETag: \"new\"\r\n", &body_for_server)
+                    }
+                } else {
+                    assert!(!request.contains("range:"), "{request}");
+                    http_response("200 OK", "ETag: \"new\"\r\n", &body_for_server)
+                }
+            });
+            write_resume_metadata(
+                &partial,
+                &HttpResumeMetadata {
+                    source: url.clone(),
+                    destination: destination.to_string_lossy().into_owned(),
+                    validator: HttpResumeValidator::Etag("\"old\"".into()),
+                    expected_length: Some(8),
+                },
+            )
+            .unwrap();
+            let result = HttpEngine::new().download_to_resumable_with_control(
+                &url,
+                destination.to_str().unwrap(),
+                &partial,
+                &HttpTransferControl::new(),
+                |_| Ok(()),
+            );
+            server.join().unwrap();
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(std::fs::read(&destination).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn resumable_http_download_restarts_after_malformed_content_range() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let partial = dir.0.join(".file.bin.nexum.part");
+        let body = b"fresh body";
+        std::fs::write(&partial, b"old ").unwrap();
+        let (url, server) = serve_dynamic(2, move |index, request| {
+            let request = request.to_ascii_lowercase();
+            if index == 0 {
+                assert!(request.contains("range: bytes=4-"), "{request}");
+                http_response(
+                    "206 Partial Content",
+                    "ETag: \"old\"\r\nContent-Range: bytes 5-7/8\r\n",
+                    b"bad",
+                )
+            } else {
+                assert!(!request.contains("range:"), "{request}");
+                http_response("200 OK", "ETag: \"new\"\r\n", body)
+            }
+        });
+        write_resume_metadata(
+            &partial,
+            &HttpResumeMetadata {
+                source: url.clone(),
+                destination: destination.to_string_lossy().into_owned(),
+                validator: HttpResumeValidator::Etag("\"old\"".into()),
+                expected_length: Some(9),
+            },
+        )
+        .unwrap();
+        let result = HttpEngine::new().download_to_resumable_with_control(
+            &url,
+            destination.to_str().unwrap(),
+            &partial,
+            &HttpTransferControl::new(),
+            |_| Ok(()),
+        );
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), Progress::new(10, Some(10)));
+        assert_eq!(std::fs::read(&destination).unwrap(), body);
+    }
+
+    #[test]
+    fn resumable_http_download_preserves_partial_on_transfer_error_and_cleans_on_cancel() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let partial = dir.0.join(".file.bin.nexum.part");
+        let (url, server) = serve_dynamic(1, |_, _| {
+            http_response_with_declared_length("200 OK", "ETag: \"v1\"\r\n", 10, b"short")
+        });
+        let result = HttpEngine::new().download_to_resumable_with_control(
+            &url,
+            destination.to_str().unwrap(),
+            &partial,
+            &HttpTransferControl::new(),
+            |_| Ok(()),
+        );
+        server.join().unwrap();
+        assert!(matches!(result, Err(EngineError::Failed(_))));
+        assert!(!destination.exists());
+        assert_eq!(std::fs::read(&partial).unwrap(), b"short");
+        assert!(resumable_metadata_path(&partial).exists());
+
+        let cancel_dir = TestDir::new();
+        let cancel_destination = cancel_dir.0.join("file.bin");
+        let cancel_partial = cancel_dir.0.join(".file.bin.nexum.part");
+        let (cancel_url, first_sent, release, server) =
+            serve_in_chunks(vec![b'a'; 32 * 1024], vec![b'b'; 32 * 1024]);
+        let control = HttpTransferControl::new();
+        let control_for_worker = control.clone();
+        let destination_for_worker = cancel_destination.to_str().unwrap().to_owned();
+        let partial_for_worker = cancel_partial.clone();
+        let worker = thread::spawn(move || {
+            HttpEngine::new().download_to_resumable_with_control(
+                &cancel_url,
+                &destination_for_worker,
+                &partial_for_worker,
+                &control_for_worker,
+                |_| Ok(()),
+            )
+        });
+        first_sent.recv().unwrap();
+        control.request_pause().unwrap();
+        control.cancel();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(EngineError::Cancelled)
+        ));
+        release.send(()).unwrap();
+        server.join().unwrap();
+        assert!(!cancel_partial.exists());
+        assert!(!resumable_metadata_path(&cancel_partial).exists());
     }
 
     #[test]

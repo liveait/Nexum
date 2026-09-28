@@ -203,6 +203,103 @@ impl HttpFixture {
     }
 }
 
+struct ResumableHttpFixture {
+    source: String,
+    first_chunk_sent: Receiver<()>,
+    release_first: Sender<()>,
+    resumed_request: Receiver<String>,
+    worker: JoinHandle<()>,
+}
+
+impl ResumableHttpFixture {
+    fn new(body: Vec<u8>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = format!("http://{}/file", listener.local_addr().unwrap());
+        let (first_chunk_tx, first_chunk_sent) = mpsc::channel();
+        let (release_first, release_first_rx) = mpsc::channel();
+        let (resumed_tx, resumed_request) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(!request.to_ascii_lowercase().contains("range:"));
+            let split = body.len() / 2;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nETag: \"fixture-v1\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body[..split]).unwrap();
+            stream.flush().unwrap();
+            first_chunk_tx.send(()).unwrap();
+            release_first_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            let _ = stream.write_all(&body[split..]);
+            let _ = stream.flush();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            resumed_tx.send(request.clone()).unwrap();
+            let offset = body.len() / 2;
+            write!(
+                stream,
+                "HTTP/1.1 206 Partial Content\r\nETag: \"fixture-v1\"\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                offset,
+                body.len() - 1,
+                body.len(),
+                body.len() - offset
+            )
+            .unwrap();
+            let _ = stream.write_all(&body[offset..]);
+        });
+        Self {
+            source,
+            first_chunk_sent,
+            release_first,
+            resumed_request,
+            worker,
+        }
+    }
+
+    fn wait_until_first_chunk(&self) {
+        self.first_chunk_sent
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+    }
+
+    fn release_first(&self) {
+        self.release_first.send(()).unwrap();
+    }
+
+    fn wait_for_resume_request(&self) -> String {
+        self.resumed_request
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+    }
+
+    fn finish(self) {
+        self.worker.join().unwrap();
+    }
+}
+
 struct ChunkedHttpFixture {
     source: String,
     first_chunk_sent: Receiver<()>,
@@ -317,7 +414,7 @@ fn queued_http_tasks_dispatch_after_server_restart() {
         "task.create",
         Some(json!({
             "id": "recovered-http",
-            "source": fixture.source,
+            "source": fixture.source.clone(),
             "destination": destination.to_string_lossy(),
         })),
     );
@@ -338,6 +435,62 @@ fn queued_http_tasks_dispatch_after_server_restart() {
     fixture.finish();
     restarted.wait_for_state("recovered-http", "Completed");
     assert_eq!(fs::read(destination).unwrap(), b"recovered response");
+}
+
+#[test]
+fn interrupted_http_download_resumes_from_validated_partial_after_restart() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let body = vec![b'a'; 32 * 1024]
+        .into_iter()
+        .chain(vec![b'b'; 32 * 1024])
+        .collect::<Vec<_>>();
+    let fixture = ResumableHttpFixture::new(body.clone());
+    let destination = dir.output_path("restart-resume");
+    let mut server = ServerProcess::start(dir.path());
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "restart-resume",
+            "source": fixture.source,
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    server.call("task.queue", Some(json!({"id": "restart-resume"})));
+    fixture.wait_until_first_chunk();
+
+    let mut observed = 0;
+    for _ in 0..100 {
+        observed =
+            server.call("task.get", Some(json!({"id": "restart-resume"})))["downloaded_bytes"]
+                .as_u64()
+                .unwrap();
+        if observed > 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(observed > 0);
+    let partial = destination
+        .parent()
+        .unwrap()
+        .join(".restart-resume.nexum.part");
+    let sidecar = nexum_core::nexum_engine::resumable_metadata_path(&partial);
+    assert!(partial.exists());
+    assert!(sidecar.exists());
+
+    server.stop();
+    fixture.release_first();
+    let restarted = ServerProcess::start(dir.path());
+    let resumed_request = fixture.wait_for_resume_request();
+    let resumed_request = resumed_request.to_ascii_lowercase();
+    assert!(resumed_request.contains("range: bytes=32768-"));
+    assert!(resumed_request.contains("if-range: \"fixture-v1\""));
+    restarted.wait_for_state("restart-resume", "Completed");
+    assert_eq!(fs::read(&destination).unwrap(), body);
+    assert!(!partial.exists());
+    assert!(!sidecar.exists());
+    fixture.finish();
 }
 
 #[test]
@@ -459,6 +612,36 @@ fn active_http_remove_cancels_worker_and_preserves_destination() {
         fs::read_dir(destination.parent().unwrap()).unwrap().count(),
         1
     );
+    server.stop();
+}
+
+#[test]
+fn task_remove_cleans_stable_http_partial_and_sidecar() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let destination = dir.output_path("remove-partial");
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "remove-partial",
+            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    let partial = destination
+        .parent()
+        .unwrap()
+        .join(".remove-partial.nexum.part");
+    let sidecar = partial.with_file_name(".remove-partial.nexum.part.json");
+    fs::write(&partial, b"partial bytes").unwrap();
+    fs::write(&sidecar, b"resume metadata").unwrap();
+    assert_eq!(
+        server.call("task.remove", Some(json!({"id": "remove-partial"}))),
+        true
+    );
+    assert!(!partial.exists());
+    assert!(!sidecar.exists());
     server.stop();
 }
 

@@ -173,8 +173,8 @@ impl<R: TaskRepository> Core<R> {
         let Some(id) = scheduler.start_next(&mut tasks)? else {
             return Ok(None);
         };
-        // A claimed task starts a fresh transfer; recovery may have retained
-        // bytes from an interrupted attempt, but the current engine does not resume it.
+        // A claimed task starts with a fresh task snapshot. Server-owned
+        // transfer paths may restore validated partial progress afterwards.
         tasks.update_progress(&id, nexum_domain::Progress::default())?;
         tasks.set_error(&id, None)?;
         self.persist_candidate(&id, tasks, scheduler)?;
