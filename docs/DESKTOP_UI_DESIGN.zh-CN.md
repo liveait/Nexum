@@ -2,7 +2,7 @@
 
 状态：已实现 macOS Desktop UI 基线；剩余项目已标注为计划项。
 
-本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、Settings 卡片、Add Download Sheet、状态栏和计划能力占位。原生目标选择器、Server 事件、快捷键和本地化仍属于后续切片。
+本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、Settings 卡片、带原生目标选择器的 Add Download Sheet、状态栏和计划能力占位。Server 事件、快捷键和本地化仍属于后续切片。
 
 英文版见 [DESKTOP_UI_DESIGN.md](DESKTOP_UI_DESIGN.md)。
 
@@ -110,7 +110,7 @@ Inspector 只读展示任务元数据。任务行提供当前任务操作；原�
 Sheet 只承担一条清晰流程：
 
 1. Source URL 输入框。
-2. Destination 输入框（原生文件/文件夹选择器属于计划项）。
+2. Destination 输入框，通过 Tauri dialog plugin 提供原生保存对话框。
 3. 当前 Server 合约要求显式填写 Task ID。
 4. Advanced 折叠区预留 headers、优先级和带宽策略；Server 支持前保持隐藏。
 5. Cancel 与 Add Download 按钮。
@@ -173,7 +173,8 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 
 ### Slice B — Add Sheet 与原生设置（部分实现）
 
-- 增加 URL 校验、任务 ID 推导和原生目标选择器。[ ]
+- 增加 URL 校验和任务 ID 推导。[ ]
+- 通过 Tauri dialog plugin 增加原生目标保存对话框。[x]
 - 增加读取/保存 Desktop 设置的 Tauri 命令。[x]
 - Add 流程在创建任务后自动排队。[x]
 

@@ -2,7 +2,7 @@
 
 Status: implemented macOS Desktop UI baseline; remaining items are called out as planned.
 
-This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards, Add Download sheet, status bar, and planned-capability placeholders described here. Native destination selection, server events, keyboard shortcuts, and localization remain later slices.
+This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards, Add Download sheet with a native destination selector, status bar, and planned-capability placeholders described here. Server events, keyboard shortcuts, and localization remain later slices.
 
 For the Chinese version, see [DESKTOP_UI_DESIGN.zh-CN.md](DESKTOP_UI_DESIGN.zh-CN.md).
 
@@ -110,7 +110,7 @@ The Inspector is read-only for task metadata. Row actions currently provide the 
 The sheet has one focused flow:
 
 1. Source URL field.
-2. Destination field (a native folder/file chooser is planned).
+2. Destination field with a native save dialog provided by the Tauri dialog plugin.
 3. Explicit Task ID field required by the current Server contract.
 4. Advanced disclosure for future headers, priority, and bandwidth policy; hidden until those server features exist.
 5. Cancel and Add Download buttons.
@@ -173,7 +173,8 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 
 ### Slice B — Add sheet and native settings (partially implemented)
 
-- Add URL validation, task ID derivation, and native destination chooser. [ ]
+- Add URL validation and task ID derivation. [ ]
+- Add the native destination save dialog through the Tauri dialog plugin. [x]
 - Add Tauri commands for loading and saving desktop settings. [x]
 - Queue a newly created task as part of the Add flow. [x]
 

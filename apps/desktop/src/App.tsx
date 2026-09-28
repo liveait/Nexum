@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
 type TaskState =
@@ -162,6 +163,7 @@ export default function App() {
   const [newSource, setNewSource] = useState("");
   const [newDest, setNewDest] = useState("");
   const [addLoading, setAddLoading] = useState(false);
+  const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
 
   const pushNotification = (message: string, tone: NoticeTone) => {
@@ -295,6 +297,22 @@ export default function App() {
     }
   };
 
+  const chooseDestination = async (): Promise<void> => {
+    setDestinationPicking(true);
+    setAddError("");
+    try {
+      const destination = await save({
+        title: "Choose download destination",
+        defaultPath: newDest.trim() || undefined,
+      });
+      if (destination) setNewDest(destination);
+    } catch (caught) {
+      setAddError(errorMessage(caught));
+    } finally {
+      setDestinationPicking(false);
+    }
+  };
+
   const createAndQueue = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     setAddLoading(true);
@@ -386,15 +404,15 @@ export default function App() {
       </section>
 
       {showAdd && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => !addLoading && setShowAdd(false)}>
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => !addLoading && !destinationPicking && setShowAdd(false)}>
           <section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-download-title" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-header"><div><span className="eyebrow">New task</span><h2 id="add-download-title">Add Download</h2></div><button className="close-button" onClick={() => setShowAdd(false)} disabled={addLoading} aria-label="Close">×</button></div>
+            <div className="modal-header"><div><span className="eyebrow">New task</span><h2 id="add-download-title">Add Download</h2></div><button className="close-button" onClick={() => setShowAdd(false)} disabled={addLoading || destinationPicking} aria-label="Close">×</button></div>
             <form onSubmit={createAndQueue}>
               <label>Source URL<input value={newSource} onChange={(event) => setNewSource(event.target.value)} placeholder="https://example.com/file.zip" autoFocus required /></label>
-              <label>Destination<input value={newDest} onChange={(event) => setNewDest(event.target.value)} placeholder="/Users/you/Downloads/file.zip" required /></label>
+              <label>Destination<div className="input-with-action"><input value={newDest} onChange={(event) => setNewDest(event.target.value)} placeholder="/Users/you/Downloads/file.zip" required /><button type="button" className="button chooser-button" onClick={() => void chooseDestination()} disabled={addLoading || destinationPicking}>{destinationPicking ? "Choosing…" : "Choose…"}</button></div></label>
               <label>Task ID<input value={newId} onChange={(event) => setNewId(event.target.value)} placeholder="file-download" required /></label>
               {addError && <p className="form-error" role="alert">{addError}</p>}
-              <div className="modal-actions"><button type="button" className="button" onClick={() => setShowAdd(false)} disabled={addLoading}>Cancel</button><button type="submit" className="button primary" disabled={addLoading || !newId.trim() || !newSource.trim() || !newDest.trim()}>{addLoading ? "Adding…" : "Add and Queue"}</button></div>
+              <div className="modal-actions"><button type="button" className="button" onClick={() => setShowAdd(false)} disabled={addLoading || destinationPicking}>Cancel</button><button type="submit" className="button primary" disabled={addLoading || destinationPicking || !newId.trim() || !newSource.trim() || !newDest.trim()}>{addLoading ? "Adding…" : "Add and Queue"}</button></div>
             </form>
           </section>
         </div>
