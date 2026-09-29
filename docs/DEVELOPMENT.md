@@ -33,12 +33,12 @@ From the repository root, run the same commands as `.github/workflows/ci.yml`:
 
 ```bash
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo check --locked --workspace --all-targets
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-CI runs these Rust checks on Ubuntu. It does not currently build or check the TypeScript packages or produce release artifacts.
+`Cargo.lock` is committed because this workspace ships Server, CLI, and Desktop binaries; keep it updated when changing Rust dependencies. CI runs these Rust checks on Ubuntu. It does not currently build or check the TypeScript packages or produce release artifacts.
 
 ## Server and CLI
 

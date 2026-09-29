@@ -33,12 +33,12 @@ apps/
 
 ```bash
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo check --locked --workspace --all-targets
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-CI 在 Ubuntu 上执行这些 Rust 检查。目前未构建或检查 TypeScript 包，也不生成发布产物。
+仓库会提交 `Cargo.lock`，因为此工作区包含 Server、CLI 和 Desktop 可执行程序；修改 Rust 依赖时应同步更新它。CI 在 Ubuntu 上执行这些 Rust 检查。目前未构建或检查 TypeScript 包，也不生成发布产物。
 
 ## Server 与 CLI
 
