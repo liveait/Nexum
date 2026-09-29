@@ -83,7 +83,7 @@ Server 每次从 TCP 连接读取一行 JSON-RPC 请求，对带 `id` 的请求�
 
 CLI 通过 TCP 协议管理任务、查询 Server。Tauri 2 + React Desktop 通过 Tauri 命令调用 TCP JSON-RPC，使用 Tauri 后台线程建立独立事件订阅，在收到 Task 或 Scheduler 通知后去抖刷新任务快照；事件流断开时按已配置的策略回退到空闲每五秒、下载中每秒的轮询，手动策略会禁用该回退。窗口隐藏时暂停轮询；Server 地址和刷新策略通过 Tauri 持久化，并通过 dialog 插件的原生保存面板选择目标路径。快捷键层和本地化 Message Catalog 仍待完成。Manifest V3 Browser 扩展有右键菜单和链接标记 UI，但发送流程向 `/jsonrpc` 发 HTTP 请求，目前没有兼容端点。Popup 写入 Storage 的 `server` 键，后台脚本却读取 `address` 字段，因此保存的地址不会生效。扩展也没有设备选择。
 
-Protocol 请求可以携带 Credential，`server.auth` 目前只返回 `none`。Server 不校验 Credential；`require_auth` 与 `max_connections` 配置虽可解析，但未执行限制。TLS 和限流类型也未接入 Server。
+Protocol 请求可以携带 Credential，`server.auth` 目前只返回 `none`。Server 不校验 Credential；`max_connections` 会限制活动 TCP 连接处理器，超过上限的连接在处理请求前关闭；`require_auth` 仍可解析但尚未执行。TLS 和限流类型也未接入 Server。
 
 ## 扩展与 Media 边界
 
