@@ -142,7 +142,7 @@ TaskData = { items, selectedId, lastUpdatedAt }
 OperationState = { [taskId]: idle | running }
 ```
 
-Desktop 通过 Tauri 后台线程建立独立的 `events.subscribe` TCP 连接。Server 发送带增量 Task 或 Scheduler 数据的 `events.event` JSON-RPC 通知，并每 15 秒发送一次 heartbeat 保持连接。Tauri 会忽略 heartbeat；由于更新通知不包含完整 `TaskView`，React 会对 Task 和 Scheduler 通知去抖后刷新完整 Task 快照。
+Desktop 通过 Tauri 后台线程建立独立的 `events.subscribe` TCP 连接。Server 发送带增量 Task 或 Scheduler 数据的 `events.event` JSON-RPC 通知，并每 15 秒发送一次 heartbeat 保持连接。Tauri 会忽略 heartbeat 更新，在每条连接内跟踪 sequence，并将重复或过期通知视为无害。如果发现前进方向的 sequence 缺口，Tauri 会关闭流，由重连流程触发完整快照；由于更新通知不包含完整 `TaskView`，React 会对 Task 和 Scheduler 通知去抖后刷新完整 Task 快照。
 
 事件流连接时使用事件驱动刷新：
 
@@ -157,7 +157,7 @@ Desktop 通过 Tauri 后台线程建立独立的 `events.subscribe` TCP 连接�
 - 窗口隐藏时停止轮询。
 - 保存 `lastUpdatedAt`，在工具栏显示“刚刚更新 / X 前更新”。
 
-事件流没有回放缓冲。重连或订阅被丢弃后先获取完整 Task 快照；刷新失败时仍保留最近一次成功快照。
+事件流没有回放缓冲。重连、订阅被丢弃或检测到 sequence 缺口后先获取完整 Task 快照；刷新失败时仍保留最近一次成功快照。
 
 RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直接打开 TCP Socket 或解析 JSON-RPC 错误。
 

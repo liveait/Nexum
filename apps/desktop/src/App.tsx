@@ -53,6 +53,7 @@ interface EventStreamStatus {
   server: string;
   connected: boolean;
   error: string | null;
+  resync_required: boolean;
 }
 
 const DEFAULT_SERVER = "127.0.0.1:39100";
@@ -263,7 +264,7 @@ export default function App() {
     const handleEventStreamStatus = (payload: EventStreamStatus) => {
       if (!active || payload.server !== server) return;
       setEventStreamConnected(payload.connected);
-      if (payload.connected) scheduleRefresh();
+      if (payload.connected || payload.resync_required) scheduleRefresh();
     };
 
     void Promise.all([

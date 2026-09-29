@@ -1323,9 +1323,10 @@ fn handle_event_subscription(
     state: Arc<Mutex<ServerState>>,
     request: RpcRequest,
 ) -> io::Result<()> {
-    let (subscriber_id, receiver) = {
+    let (subscriber_id, receiver, mut last_delivered_sequence) = {
         let mut locked = state.lock().expect("server state mutex poisoned");
-        locked.events.subscribe()
+        let (subscriber_id, receiver) = locked.events.subscribe();
+        (subscriber_id, receiver, locked.events.current_sequence())
     };
 
     let acknowledged = request.id.clone().map(|id| {
@@ -1354,14 +1355,11 @@ fn handle_event_subscription(
                     locked.events.unsubscribe(subscriber_id);
                     return Err(error);
                 }
+                last_delivered_sequence = notification.params.sequence;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let sequence = {
-                    let locked = state.lock().expect("server state mutex poisoned");
-                    locked.events.current_sequence()
-                };
                 let heartbeat = EventNotification::new(
-                    sequence,
+                    last_delivered_sequence,
                     EventEnvelope::new("events.heartbeat", serde_json::json!({})),
                 );
                 let encoded = serde_json::to_string(&heartbeat)

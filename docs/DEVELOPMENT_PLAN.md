@@ -124,7 +124,8 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 ## 2. Delivery Order From Current Code
 
 1. Complete the remaining server/client contracts: durable event-delivery semantics and configured TLS/rate limiting.
-   - Specify reconnect, dropped-event, and replay behavior for the bounded event stream.
+   - [x] Define v1 reconnect and dropped-event behavior: the Desktop ignores duplicate/stale sequences, treats a forward gap or disconnect as stale, reconnects, and refreshes a full snapshot; the server still has no replay buffer.
+   - [ ] Add a durable replay buffer and an explicit after-sequence subscription when reliable event delivery is required.
    - Add credential settings to the Desktop and Browser clients when their secure storage flows are ready.
    - Keep authentication settings aligned across clients as Desktop credential storage is added.
 2. Finish the Desktop release layer: keyboard navigation, accessibility labels, reduced-motion/system appearance behavior, and English/Simplified Chinese strings.
