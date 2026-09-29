@@ -149,6 +149,16 @@ function isLoopbackServerAddress(address: string): boolean {
   return octets.length === 4 && octets[0] === "127" && octets.every((octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255);
 }
 
+function isTlsServerAddress(address: string): boolean {
+  const value = address.trim();
+  if (!value.startsWith("tls://")) return false;
+  const authority = value.slice("tls://".length);
+  const match = /^(?:\[[^\]]+\]|[^:[\]/?]+):(\d+)$/.exec(authority);
+  if (!match) return false;
+  const port = Number(match[1]);
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
 type IconName = "dashboard" | "downloads" | "trackers" | "plugins" | "notifications" | "settings" | "general" | "appearance" | "bittorrent" | "integration" | "network" | "advanced" | "about" | "search" | "info" | "list" | "more";
 
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
@@ -683,8 +693,9 @@ function CredentialSettings({ server, serverDraft, settingsReady, onCredentialCh
   const [feedback, setFeedback] = useState<{ tone: NoticeTone; message: string } | null>(null);
 
   const loopback = isLoopbackServerAddress(server);
+  const tls = isTlsServerAddress(server);
   const draftSaved = serverDraft.trim() === server;
-  const canConfigure = settingsReady && draftSaved && loopback;
+  const canConfigure = settingsReady && draftSaved && (loopback || tls);
 
   const clearSecretInput = () => {
     if (secretInput.current) secretInput.current.value = "";
@@ -704,7 +715,7 @@ function CredentialSettings({ server, serverDraft, settingsReady, onCredentialCh
     setConfiguredScheme(null);
     setStatusFailed(false);
     setScheme("Bearer");
-    if (!settingsReady || !loopback) {
+    if (!settingsReady || (!loopback && !tls)) {
       setStatusLoading(false);
       return undefined;
     }
@@ -731,7 +742,7 @@ function CredentialSettings({ server, serverDraft, settingsReady, onCredentialCh
     return () => { active = false; };
     // The status lookup follows only the saved Server, not edits to its draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server, settingsReady, loopback]);
+  }, [server, settingsReady, loopback, tls]);
 
   const saveCredential = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -780,12 +791,12 @@ function CredentialSettings({ server, serverDraft, settingsReady, onCredentialCh
     }
   };
 
-  const statusText = !loopback ? "Loopback only" : statusLoading ? "Checking…" : statusFailed ? "Status unavailable" : configuredScheme ? `${configuredScheme} configured` : "Not configured";
+  const statusText = !loopback && !tls ? "Loopback or TLS required" : statusLoading ? "Checking…" : statusFailed ? "Status unavailable" : configuredScheme ? `${configuredScheme} configured` : "Not configured";
   return <div className="settings-card credential-card">
     <div className="settings-card-heading"><div><span className="eyebrow">Authentication</span><h2>Server credential</h2></div><span className={`status-pill ${statusFailed ? "error" : configuredScheme ? "connected" : "disconnected"}`}>{statusText}</span></div>
     <p className="field-help credential-help">For the saved Server <strong>{server}</strong>. The secret is stored in macOS Keychain and is never displayed after saving.</p>
     {!draftSaved && <p className="credential-guidance" role="status">Save and test the Server address before configuring its credential.</p>}
-    {!loopback && <p className="credential-guidance" role="status">Credential storage and sending are available only for loopback Server addresses until TLS is supported.</p>}
+    {!loopback && !tls && <p className="credential-guidance" role="status">Credential storage and sending require a loopback address or an explicit tls:// address.</p>}
     <form onSubmit={(event) => void saveCredential(event)}>
       <label>Scheme<select value={scheme} onChange={(event) => setScheme(event.target.value as CredentialScheme)} disabled={!canConfigure || statusLoading || busy}><option value="Bearer">Bearer</option><option value="ApiKey">ApiKey</option></select></label>
       <label>Secret<input ref={secretInput} type="password" autoComplete="off" autoCapitalize="off" spellCheck={false} placeholder="Enter a new secret" disabled={!canConfigure || statusLoading || busy} onChange={(event) => setHasSecret(Boolean(event.target.value))} /></label>

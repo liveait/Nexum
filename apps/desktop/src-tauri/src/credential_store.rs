@@ -9,9 +9,9 @@ const INVALID_STORED_CREDENTIAL: &str = "stored credential has an invalid format
 #[cfg(not(target_os = "macos"))]
 const UNSUPPORTED: &str = "credential storage requires macOS Keychain";
 
-/// The account is a canonical loopback host and port, so one Server cannot
-/// accidentally use another Server's credential. A hostname is accepted only
-/// when it is exactly `localhost`; all other accepted hosts are numeric IPs.
+/// Plaintext accounts keep their historical canonical host and port form.
+/// TLS accounts carry an explicit `tls://` prefix so a plaintext entry can
+/// never be reused for the same host and port after transport changes.
 #[cfg(any(target_os = "macos", test))]
 fn normalize_loopback_server(server: &str) -> Result<String, String> {
     let server = server.trim();
@@ -27,6 +27,65 @@ fn normalize_loopback_server(server: &str) -> Result<String, String> {
         return Ok(format!("localhost:{port}"));
     }
     Err("credentials require a loopback server address with a valid port".to_owned())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn normalize_tls_server(server: &str) -> Result<String, String> {
+    let authority = server
+        .trim()
+        .strip_prefix("tls://")
+        .ok_or_else(|| "TLS credential requires a tls:// server address".to_owned())?;
+    if authority.is_empty() || authority.contains('/') || authority.contains('?') {
+        return Err("credentials require a valid TLS server address".to_owned());
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, rest) = bracketed
+            .split_once(']')
+            .ok_or_else(|| "TLS IPv6 server address must close the bracket".to_owned())?;
+        let port = rest
+            .strip_prefix(':')
+            .ok_or_else(|| "TLS server address must include a port".to_owned())?;
+        (host, port)
+    } else {
+        let (host, port) = authority
+            .rsplit_once(':')
+            .ok_or_else(|| "TLS server address must include a port".to_owned())?;
+        if host.contains(':') {
+            return Err("TLS IPv6 server addresses must use [address]:port".to_owned());
+        }
+        (host, port)
+    };
+    if host.is_empty() {
+        return Err("TLS server address must include a host".to_owned());
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| "TLS server address port must be between 1 and 65535".to_owned())?;
+    if port == 0 {
+        return Err("TLS server address port must be between 1 and 65535".to_owned());
+    }
+    let host = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        ip.to_string()
+    } else {
+        if rustls::pki_types::ServerName::try_from(host.to_owned()).is_err() {
+            return Err("TLS server address contains an invalid server name".to_owned());
+        }
+        host.to_ascii_lowercase()
+    };
+    if host.contains(':') {
+        Ok(format!("tls://[{host}]:{port}"))
+    } else {
+        Ok(format!("tls://{host}:{port}"))
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn normalize_credential_account(server: &str) -> Result<Option<String>, String> {
+    let server = server.trim();
+    if server.starts_with("tls://") {
+        return normalize_tls_server(server).map(Some);
+    }
+    normalize_loopback_server(server).map(Some).or(Ok(None))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -81,7 +140,9 @@ fn read_credential(account: &str) -> Result<Option<Credential>, String> {
 pub fn credential_status(server: &str) -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     {
-        let account = normalize_loopback_server(server)?;
+        let Some(account) = normalize_credential_account(server)? else {
+            return Ok(None);
+        };
         read_credential(&account)?
             .map(|credential| credential_scheme(&credential).map(str::to_owned))
             .transpose()
@@ -98,7 +159,8 @@ pub fn save_credential(server: &str, scheme: &str, secret: String) -> Result<(),
     {
         use security_framework::passwords::set_generic_password;
 
-        let account = normalize_loopback_server(server)?;
+        let account = normalize_credential_account(server)?
+            .ok_or_else(|| "credentials require a loopback or TLS server address".to_owned())?;
         let credential = new_credential(scheme, secret)?;
         let bytes = serde_json::to_vec(&credential)
             .map_err(|_| "could not encode credential".to_owned())?;
@@ -122,7 +184,8 @@ pub fn clear_credential(server: &str) -> Result<(), String> {
         use security_framework::passwords::delete_generic_password;
         use security_framework_sys::base::errSecItemNotFound;
 
-        let account = normalize_loopback_server(server)?;
+        let account = normalize_credential_account(server)?
+            .ok_or_else(|| "credentials require a loopback or TLS server address".to_owned())?;
         match delete_generic_password(KEYCHAIN_SERVICE, &account) {
             Ok(()) => Ok(()),
             Err(error) if error.code() == errSecItemNotFound => Ok(()),
@@ -139,13 +202,13 @@ pub fn clear_credential(server: &str) -> Result<(), String> {
     }
 }
 
-/// Never load or send a credential for an address outside the loopback allowlist.
-/// Keychain access failures are propagated so callers cannot silently retry
-/// unauthenticated.
+/// Load credentials for a canonical loopback plaintext or explicit TLS
+/// address. Keychain access failures are propagated so callers cannot
+/// silently retry unauthenticated.
 pub fn credential_for_request(server: &str) -> Result<Option<Credential>, String> {
     #[cfg(target_os = "macos")]
     {
-        let Ok(account) = normalize_loopback_server(server) else {
+        let Some(account) = normalize_credential_account(server)? else {
             return Ok(None);
         };
         read_credential(&account)
@@ -203,6 +266,18 @@ mod tests {
             normalize_loopback_server("127.0.0.2:39100").unwrap()
         );
         assert_eq!(
+            normalize_tls_server("tls://Example.COM:443").unwrap(),
+            "tls://example.com:443"
+        );
+        assert_eq!(
+            normalize_tls_server("tls://[0:0:0:0:0:0:0:1]:443").unwrap(),
+            "tls://[::1]:443"
+        );
+        assert_ne!(
+            normalize_loopback_server("localhost:39100").unwrap(),
+            normalize_tls_server("tls://localhost:39100").unwrap()
+        );
+        assert_eq!(
             credential_scheme(&new_credential("Bearer", "secret".to_owned()).unwrap()).unwrap(),
             "Bearer"
         );
@@ -220,6 +295,18 @@ mod tests {
             })
             .is_err()
         );
+        for server in [
+            "tls://example.com",
+            "tls://example.com:0",
+            "tls://example.com:443/path",
+            "tls://[::1]:443",
+        ] {
+            if server == "tls://[::1]:443" {
+                assert!(normalize_tls_server(server).is_ok());
+            } else {
+                assert!(normalize_tls_server(server).is_err(), "{server}");
+            }
+        }
         assert!(
             credential_scheme(&Credential::ApiKey {
                 key: "\n".to_owned()

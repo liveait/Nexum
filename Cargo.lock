@@ -2081,6 +2081,8 @@ name = "nexum-desktop"
 version = "0.1.0"
 dependencies = [
  "nexum-protocol",
+ "rustls",
+ "rustls-native-certs",
  "security-framework",
  "security-framework-sys",
  "serde",
