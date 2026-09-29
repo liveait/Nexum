@@ -278,6 +278,15 @@ mod tests {
             normalize_tls_server("tls://localhost:39100").unwrap()
         );
         assert_eq!(
+            normalize_credential_account("localhost:39100").unwrap(),
+            Some("localhost:39100".to_owned())
+        );
+        assert_eq!(
+            normalize_credential_account("tls://Example.COM:443").unwrap(),
+            Some("tls://example.com:443".to_owned())
+        );
+        assert_eq!(normalize_credential_account("example.com:443").unwrap(), None);
+        assert_eq!(
             credential_scheme(&new_credential("Bearer", "secret".to_owned()).unwrap()).unwrap(),
             "Bearer"
         );
