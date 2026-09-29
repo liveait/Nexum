@@ -2,7 +2,7 @@
 
 Status: implemented macOS Desktop UI baseline; remaining items are called out as planned.
 
-This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards, Add Download sheet with a native destination selector, status bar, event-driven refresh, and planned-capability placeholders described here. Keyboard shortcuts and localization remain later slices.
+This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards with macOS Keychain credential controls, Add Download sheet with a native destination selector, status bar, event-driven refresh, and planned-capability placeholders described here. Keyboard shortcuts and localization remain later slices.
 
 For the Chinese version, see [DESKTOP_UI_DESIGN.zh-CN.md](DESKTOP_UI_DESIGN.zh-CN.md).
 
@@ -124,13 +124,13 @@ The current server requires an explicit task ID and destination, so the first im
 Settings is a dedicated page with grouped sections. It is not a second task workflow:
 
 - **Server:** address (default `127.0.0.1:39100`), Connect/Test, last connection result, and protocol version.
-- **Authentication (planned Desktop slice):** a scheme selector and secret field for the server's `Bearer` or `ApiKey` configuration, stored through macOS secure storage. The current Desktop client does not send credentials yet.
+- **Authentication:** in General settings for the active saved Server, show a `Bearer`/`ApiKey` scheme selector, write-only secret field, configured-scheme status, and Save/Clear actions. Save the scheme and secret together in macOS Keychain under that Server address; never read the secret back into React. Saving, clearing, or changing the active Server restarts the event subscription and refreshes the task snapshot. Until TLS support exists, enable credential storage and sending only for loopback Server addresses.
 - **Updates:** Automatic uses event refreshes and a five-second idle or one-second active polling fallback when the stream is disconnected; Manual disables that polling fallback.
 - **Appearance:** follow the system appearance; reserve language and accent choices for the client settings model.
 - **Notifications:** show task completion, failure, and retry events in the session Activity Center; reserve delivery preferences and mute controls for a later slice.
 - A note that the Server is a separate process in the first release.
 
-Persist the address and refresh policy in the macOS application support directory through a Tauri command. Store a future Desktop credential in the macOS Keychain or an equivalent secure store rather than browser storage. Until that client slice is implemented, do not enable `require_auth` for a Desktop session; an authenticated Server will reject the client's requests.
+Persist the address and refresh policy in the macOS application support directory through a Tauri command. Keep credentials only in macOS Keychain. The Tauri backend attaches the credential to ordinary RPC calls and the dedicated `events.subscribe` request, and reports Keychain failures without revealing the secret. Desktop on other platforms can connect without authentication, but credential Save and Clear are unsupported.
 
 ## 6. State model and data freshness
 
@@ -185,6 +185,7 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 - Add URL validation and task ID derivation. [ ]
 - Add the native destination save dialog through the Tauri dialog plugin. [x]
 - Add Tauri commands for loading and saving desktop settings. [x]
+- Add per-Server macOS Keychain credential Save/Clear controls and attach credentials to RPC and event subscriptions. [x]
 - Queue a newly created task as part of the Add flow. [x]
 
 ### Slice C — live task surface (partially implemented)

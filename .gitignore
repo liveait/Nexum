@@ -1,7 +1,8 @@
 /target/
 /data/
+apps/desktop/dist/
+apps/desktop/node_modules/
 **/*.rs.bk
-Cargo.lock
 .DS_Store
 .idea/
 .vscode/

@@ -2,7 +2,7 @@
 
 状态：已实现 macOS Desktop UI 基线；剩余项目已标注为计划项。
 
-本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、Settings 卡片、带原生目标选择器的 Add Download Sheet、状态栏、事件驱动刷新和计划能力占位。快捷键和本地化仍属于后续切片。
+本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、带 macOS Keychain 凭据操作的 Settings 卡片、带原生目标选择器的 Add Download Sheet、状态栏、事件驱动刷新和计划能力占位。快捷键和本地化仍属于后续切片。
 
 英文版见 [DESKTOP_UI_DESIGN.md](DESKTOP_UI_DESIGN.md)。
 
@@ -124,13 +124,13 @@ Sheet 只承担一条清晰流程：
 设置是一个独立页面，按分区组织内容，不是第二个任务工作流：
 
 - **Server：** 地址（默认 `127.0.0.1:39100`）、连接/测试按钮、最近连接结果和协议版本。
-- **认证（Desktop 后续切片）：** 为 Server 的 `Bearer` 或 `ApiKey` 配置提供 scheme 选择器和 secret 输入框，并通过 macOS 安全存储保存。当前 Desktop 客户端尚未发送凭据。
+- **认证：** 在通用设置中针对当前已保存的 Server 显示 `Bearer`/`ApiKey` scheme 选择器、只写 secret 输入框、已配置 scheme 状态，以及保存/清除操作。将 scheme 和 secret 一起按 Server 地址保存在 macOS Keychain，不能把 secret 回读到 React。保存、清除或切换当前 Server 后重启事件订阅并刷新 Task 快照。TLS 可用前，仅允许回环 Server 地址保存和发送凭据。
 - **更新：** 自动策略使用事件刷新；事件流断开时回退到空闲每五秒、下载中每秒的轮询。手动策略会禁用该轮询回退。
 - **外观：** 跟随系统外观；语言和强调色选择先预留给客户端设置模型。
 - **通知：** 在本次 Desktop 会话的 Activity Center 显示任务完成、失败和重试事件；通知偏好与静音控制留待后续切片。
 - 第一版 Server 是独立进程的说明。
 
-通过 Tauri 命令将地址和刷新策略保存到 macOS Application Support 目录。未来 Desktop 凭据应保存到 macOS Keychain 或等效的安全存储，不要使用浏览器存储。在该客户端切片完成前，Desktop 会话不要启用 `require_auth`；启用认证的 Server 会拒绝当前客户端请求。
+通过 Tauri 命令将地址和刷新策略保存到 macOS Application Support 目录。凭据只保存在 macOS Keychain。Tauri 后端会为普通 RPC 和独立的 `events.subscribe` 请求附加凭据，Keychain 失败时显示不含 secret 的错误。其他平台的 Desktop 可以无认证连接，但不支持保存或清除凭据。
 
 ## 6. 状态模型与数据新鲜度
 
@@ -185,6 +185,7 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 - 增加 URL 校验和任务 ID 推导。[ ]
 - 通过 Tauri dialog plugin 增加原生目标保存对话框。[x]
 - 增加读取/保存 Desktop 设置的 Tauri 命令。[x]
+- 增加按 Server 地址存储的 macOS Keychain 凭据保存/清除操作，并为 RPC 和事件订阅附加凭据。[x]
 - Add 流程在创建任务后自动排队。[x]
 
 ### Slice C — 实时任务界面（部分实现）

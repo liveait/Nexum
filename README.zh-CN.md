@@ -13,7 +13,7 @@ Nexum 仍在开发中。目前可运行的主线是用于创建和管理任务�
 
 CLI 和早期 Tauri Desktop 客户端可调用本地 Server；Desktop 需要单独运行 Server。Server 在数据目录（默认 `./data`）下打开 `nexum.sqlite`，启动时恢复已保存的任务。排队支持的 HTTP/HTTPS 任务、带排队任务重启 Server，或活动 HTTP 传输完成/失败后，Server 都会自动填充可用的 Scheduler 槽位。中断的 HTTP 响应在稳定的部分文件、sidecar 以及 ETag 或 Last-Modified 校验器仍与服务端确认的范围匹配时，可以在重启后续传。`task.start` 仍可作为手动 kick 和兼容接口，用于启动一个排队的 HTTP/HTTPS 任务，之后同一派发器会继续填充其他可用槽位。Desktop 现在通过独立 TCP 事件流订阅进行去抖的实时任务刷新；事件流不可用时按已配置的刷新策略回退到轮询。Magnet 和本地文件来源可以创建任务，但尚无传输路径。Browser Extension 现在通过 Server 回环 HTTP `/jsonrpc` 桥接发送 `task.create` 和 `task.queue`；事件订阅仍只走 TCP。
 
-Server 可以在启用 `require_auth` 时执行 Bearer 或 ApiKey 认证，也可以启用可选的进程级 RPC 限流。运行中的 Server 尚未接入 TLS、可执行插件或真实媒体处理。CLI 可以保存并发送凭据；当前 Desktop 客户端不会发送凭据，因此使用该客户端时应保持认证关闭。代码边界与调用路径见[架构设计](docs/ARCHITECTURE.zh-CN.md)，后续集成工作见[开发计划](docs/DEVELOPMENT_PLAN.zh-CN.md)。
+Server 可以在启用 `require_auth` 时执行 Bearer 或 ApiKey 认证，也可以启用可选的进程级 RPC 限流。运行中的 Server 尚未接入 TLS、可执行插件或真实媒体处理。CLI 会将凭据保存在配置文件中；macOS Desktop 会按 Server 地址将凭据保存到 Keychain，并可连接要求认证的回环 Server。Browser Extension 尚无凭据设置。代码边界与调用路径见[架构设计](docs/ARCHITECTURE.zh-CN.md)，后续集成工作见[开发计划](docs/DEVELOPMENT_PLAN.zh-CN.md)。
 
 ## 运行本地任务流程
 
@@ -40,7 +40,7 @@ auth_scheme=ApiKey
 auth_token=replace-with-a-secret
 ```
 
-使用 `cargo run -p nexum-server -- --config server.conf` 启动，然后为 CLI 保存相同的凭据（token 会写入 CLI 配置目录）：
+使用 `cargo run -p nexum-server -- --config server.conf` 启动，然后为 CLI 保存相同的凭据（token 会以明文写入 CLI 配置目录）：
 
 ```bash
 cargo run -p nexum-cli -- auth set ApiKey replace-with-a-secret
@@ -48,7 +48,7 @@ cargo run -p nexum-cli -- task list
 cargo run -p nexum-cli -- auth clear
 ```
 
-缺少、无效或不匹配的凭据会返回 JSON-RPC 错误 `-32001`（`authentication required`）。`server.auth` 只返回已配置的 scheme，不会返回 secret。若设置 `require_auth=true` 却没有有效 scheme 和非空 token，Server 会拒绝启动。认证会覆盖普通 RPC 请求和 `events.subscribe`；客户端必须为这两类请求附加匹配凭据，CLI 会为自己的任务和 Server 请求附加保存的凭据。
+缺少、无效或不匹配的凭据会返回 JSON-RPC 错误 `-32001`（`authentication required`）。`server.auth` 只返回已配置的 scheme，不会返回 secret。若设置 `require_auth=true` 却没有有效 scheme 和非空 token，Server 会拒绝启动。认证会覆盖普通 RPC 请求和 `events.subscribe`。在 macOS Desktop 设置 → 通用中，为当前已保存的回环 Server 地址保存匹配的 scheme 和 secret；Desktop 会为这两类请求附加该凭据。secret 输入框只用于写入，清除凭据会从 Keychain 移除它。非回环地址的凭据保存与发送须等待 TLS 支持。
 
 RPC 限流默认关闭。在 Server 命令行同时设置 `--rate-limit-rps` 和 `--rate-limit-burst`，或在配置文件中同时设置 `rate_limit_rps` 和 `rate_limit_burst`，即可让 TCP 与 HTTP `/jsonrpc` 共用一个令牌桶。带 `id` 的超额调用返回 JSON-RPC 错误 `-32002`；HTTP 响应仍为状态码 `200`。没有 `id` 的通知会被丢弃，不返回 JSON-RPC 响应。限流配置无效或不完整，以及显式传入的 `--config` 文件无法读取时，Server 会拒绝启动。示例与计数规则见[开发指南](docs/DEVELOPMENT.zh-CN.md)。
 

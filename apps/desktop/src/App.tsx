@@ -34,6 +34,7 @@ type SettingsCategory = "home" | "general" | "appearance" | "downloads" | "bitto
 type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
 type TaskCommand = "task_queue" | "task_pause" | "task_resume" | "task_remove";
 type NoticeTone = "success" | "error";
+type CredentialScheme = "Bearer" | "ApiKey";
 
 interface Notice {
   id: number;
@@ -44,6 +45,7 @@ interface Notice {
 
 interface ServerEvent {
   server: string;
+  generation: number;
   sequence: number;
   event: string;
   data: Record<string, unknown>;
@@ -51,6 +53,7 @@ interface ServerEvent {
 
 interface EventStreamStatus {
   server: string;
+  generation: number;
   connected: boolean;
   error: string | null;
   resync_required: boolean;
@@ -128,6 +131,24 @@ function errorMessage(error: unknown): string {
   return typeof error === "string" ? error : "The operation failed";
 }
 
+function isLoopbackServerAddress(address: string): boolean {
+  const match = /^(?:([^:[\]]+)|\[([^\]]+)\]):(\d+)$/.exec(address.trim());
+  if (!match) return false;
+  const port = Number(match[3]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+  if (match[2]) {
+    try {
+      return new URL(`http://[${match[2]}]:${port}/`).hostname === "[::1]";
+    } catch {
+      return false;
+    }
+  }
+  const host = match[1].toLowerCase();
+  if (host === "localhost") return true;
+  const octets = host.split(".");
+  return octets.length === 4 && octets[0] === "127" && octets.every((octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255);
+}
+
 type IconName = "dashboard" | "downloads" | "trackers" | "plugins" | "notifications" | "settings" | "general" | "appearance" | "bittorrent" | "integration" | "network" | "advanced" | "about" | "search" | "info" | "list" | "more";
 
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
@@ -161,6 +182,7 @@ export default function App() {
   const [serverDraft, setServerDraft] = useState(DEFAULT_SERVER);
   const [refreshSeconds, setRefreshSeconds] = useState(5);
   const [settingsReady, setSettingsReady] = useState(false);
+  const [credentialRevision, setCredentialRevision] = useState(0);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
@@ -182,6 +204,17 @@ export default function App() {
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
   const eventRefreshTimer = useRef<number | null>(null);
+  const streamTransition = useRef<Promise<void>>(Promise.resolve());
+  const snapshotContext = useRef({ server, credentialRevision });
+  if (snapshotContext.current.server !== server || snapshotContext.current.credentialRevision !== credentialRevision) {
+    snapshotContext.current = { server, credentialRevision };
+  }
+
+  const queueStreamTransition = (operation: () => Promise<void>): Promise<void> => {
+    const next = streamTransition.current.then(operation);
+    streamTransition.current = next.catch(() => undefined);
+    return next;
+  };
 
   const pushNotification = (message: string, tone: NoticeTone) => {
     const item = { id: Date.now(), message, tone, createdAt: Date.now() };
@@ -196,10 +229,15 @@ export default function App() {
   };
 
   const refreshTasks = async (address = server, options: { silent?: boolean } = {}): Promise<void> => {
+    const context = snapshotContext.current;
+    if (address !== context.server) return;
+    const isCurrent = () => snapshotContext.current === context;
     const silent = options.silent ?? false;
     if (!address.trim()) {
-      setConnection("error");
-      pushNotification("Enter a Server address first.", "error");
+      if (isCurrent()) {
+        setConnection("error");
+        pushNotification("Enter a Server address first.", "error");
+      }
       return;
     }
     if (!silent) {
@@ -209,15 +247,18 @@ export default function App() {
     setError("");
     try {
       const result = await invoke<TaskItem[]>("task_list", { server: address });
+      if (!isCurrent()) return;
       setTasks(result);
       setSelectedId((current) => current && result.some((task) => task.id === current) ? current : result[0]?.id ?? null);
       setLastUpdatedAt(Date.now());
       setConnection("connected");
     } catch (caught) {
-      setConnection("error");
-      setError(errorMessage(caught));
+      if (isCurrent()) {
+        setConnection("error");
+        setError(errorMessage(caught));
+      }
     } finally {
-      if (!silent) setLoading(false);
+      if (!silent && isCurrent()) setLoading(false);
     }
   };
 
@@ -242,6 +283,7 @@ export default function App() {
     let eventUnlisten: UnlistenFn | undefined;
     let statusUnlisten: UnlistenFn | undefined;
     let streamGeneration: number | undefined;
+    const pendingStreamPayloads: Array<{ kind: "event"; payload: ServerEvent } | { kind: "status"; payload: EventStreamStatus }> = [];
 
     const scheduleRefresh = () => {
       if (!active || eventRefreshTimer.current !== null) return;
@@ -267,9 +309,20 @@ export default function App() {
       if (payload.connected || payload.resync_required) scheduleRefresh();
     };
 
+    const handleStreamPayload = (item: { kind: "event"; payload: ServerEvent } | { kind: "status"; payload: EventStreamStatus }) => {
+      if (!active || item.payload.server !== server) return;
+      if (streamGeneration === undefined) {
+        pendingStreamPayloads.push(item);
+        return;
+      }
+      if (item.payload.generation !== streamGeneration) return;
+      if (item.kind === "event") handleServerEvent(item.payload);
+      else handleEventStreamStatus(item.payload);
+    };
+
     void Promise.all([
-      listen<ServerEvent>("server-event", ({ payload }) => { if (active) handleServerEvent(payload); }),
-      listen<EventStreamStatus>("server-event-status", ({ payload }) => handleEventStreamStatus(payload)),
+      listen<ServerEvent>("server-event", ({ payload }) => handleStreamPayload({ kind: "event", payload })),
+      listen<EventStreamStatus>("server-event-status", ({ payload }) => handleStreamPayload({ kind: "status", payload })),
     ])
       .then(([removeEvent, removeStatus]) => {
         if (!active) {
@@ -279,12 +332,13 @@ export default function App() {
         }
         eventUnlisten = removeEvent;
         statusUnlisten = removeStatus;
-        return invoke<number>("start_event_stream", { server }).then((generation) => {
-          if (!active) {
-            return invoke("stop_event_stream", { generation });
-          }
+        return queueStreamTransition(async () => {
+          if (!active) return;
+          const generation = await invoke<number>("start_event_stream", { server });
           streamGeneration = generation;
-          return undefined;
+          if (active) {
+            for (const item of pendingStreamPayloads.splice(0)) handleStreamPayload(item);
+          }
         });
       })
       .catch((caught) => { if (active) { setEventStreamConnected(false); setError(errorMessage(caught)); } });
@@ -297,20 +351,21 @@ export default function App() {
       }
       eventUnlisten?.();
       statusUnlisten?.();
+      pendingStreamPayloads.length = 0;
       setEventStreamConnected(false);
-      if (streamGeneration !== undefined) {
-        void invoke("stop_event_stream", { generation: streamGeneration }).catch(() => undefined);
-      }
+      void queueStreamTransition(async () => {
+        if (streamGeneration !== undefined) await invoke("stop_event_stream", { generation: streamGeneration });
+      }).catch(() => undefined);
     };
-    // Event subscriptions follow the active server and settings only.
+    // Event subscriptions follow the active server and its Keychain credential.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server, settingsReady]);
+  }, [server, settingsReady, credentialRevision]);
 
   useEffect(() => {
     if (settingsReady) void refreshTasks();
-    // refreshTasks intentionally follows the active server only.
+    // Refresh the full snapshot when the active server or its credential changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server, settingsReady]);
+  }, [server, settingsReady, credentialRevision]);
 
   const activeDownload = tasks.some((task) => task.state === "Downloading");
   const pollingSeconds = refreshSeconds > 0 && activeDownload ? 1 : refreshSeconds;
@@ -321,9 +376,9 @@ export default function App() {
       if (document.visibilityState === "visible") void refreshTasks();
     }, pollingSeconds * 1000);
     return () => window.clearInterval(timer);
-    // refreshTasks is intentionally kept behind the active server/settings inputs.
+    // Keep fallback polling on the active server and credential revision.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connection, eventStreamConnected, pollingSeconds, server, settingsReady]);
+  }, [connection, eventStreamConnected, pollingSeconds, server, settingsReady, credentialRevision]);
 
   const counts = useMemo(() => DOWNLOAD_FILTERS.reduce<Record<TaskFilter, number>>((result, item) => {
     result[item.id] = tasks.filter((task) => matchesFilter(task, item.id)).length;
@@ -491,7 +546,7 @@ export default function App() {
         {section === "trackers" && <UnavailableView icon="trackers" title="Trackers" description="Tracker discovery and health checks will appear here when the BitTorrent engine is connected." />}
         {section === "plugins" && <UnavailableView icon="plugins" title="Plugins" description="The plugin manager is currently a runtime foundation. Executable providers and a plugin catalog are planned." />}
         {section === "notifications" && <NotificationsView notifications={notifications} onDownloads={() => selectSection("downloads")} />}
-        {section === "settings" && <SettingsView category={settingsCategory} server={serverDraft} connection={connection} refreshSeconds={refreshSeconds} onCategory={setSettingsCategory} onServerChange={setServerDraft} onRefreshSecondsChange={setRefreshSeconds} onApply={() => void applyServer()} />}
+        {section === "settings" && <SettingsView category={settingsCategory} server={server} serverDraft={serverDraft} settingsReady={settingsReady} connection={connection} refreshSeconds={refreshSeconds} onCategory={setSettingsCategory} onServerChange={setServerDraft} onRefreshSecondsChange={setRefreshSeconds} onApply={() => void applyServer()} onCredentialChanged={() => setCredentialRevision((current) => current + 1)} />}
       </section>
 
       {showAdd && (
@@ -601,15 +656,143 @@ function NotificationsView({ notifications, onDownloads }: { notifications: Noti
   return <div className="notifications-page"><div className="page-heading"><div><span className="eyebrow">Activity center</span><h1>Notifications</h1><p>Task and connection events from this Desktop session.</p></div><button className="button" onClick={onDownloads}>View downloads</button></div>{notifications.length === 0 ? <div className="notifications-empty"><Icon name="notifications" size={32} /><h2>No notifications</h2><p>Completion and failure events will appear here.</p></div> : <div className="notification-list">{notifications.map((item) => <div className={`notification-row ${item.tone}`} key={item.id}><span className={`status-light ${item.tone === "success" ? "ready" : "error"}`} /><div><strong>{item.message}</strong><span>{new Date(item.createdAt).toLocaleTimeString()}</span></div></div>)}</div>}</div>;
 }
 
-function SettingsView({ category, server, connection, refreshSeconds, onCategory, onServerChange, onRefreshSecondsChange, onApply }: { category: SettingsCategory; server: string; connection: ConnectionState; refreshSeconds: number; onCategory: (category: SettingsCategory) => void; onServerChange: (value: string) => void; onRefreshSecondsChange: (value: number) => void; onApply: () => void }) {
+function SettingsView({ category, server, serverDraft, settingsReady, connection, refreshSeconds, onCategory, onServerChange, onRefreshSecondsChange, onApply, onCredentialChanged }: { category: SettingsCategory; server: string; serverDraft: string; settingsReady: boolean; connection: ConnectionState; refreshSeconds: number; onCategory: (category: SettingsCategory) => void; onServerChange: (value: string) => void; onRefreshSecondsChange: (value: number) => void; onApply: () => void; onCredentialChanged: () => void }) {
   if (category !== "home") {
     const card = SETTINGS_CARDS.find((item) => item.id === category);
-    if (category === "general") return <SettingsDetail title={card?.label ?? "General"} icon="general" onBack={() => onCategory("home")}><div className="settings-card"><div className="settings-card-heading"><div><span className="eyebrow">Connection</span><h2>Server</h2></div><span className={`status-pill ${connection}`}>{connection}</span></div><label>Server address<input value={server} onChange={(event) => onServerChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onApply(); }} placeholder={DEFAULT_SERVER} /></label><p className="field-help">The Server runs as a separate process. The saved address is kept in the Mac application support directory.</p><button className="button primary" onClick={onApply}>Save and test connection</button></div></SettingsDetail>;
+    if (category === "general") return <SettingsDetail title={card?.label ?? "General"} icon="general" onBack={() => onCategory("home")}>
+      <div className="settings-card"><div className="settings-card-heading"><div><span className="eyebrow">Connection</span><h2>Server</h2></div><span className={`status-pill ${connection}`}>{connection}</span></div><label>Server address<input value={serverDraft} onChange={(event) => onServerChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onApply(); }} placeholder={DEFAULT_SERVER} /></label><p className="field-help">The Server runs as a separate process. The saved address is kept in the Mac application support directory.</p><button className="button primary" onClick={onApply}>Save and test connection</button></div>
+      <CredentialSettings key={server} server={server} serverDraft={serverDraft} settingsReady={settingsReady} onCredentialChanged={onCredentialChanged} />
+    </SettingsDetail>;
     if (category === "downloads") return <SettingsDetail title={card?.label ?? "Downloads"} icon="downloads" onBack={() => onCategory("home")}><div className="settings-card"><span className="eyebrow">Updates</span><h2>Refresh policy</h2><p className="field-help">Idle tasks refresh every five seconds. Active downloads refresh every second.</p><select value={refreshSeconds} onChange={(event) => onRefreshSecondsChange(Number(event.target.value))}><option value={0}>Manual</option><option value={5}>Automatic</option></select><button className="button primary settings-save" onClick={onApply}>Save settings</button></div></SettingsDetail>;
     if (category === "appearance") return <SettingsDetail title={card?.label ?? "Appearance"} icon="appearance" onBack={() => onCategory("home")}><div className="settings-card"><span className="eyebrow">Theme</span><h2>Follow system appearance</h2><p className="field-help">Nexum follows the Mac light or dark appearance. Language choices will be added to the persisted settings model.</p></div></SettingsDetail>;
     return <SettingsDetail title={card?.label ?? "Settings"} icon={card?.icon ?? "settings"} onBack={() => onCategory("home")}><div className="settings-card settings-planned"><span className="eyebrow">Planned capability</span><h2>{card?.label}</h2><p>{card?.description}. This page is reserved so the navigation can remain stable while the underlying engine and protocol are implemented.</p><span className="planned-badge">Coming later</span></div></SettingsDetail>;
   }
   return <div className="settings-page"><div className="page-heading"><div><span className="eyebrow">Client preferences</span><h1>Settings</h1><p>Configure Nexum without mixing connection options into the download list.</p></div></div><div className="settings-grid">{SETTINGS_CARDS.map((card) => <button className={`settings-card-tile ${card.available ? "" : "planned"}`} key={card.id} onClick={() => onCategory(card.id)}><span className={`settings-tile-icon icon-${card.id}`}><Icon name={card.icon} size={28} /></span><strong>{card.label}</strong><p>{card.description}</p>{!card.available && <span className="planned-badge">Planned</span>}</button>)}</div></div>;
+}
+
+function CredentialSettings({ server, serverDraft, settingsReady, onCredentialChanged }: { server: string; serverDraft: string; settingsReady: boolean; onCredentialChanged: () => void }) {
+  const secretInput = useRef<HTMLInputElement>(null);
+  const currentServer = useRef(server);
+  currentServer.current = server;
+  const [scheme, setScheme] = useState<CredentialScheme>("Bearer");
+  const [configuredScheme, setConfiguredScheme] = useState<CredentialScheme | null>(null);
+  const [statusFailed, setStatusFailed] = useState(false);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [hasSecret, setHasSecret] = useState(false);
+  const [feedback, setFeedback] = useState<{ tone: NoticeTone; message: string } | null>(null);
+
+  const loopback = isLoopbackServerAddress(server);
+  const draftSaved = serverDraft.trim() === server;
+  const canConfigure = settingsReady && draftSaved && loopback;
+
+  const clearSecretInput = () => {
+    if (secretInput.current) secretInput.current.value = "";
+    setHasSecret(false);
+  };
+
+  useEffect(() => {
+    clearSecretInput();
+    setFeedback(null);
+    // Changing the address draft must not carry an unsubmitted secret to another Server.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverDraft]);
+
+  useEffect(() => {
+    clearSecretInput();
+    setFeedback(null);
+    setConfiguredScheme(null);
+    setStatusFailed(false);
+    setScheme("Bearer");
+    if (!settingsReady || !loopback) {
+      setStatusLoading(false);
+      return undefined;
+    }
+
+    let active = true;
+    setStatusLoading(true);
+    void invoke<string | null>("credential_status", { server })
+      .then((savedScheme) => {
+        if (!active) return;
+        if (savedScheme !== null && savedScheme !== "Bearer" && savedScheme !== "ApiKey") {
+          throw new Error("The saved credential has an unsupported scheme.");
+        }
+        setConfiguredScheme(savedScheme);
+        setStatusFailed(false);
+        if (savedScheme) setScheme(savedScheme);
+      })
+      .catch((caught) => {
+        if (active) {
+          setStatusFailed(true);
+          setFeedback({ tone: "error", message: errorMessage(caught) });
+        }
+      })
+      .finally(() => { if (active) setStatusLoading(false); });
+    return () => { active = false; };
+    // The status lookup follows only the saved Server, not edits to its draft.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server, settingsReady, loopback]);
+
+  const saveCredential = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!canConfigure || statusLoading || busy) return;
+    const secret = secretInput.current?.value ?? "";
+    if (!secret) {
+      setFeedback({ tone: "error", message: "Enter a secret first." });
+      return;
+    }
+
+    setBusy(true);
+    setFeedback(null);
+    try {
+      await invoke<void>("save_credential", { server, scheme, secret });
+      if (currentServer.current === server) {
+        setConfiguredScheme(scheme);
+        setStatusFailed(false);
+        setFeedback({ tone: "success", message: "Credential saved in macOS Keychain." });
+        onCredentialChanged();
+      }
+    } catch (caught) {
+      if (currentServer.current === server) setFeedback({ tone: "error", message: errorMessage(caught) });
+    } finally {
+      clearSecretInput();
+      setBusy(false);
+    }
+  };
+
+  const clearCredential = async (): Promise<void> => {
+    if (!canConfigure || statusLoading || busy || (!configuredScheme && !statusFailed)) return;
+    setBusy(true);
+    setFeedback(null);
+    clearSecretInput();
+    try {
+      await invoke<void>("clear_credential", { server });
+      if (currentServer.current === server) {
+        setConfiguredScheme(null);
+        setStatusFailed(false);
+        setFeedback({ tone: "success", message: "Credential removed from macOS Keychain." });
+        onCredentialChanged();
+      }
+    } catch (caught) {
+      if (currentServer.current === server) setFeedback({ tone: "error", message: errorMessage(caught) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const statusText = !loopback ? "Loopback only" : statusLoading ? "Checking…" : statusFailed ? "Status unavailable" : configuredScheme ? `${configuredScheme} configured` : "Not configured";
+  return <div className="settings-card credential-card">
+    <div className="settings-card-heading"><div><span className="eyebrow">Authentication</span><h2>Server credential</h2></div><span className={`status-pill ${statusFailed ? "error" : configuredScheme ? "connected" : "disconnected"}`}>{statusText}</span></div>
+    <p className="field-help credential-help">For the saved Server <strong>{server}</strong>. The secret is stored in macOS Keychain and is never displayed after saving.</p>
+    {!draftSaved && <p className="credential-guidance" role="status">Save and test the Server address before configuring its credential.</p>}
+    {!loopback && <p className="credential-guidance" role="status">Credential storage and sending are available only for loopback Server addresses until TLS is supported.</p>}
+    <form onSubmit={(event) => void saveCredential(event)}>
+      <label>Scheme<select value={scheme} onChange={(event) => setScheme(event.target.value as CredentialScheme)} disabled={!canConfigure || statusLoading || busy}><option value="Bearer">Bearer</option><option value="ApiKey">ApiKey</option></select></label>
+      <label>Secret<input ref={secretInput} type="password" autoComplete="off" autoCapitalize="off" spellCheck={false} placeholder="Enter a new secret" disabled={!canConfigure || statusLoading || busy} onChange={(event) => setHasSecret(Boolean(event.target.value))} /></label>
+      {feedback && <p className={`credential-feedback ${feedback.tone}`} role={feedback.tone === "error" ? "alert" : "status"}>{feedback.message}</p>}
+      <div className="credential-actions"><button className="button primary" type="submit" disabled={!canConfigure || statusLoading || busy || !hasSecret}>{busy ? "Working…" : "Save credential"}</button><button className="button" type="button" onClick={() => void clearCredential()} disabled={!canConfigure || statusLoading || busy || (!configuredScheme && !statusFailed)}>Clear credential</button></div>
+    </form>
+  </div>;
 }
 
 function SettingsDetail({ title, icon, onBack, children }: { title: string; icon: IconName; onBack: () => void; children: ReactNode }) {

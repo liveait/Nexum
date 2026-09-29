@@ -33,12 +33,12 @@ apps/
 
 ```bash
 cargo fmt --all -- --check
-cargo check --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo check --locked --workspace --all-targets
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-CI 在 Ubuntu 上执行这些 Rust 检查。目前未构建或检查 TypeScript 包，也不生成发布产物。
+仓库会提交 `Cargo.lock`，因为此工作区包含 Server、CLI 和 Desktop 可执行程序；修改 Rust 依赖时应同步更新它。CI 在 Ubuntu 上执行这些 Rust 检查。目前未构建或检查 TypeScript 包，也不生成发布产物。
 
 ## Server 与 CLI
 
@@ -84,14 +84,14 @@ cargo run -p nexum-server -- \
 
 `require_auth=true` 要求受支持的 scheme 和非空 token；缺少任一字段、token 为空或 scheme 不受支持都会导致启动失败。启用后，Server 会在分发每个 RPC 前以及接受 `events.subscribe` 前校验请求凭据。scheme 和 secret 必须同时匹配。缺少或无效凭据会返回 JSON-RPC 错误 `-32001`，消息为 `authentication required`。`server.auth` 只返回已配置的 scheme，Server 日志和 Debug 输出会隐藏 token。
 
-CLI 会在保存默认 Server 地址的同一配置目录中保存凭据。使用以下命令设置或清除：
+CLI 会在保存默认 Server 地址的同一配置目录中以明文保存凭据。使用以下命令设置或清除：
 
 ```bash
 cargo run -p nexum-cli -- auth set ApiKey replace-with-a-secret
 cargo run -p nexum-cli -- auth clear
 ```
 
-`auth set` 只接受 `Bearer` 或 `ApiKey`，并拒绝空 token。`auth clear` 会同时删除两个凭据字段。当前 Desktop 客户端不会发送凭据；在 Desktop 增加凭据设置和安全存储前，请保持 `require_auth` 关闭。
+`auth set` 只接受 `Bearer` 或 `ApiKey`，并拒绝空 token。`auth clear` 会将 CLI 配置中的两个凭据字段值清空。在 macOS 上，先到 Desktop 设置保存回环 Server 地址，再在“通用”中选择 `Bearer` 或 `ApiKey`、输入匹配的 secret 并保存。Tauri 后端按该地址将 scheme 与 secret 保存到 Keychain，为普通 RPC 和 `events.subscribe` 附加凭据；查询 Keychain 配置状态时只把已配置的 scheme 返回给 React。保存或清除凭据会重启事件订阅并刷新 Task 快照。secret 输入框只写；清除操作会删除 Keychain 条目。由于尚无 TLS，Desktop 不会为非回环地址保存或附加凭据，但仍可尝试无认证的 RPC 连接。其他平台的 Desktop 可以无认证连接，但不支持保存和清除凭据。Browser Extension 仍没有凭据设置。
 
 ## RPC 限流
 
@@ -120,7 +120,7 @@ pnpm install
 pnpm dev
 ```
 
-Vite 使用 `1420` 端口。前端调用 Tauri 命令和 Tauri dialog plugin，因此测试完整应用还需要运行中的 Nexum Server 和原生 Tauri 窗口。安装 Tauri 2 CLI 后，保持 Vite 运行，并在另一个终端从 `apps/desktop` 执行 `cargo tauri dev`。`pnpm build` 会执行 TypeScript 编译和 Vite 构建；这是 Rust CI 之外的检查。
+Vite 使用 `1420` 端口。前端调用 Tauri 命令、macOS 上基于 Keychain 的凭据命令和 Tauri dialog plugin，因此测试完整应用还需要运行中的 Nexum Server 和原生 Tauri 窗口。安装 Tauri 2 CLI 后，保持 Vite 运行，并在另一个终端从 `apps/desktop` 执行 `cargo tauri dev`。`pnpm build` 会执行 TypeScript 编译和 Vite 构建；这是 Rust CI 之外的检查。在 `apps/desktop` 执行 `pnpm dlx @tauri-apps/cli@2 build --debug --bundles app` 可打包本地 macOS 开发版，产物位于仓库根目录的 `target/debug/bundle/macos/Nexum.app`。打包后可在 `apps/desktop` 执行 `codesign --force --deep --sign - ../../target/debug/bundle/macos/Nexum.app` 为本机开发版添加临时签名。对外分发所需的签名与公证仍属于后续发布工作。更新依赖时应让 Tauri 的 JavaScript 与 Rust 包保持相同次版本。
 
 macOS 优先的信息架构、任务状态、添加流程、设置、事件订阅、轮询回退和实现切片见 [Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)。
 
