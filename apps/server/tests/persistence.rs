@@ -69,6 +69,10 @@ struct ServerProcess {
 
 impl ServerProcess {
     fn start(data_dir: &Path) -> Self {
+        Self::start_with_max_connections(data_dir, 100)
+    }
+
+    fn start_with_max_connections(data_dir: &Path, max_connections: usize) -> Self {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
@@ -76,6 +80,8 @@ impl ServerProcess {
         let child = Command::new(env!("CARGO_BIN_EXE_nexum-server"))
             .arg("--port")
             .arg(port.to_string())
+            .arg("--max-connections")
+            .arg(max_connections.to_string())
             .arg("--data-dir")
             .arg(data_dir)
             .stdout(Stdio::null())
@@ -973,5 +979,90 @@ fn event_subscription_broadcasts_task_changes() {
     assert!(observed.iter().any(|event| event == "task.created"));
     assert!(observed.iter().any(|event| event == "task.state_changed"));
     assert!(observed.iter().any(|event| event == "scheduler.enqueued"));
+    server.stop();
+}
+
+#[test]
+fn max_connections_rejects_excess_connections_and_releases_after_close() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_max_connections(dir.path(), 1);
+
+    let mut first = None;
+    for _ in 0..20 {
+        let Ok(mut candidate) = TcpStream::connect(("127.0.0.1", server.port)) else {
+            thread::sleep(Duration::from_millis(25));
+            continue;
+        };
+        candidate
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let _ = writeln!(
+            candidate,
+            "{}",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "server.version"})
+        );
+        let mut first_line = String::new();
+        if BufReader::new(candidate.try_clone().unwrap())
+            .read_line(&mut first_line)
+            .is_ok()
+            && first_line.contains("\"result\":\"1\"")
+        {
+            first = Some(candidate);
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let first = first.expect("first connection was not admitted");
+
+    let mut second = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    second
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let _ = writeln!(
+        second,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 2, "method": "server.version"})
+    );
+    let mut rejected = [0_u8; 1];
+    let second_result = second.read(&mut rejected);
+    match second_result {
+        Ok(0) => {}
+        Ok(bytes) => panic!("rejected connection returned {bytes} bytes"),
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::UnexpectedEof
+            ),
+            "unexpected rejection error: {error}"
+        ),
+    }
+
+    drop(first);
+    let mut released = false;
+    for _ in 0..20 {
+        let mut third = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        third
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let _ = writeln!(
+            third,
+            "{}",
+            json!({"jsonrpc": "2.0", "id": 3, "method": "server.version"})
+        );
+        let mut line = String::new();
+        if BufReader::new(third).read_line(&mut line).is_ok() && line.contains("\"result\":\"1\"") {
+            released = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        released,
+        "connection slot was not released after the first client closed"
+    );
     server.stop();
 }

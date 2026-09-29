@@ -19,9 +19,9 @@ use nexum_protocol::{
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -43,6 +43,49 @@ struct EventHub {
     next_sequence: u64,
     next_subscriber: u64,
     subscribers: HashMap<u64, SyncSender<EventNotification>>,
+}
+
+#[derive(Clone)]
+struct ConnectionLimiter {
+    limit: usize,
+    active: Arc<AtomicUsize>,
+}
+
+struct ConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl ConnectionLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            active: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn try_acquire(&self) -> Option<ConnectionPermit> {
+        loop {
+            let active = self.active.load(Ordering::Acquire);
+            if active >= self.limit {
+                return None;
+            }
+            if self
+                .active
+                .compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(ConnectionPermit {
+                    active: Arc::clone(&self.active),
+                });
+            }
+        }
+    }
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl EventHub {
@@ -1101,6 +1144,7 @@ fn main() -> io::Result<()> {
     }));
     let address = format!("127.0.0.1:{}", config.port);
     let listener = TcpListener::bind(&address)?;
+    let connection_limiter = ConnectionLimiter::new(config.max_connections);
 
     spawn_event_pump(Arc::clone(&state));
     dispatch_available_http_tasks(&state);
@@ -1114,8 +1158,14 @@ fn main() -> io::Result<()> {
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
+                let Some(permit) = connection_limiter.try_acquire() else {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    eprintln!("connection limit reached; closing incoming connection");
+                    continue;
+                };
                 let state = Arc::clone(&state);
                 std::thread::spawn(move || {
+                    let _permit = permit;
                     if let Err(error) = handle_connection(stream, state) {
                         eprintln!("connection error: {error}");
                     }
@@ -1144,6 +1194,21 @@ mod tests {
     #[test]
     fn server_version_returns_correct_value() {
         assert_eq!(RpcDispatcher::version(), "1");
+    }
+
+    #[test]
+    fn connection_limiter_releases_permit_when_handler_finishes() {
+        let limiter = ConnectionLimiter::new(1);
+        let permit = limiter.try_acquire().expect("first connection should fit");
+        assert!(limiter.try_acquire().is_none());
+        drop(permit);
+        assert!(limiter.try_acquire().is_some());
+    }
+
+    #[test]
+    fn zero_connection_limit_rejects_all_connections() {
+        let limiter = ConnectionLimiter::new(0);
+        assert!(limiter.try_acquire().is_none());
     }
 
     #[test]

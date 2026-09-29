@@ -71,7 +71,8 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Loopback TCP server using line-delimited JSON-RPC
 - [x] CLI TCP client with task-control, address configuration, and server inspection commands
 - [x] Server CLI flags and key-value configuration parsing
-- [ ] Apply `require_auth` and `max_connections`; both are currently parsed but not enforced
+- [x] Enforce `max_connections` at TCP admission; excess connections close before request processing
+- [ ] Apply `require_auth`; it is currently parsed but not enforced
 - [x] Use `data_dir` for SQLite persistence and restart recovery
 - [x] Make normal `task.start` launch a real HTTP/HTTPS download for supported sources
 - [x] Persist transfer errors and expose them through task views instead of only server logs
@@ -124,7 +125,7 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 1. Complete the remaining server/client contracts: authenticated transport where configured, durable event-delivery semantics, and a browser-compatible endpoint or bridge.
    - Specify reconnect, dropped-event, and replay behavior for the bounded event stream.
    - Decide whether the browser uses an HTTP JSON-RPC endpoint or a TCP bridge, then connect the extension send flow.
-   - Enforce `require_auth`, `max_connections`, and configured TLS/rate-limit behavior.
+   - Enforce `require_auth` and configured TLS/rate-limit behavior.
 2. Finish the Desktop release layer: keyboard navigation, accessibility labels, reduced-motion/system appearance behavior, and English/Simplified Chinese strings.
 3. Connect plugin providers and enforce their declared permissions.
 4. Replace simulated media operations with real processing, then expose automation and remote-device workflows.

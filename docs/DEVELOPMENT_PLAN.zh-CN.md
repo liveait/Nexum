@@ -71,7 +71,8 @@
 - [x] 使用按行 JSON-RPC 的本地回环 TCP Server
 - [x] 支持任务控制、地址配置和 Server 信息查询的 CLI TCP 客户端
 - [x] Server 命令行选项与 key-value 配置解析
-- [ ] 执行 `require_auth` 和 `max_connections`；当前只解析这两项
+- [x] 在 TCP 接入时执行 `max_connections`；超出上限的连接在处理请求前关闭
+- [ ] 执行 `require_auth`；当前仍只解析该项
 - [x] 利用 `data_dir` 实现 SQLite 持久化与重启恢复
 - [x] 让普通 `task.start` 对支持的 HTTP/HTTPS 来源启动真实下载
 - [x] 持久化传输错误并通过任务视图返回，而不只写入 Server 日志
@@ -124,7 +125,7 @@
 1. 补齐剩余的 Server/客户端合约：按配置认证的传输、有界事件流的可靠交付语义，以及 Browser 可用的端点或桥接。
    - 明确断线重连、事件丢弃和回放行为。
    - 确定 Browser 使用 HTTP JSON-RPC 端点还是 TCP Bridge，并接通扩展发送流程。
-   - 执行 `require_auth`、`max_connections` 以及配置中的 TLS/限流行为。
+   - 执行 `require_auth` 以及配置中的 TLS/限流行为。
 2. 完成 Desktop 发布层：键盘导航、可访问性标签、减少动效/系统外观行为，以及中英文文案。
 3. 接入 Plugin Provider 并执行其声明的权限。
 4. 用真实处理替换模拟的 Media 操作，再对外提供 Automation 与远程设备工作流。
