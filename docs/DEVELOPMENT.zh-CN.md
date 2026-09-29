@@ -10,6 +10,8 @@ Nexum 是使用 Rust 2024 edition 的工作区，桌面客户端采用 Tauri 2�
 
 Ubuntu CI 在检查 Rust 工作区前安装 `libgtk-3-dev` 和 `libwebkit2gtk-4.1-dev`。本地构建还需满足对应平台的 Tauri 依赖要求。
 
+当前 Linux Tauri 依赖图通过 GTK 3（`gtk 0.18.2`）引入 `glib 0.18.5`。Dependabot 将其报告为 `GHSA-wrw7-89jp-8q8g` / RustSec `RUSTSEC-2024-0429`；不能把 `glib 0.20` 强制 patch 进依赖图，因为 GTK 3 的 `glib = ^0.18` 约束不兼容。Tauri 2.12.0 和 wry 0.57.0 仍声明 GTK 3 / `glib = 0.18`，常规小版本升级无法移除该告警。在上游 Tauri/wry 的 Linux runtime 迁移到已修复的 GTK binding 版本线，或项目明确迁移到兼容的 GTK 4 栈之前，应保留该告警；macOS 构建不包含这条仅 Linux 的依赖路径。
+
 ## 工作区
 
 根目录 `Cargo.toml` 包含下列全部 crate 和 `apps/desktop/src-tauri`。浏览器扩展是独立的前端包。

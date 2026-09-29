@@ -10,6 +10,8 @@ Nexum is a Rust 2024-edition workspace with a Tauri 2 desktop client. The deskto
 
 The Ubuntu CI job installs `libgtk-3-dev` and `libwebkit2gtk-4.1-dev` before checking the Rust workspace. Platform-specific Tauri prerequisites also apply to local builds.
 
+The Linux Tauri dependency graph currently includes `glib 0.18.5` through GTK 3 (`gtk 0.18.2`). This is reported by Dependabot as `GHSA-wrw7-89jp-8q8g` / RustSec `RUSTSEC-2024-0429`; do not force `glib 0.20` into the graph because GTK 3's `glib = ^0.18` requirement is incompatible. Tauri 2.12.0 and wry 0.57.0 still declare GTK 3 / `glib = 0.18`, so a routine minor upgrade does not remove the advisory. Keep the alert open until the upstream Tauri/wry Linux runtime moves to a fixed GTK binding line or the Linux desktop build is intentionally migrated to a compatible GTK 4 stack; macOS builds do not include this Linux-only dependency path.
+
 ## Workspace
 
 The root `Cargo.toml` includes all crates below and `apps/desktop/src-tauri`. The browser extension is a separate frontend package.

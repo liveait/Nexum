@@ -21,6 +21,7 @@ All notable changes to Nexum will be documented here.
 
 - Synchronized README, architecture, development guides, and the consolidated development plan with the implemented repository state, including the configured authentication contract and CLI credential workflow.
 - Kept English and Simplified Chinese project documentation aligned.
+- Recorded the Dependabot `glib 0.18.5` advisory and the GTK 3/Tauri constraint that prevents an unsafe forced `glib 0.20` override; Tauri 2.12/wry 0.57 still use the affected GTK 3 line on Linux.
 
 ### Fixed
 
