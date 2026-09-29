@@ -1,5 +1,7 @@
 // Nexum browser extension background service worker
 
+import { jsonRpcUrl } from "./transport";
+
 type ServerConfig = {
   server?: string;
 };
@@ -153,9 +155,4 @@ async function callRpc<T>(server: string, method: string, params: unknown): Prom
     throw new Error("Server response did not include a result");
   }
   return data.result as T;
-}
-
-function jsonRpcUrl(server: string): string {
-  const base = /^https?:\/\//i.test(server) ? server : `http://${server}`;
-  return `${base.replace(/\/+$/, "")}/jsonrpc`;
 }
