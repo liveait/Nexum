@@ -167,6 +167,36 @@ impl ServerProcess {
         response["result"].clone()
     }
 
+    fn http_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (String, String, Value) {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let body = body.map(|value| value.to_string()).unwrap_or_default();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let mut encoded = String::new();
+        stream.read_to_string(&mut encoded).unwrap();
+        let (headers, body) = encoded.split_once("\r\n\r\n").unwrap();
+        let status = headers.lines().next().unwrap().to_owned();
+        let parsed: Value = if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(body).unwrap()
+        };
+        (status, headers.to_owned(), parsed)
+    }
+
     fn subscribe_events(&self) -> BufReader<TcpStream> {
         let (reader, response) = self.subscribe_events_with_credential(None);
         assert_eq!(response["result"]["subscribed"], true);
@@ -1042,6 +1072,68 @@ fn require_auth_rejects_missing_and_invalid_credentials() {
         server.call_with_credential("server.auth", None, credential),
         json!(["ApiKey"])
     );
+    server.stop();
+}
+
+#[test]
+fn http_jsonrpc_bridge_supports_cors_and_task_queueing() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+
+    let (status, headers, options_body) = server.http_request("OPTIONS", "/jsonrpc", None);
+    assert_eq!(status, "HTTP/1.1 204 No Content");
+    assert!(headers.contains("Access-Control-Allow-Origin: *"));
+    assert_eq!(options_body, Value::Null);
+
+    let task = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "task.create",
+        "params": {
+            "id": "browser-http",
+            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "destination": dir.output_path("browser-http").to_string_lossy(),
+        }
+    });
+    let (status, headers, response) = server.http_request("POST", "/jsonrpc", Some(task));
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(headers.contains("Access-Control-Allow-Origin: *"));
+    assert_eq!(response["result"]["id"], "browser-http");
+
+    let queue = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "task.queue",
+        "params": {"id": "browser-http"}
+    });
+    let (_, _, response) = server.http_request("POST", "/jsonrpc", Some(queue));
+    assert_eq!(response["result"], true);
+    assert_eq!(server.task_state("browser-http"), "Queued");
+
+    let (status, _, response) = server.http_request("POST", "/unknown", Some(json!({})));
+    assert_eq!(status, "HTTP/1.1 404 Not Found");
+    assert_eq!(response["error"], "unknown HTTP endpoint");
+    server.stop();
+}
+
+#[test]
+fn http_jsonrpc_bridge_uses_the_same_authentication_gate() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_auth(dir.path(), "ApiKey", "http-secret");
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server.version"
+    });
+    let (_, _, response) = server.http_request("POST", "/jsonrpc", Some(request.clone()));
+    assert_unauthorized(&response);
+
+    let mut authenticated = request;
+    authenticated["credential"] = json!({"ApiKey": {"key": "http-secret"}});
+    let (_, _, response) = server.http_request("POST", "/jsonrpc", Some(authenticated));
+    assert_eq!(response["result"], "1");
     server.stop();
 }
 

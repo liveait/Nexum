@@ -3,7 +3,7 @@
   "name": "Nexum",
   "version": "0.1.0",
   "description": "Send downloads to Nexum server",
-  "permissions": ["contextMenus", "storage"],
+  "permissions": ["contextMenus", "storage", "notifications"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "dist/background.js",

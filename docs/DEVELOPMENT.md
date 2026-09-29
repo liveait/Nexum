@@ -48,7 +48,7 @@ Start the local server in one terminal:
 cargo run -p nexum-server -- --port 39100
 ```
 
-It binds to `127.0.0.1:39100` by default and serves newline-delimited JSON-RPC 2.0 over TCP. Run the CLI in another terminal:
+It binds to `127.0.0.1:39100` by default and serves newline-delimited JSON-RPC 2.0 over TCP plus one-request HTTP `POST /jsonrpc` calls with CORS headers. Run the CLI in another terminal:
 
 ```bash
 cargo run -p nexum-cli -- task list
@@ -120,6 +120,6 @@ pnpm build
 
 The extension's `pnpm dev` watches and rebuilds files. Load `apps/extension` as the unpacked extension: its root `manifest.json` references assets under `dist/` and icons under `icons/`.
 
-The extension currently sends HTTP requests to `/jsonrpc`, while `nexum-server` only accepts TCP JSON-RPC. Its send-to-Nexum action cannot create tasks against the current server until an HTTP bridge or matching transport is implemented.
+The server's HTTP bridge accepts one JSON-RPC request per connection at `/jsonrpc`, enforces the same authentication gate, returns CORS headers, and rejects chunked bodies or bodies larger than 1 MiB. The extension's send flow calls `task.create` and then `task.queue`; it uses the saved `server` address, handles content-script messages, and resolves relative links before sending. Event subscriptions remain TCP-only, and the extension has no credential settings, so leave `require_auth` disabled for extension use.
 
 For the Chinese version, see [DEVELOPMENT.zh-CN.md](DEVELOPMENT.zh-CN.md).
