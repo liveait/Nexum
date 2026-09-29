@@ -83,7 +83,9 @@ Server 每次从 TCP 连接读取一行 JSON-RPC 请求，对带 `id` 的请求�
 
 CLI 通过 TCP 协议管理任务、查询 Server。Tauri 2 + React Desktop 通过 Tauri 命令调用 TCP JSON-RPC，使用 Tauri 后台线程建立独立事件订阅，按连接跟踪 event sequence，忽略重复或过期通知，在发现前进方向缺口时重连，并在收到 Task 或 Scheduler 通知后去抖刷新任务快照；重连或 sequence 缺口会安排一次完整快照，事件流断开时按已配置的策略回退到空闲每五秒、下载中每秒的轮询，手动策略会禁用该回退。窗口隐藏时暂停轮询；Server 地址和刷新策略通过 Tauri 持久化，并通过 dialog 插件的原生保存面板选择目标路径。快捷键层和本地化 Message Catalog 仍待完成。Manifest V3 Browser 扩展通过 HTTP 桥接发送 `task.create` 和 `task.queue`，读取 Popup 写入的 `server` 键，接收链接标记消息，并在发送前解析相对链接。扩展仍没有设备选择或凭据设置，因此无法使用要求认证的 Server。
 
-Protocol 请求可以携带一个 `Credential`（`Bearer` 或 `ApiKey`）。启用 `require_auth` 后，Server 会在进入任何 Dispatcher 方法或处理 `events.subscribe` 前校验请求凭据。配置的 scheme 和 secret 必须精确匹配；缺少、无效或不匹配的凭据会返回 JSON-RPC 错误 `-32001`，消息为 `authentication required`。`require_auth=true` 要求配置受支持的 `auth_scheme` 和非空 `auth_token`；配置不完整或不受支持时 Server 会拒绝启动。`server.auth` 只返回当前 scheme（`none`、`Bearer` 或 `ApiKey`），不会暴露 secret。CLI 将 `default_auth_scheme` 和 `default_auth_token` 保存在配置中，并为 RPC 请求附加凭据。当前 Desktop 客户端没有凭据设置，因此不能使用要求认证的 Server。Server 不会记录凭据 secret。`max_connections` 会限制活动 TCP 连接处理器，超过上限的连接在处理请求前关闭；TLS 和限流类型也未接入 Server。
+Protocol 请求可以携带一个 `Credential`（`Bearer` 或 `ApiKey`）。启用 `require_auth` 后，Server 会在进入任何 Dispatcher 方法或处理 `events.subscribe` 前校验请求凭据。配置的 scheme 和 secret 必须精确匹配；缺少、无效或不匹配的凭据会返回 JSON-RPC 错误 `-32001`，消息为 `authentication required`。`require_auth=true` 要求配置受支持的 `auth_scheme` 和非空 `auth_token`；配置不完整或不受支持时 Server 会拒绝启动。`server.auth` 只返回当前 scheme（`none`、`Bearer` 或 `ApiKey`），不会暴露 secret。CLI 将 `default_auth_scheme` 和 `default_auth_token` 保存在配置中，并为 RPC 请求附加凭据。当前 Desktop 客户端没有凭据设置，因此不能使用要求认证的 Server。Server 不会记录凭据 secret。`max_connections` 会限制活动 TCP 连接处理器，超过上限的连接在处理请求前关闭；TLS 仍未接入 Server。
+
+可选的 RPC 限流使用一个由逐行 TCP 与 HTTP `POST /jsonrpc` 共用的进程级令牌桶。限流默认关闭；启用时必须同时设置 `--rate-limit-rps` 和 `--rate-limit-burst`，或在配置文件中同时设置 `rate_limit_rps` 和 `rate_limit_burst`，且数值必须为有效正值。配置无效或不完整，以及显式传入的 `--config` 文件无法读取，都会阻止启动。每个已解析并通过认证的请求都会消耗令牌，包括 `events.subscribe`；认证失败、Server 生成的事件 heartbeat 和 HTTP `OPTIONS` 预检不消耗令牌。令牌用尽时，带 `id` 的调用返回 JSON-RPC 错误 `-32002`；HTTP `/jsonrpc` 仍使用状态码 `200`，错误位于响应体中。没有 `id` 的通知会被丢弃，不返回 JSON-RPC 响应。
 
 ## 扩展与 Media 边界
 

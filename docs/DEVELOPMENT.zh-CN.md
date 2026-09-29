@@ -58,7 +58,7 @@ cargo run -p nexum-cli -- task queue task-1
 
 编译出的可执行文件分别名为 `nexum-server` 和 `nexum-cli`。使用 `cargo run -p nexum-server -- --help` 和 `cargo run -p nexum-cli -- --help` 查看当前参数与命令。CLI 默认连接 `127.0.0.1:39100`；如需覆盖地址，将 `--server ADDR` 放在 `task` 或 `server` 前面。
 
-Server 将任务元数据和进度保存到 `--data-dir` 下的 `nexum.sqlite`（默认 `./data`，相对于 Server 工作目录）。启动时会按需创建目录，并在退出前一直持有同目录下 `nexum.lock` 的锁，因此同一数据目录只能由一个 Server 使用。Server 在监听前打开数据库并恢复任务；目录、锁、数据库或恢复失败会阻止启动。重启后，原先下载中、暂停或重试中的任务会在内存和 SQLite 中变为排队状态。恢复完成并开始监听后，符合条件的排队 HTTP/HTTPS 任务会自动派发；不支持的来源或受阻的目标会继续排队。`--max-connections` 限制活动 TCP 连接处理器；超过上限的连接会在请求处理前立即关闭。认证默认关闭。要强制认证，需同时设置 `require_auth=true`、`auth_scheme=Bearer|ApiKey` 和非空 `auth_token`；`server.auth` 只返回当前 scheme，不返回 secret。认证配置不完整或不受支持时会阻止启动。
+Server 将任务元数据和进度保存到 `--data-dir` 下的 `nexum.sqlite`（默认 `./data`，相对于 Server 工作目录）。启动时会按需创建目录，并在退出前一直持有同目录下 `nexum.lock` 的锁，因此同一数据目录只能由一个 Server 使用。Server 在监听前打开数据库并恢复任务；目录、锁、数据库或恢复失败会阻止启动。显式传入的 `--config` 文件无法读取时也会阻止启动。重启后，原先下载中、暂停或重试中的任务会在内存和 SQLite 中变为排队状态。恢复完成并开始监听后，符合条件的排队 HTTP/HTTPS 任务会自动派发；不支持的来源或受阻的目标会继续排队。`--max-connections` 限制活动 TCP 连接处理器；超过上限的连接会在请求处理前立即关闭。认证默认关闭。要强制认证，需同时设置 `require_auth=true`、`auth_scheme=Bearer|ApiKey` 和非空 `auth_token`；`server.auth` 只返回当前 scheme，不返回 secret。认证配置不完整或不受支持时会阻止启动。
 
 `task queue` 会持久化任务并触发 Server 派发器。派发器会持续选取符合条件的排队 HTTP/HTTPS 任务，直到达到 Scheduler 并发上限或目标路径规则不允许继续领取。`task start` 仍是手动 kick，会选取一个排队 HTTP/HTTPS 任务，启动 Worker 后返回任务 ID，然后调用同一派发器填充其他可用槽位。Worker 每写入一个响应块就报告进度；Server 在新增至少 1 MiB 或经过 250 ms 时持久化中间快照，并在任务标记为 `Completed` 前刷新最终快照。传输异步完成，可再次执行 `task list` 或 `task get ID` 查看字节数和完成状态。Server 会拒绝数据目录内的目标、符号链接目标，以及与活动传输重叠的目标。Worker 会将响应写入目标目录的隐藏稳定部分文件，并原子维护记录来源、目标、校验器和预期长度的 JSON sidecar，完整后再重命名到目标路径。传输失败会保留已有目标文件，并将错误文本保存到任务视图的 `error` 字段；在重试策略允许时重新排队，有可用槽位时派发器会自动启动重试。默认策略允许重试三次。领取新一轮传输时会清除旧错误；如果 sidecar 匹配，Server 会在领取后恢复部分字节进度。活跃 HTTP 传输可以在响应块边界暂停，并在同一 Server 进程内恢复；Worker 暂停时保留临时文件和 HTTP 响应。`task remove` 会取消活跃 HTTP Worker，最多等待其退出 30 秒后删除任务，并保留已有目标文件。超时会返回错误，Worker 可能继续阻塞到 30 分钟 HTTP 请求超时，退出后可以重试删除。阻塞中的响应读取可能让暂停等到 HTTP 请求超时；Server 重启后，只有来源、目标、ETag 或 Last-Modified 校验器、预期长度以及服务端确认的 `206 Partial Content` 范围都匹配时，才会复用稳定的部分文件和 sidecar。收到 `200`、校验器变化或缺失、范围格式错误或长度不一致时，会丢弃部分响应并从零开始；没有校验器的响应无法在重启后续传。Magnet 和本地文件来源仍无传输 Engine。
 
@@ -92,6 +92,23 @@ cargo run -p nexum-cli -- auth clear
 ```
 
 `auth set` 只接受 `Bearer` 或 `ApiKey`，并拒绝空 token。`auth clear` 会同时删除两个凭据字段。当前 Desktop 客户端不会发送凭据；在 Desktop 增加凭据设置和安全存储前，请保持 `require_auth` 关闭。
+
+## RPC 限流
+
+限流默认关闭。要启用它，在 Server 的 key-value 配置文件中同时设置持续每秒请求数与令牌桶突发容量：
+
+```ini
+rate_limit_rps=10
+rate_limit_burst=20
+```
+
+也可以使用对应的命令行参数：
+
+```bash
+cargo run -p nexum-server -- --rate-limit-rps 10 --rate-limit-burst 20
+```
+
+两个参数必须成对提供且取有效正值；配置无效或不完整时，Server 会拒绝启动。显式传入的 `--config` 文件无法读取时也会拒绝启动。同一进程的令牌桶由逐行 TCP 和 HTTP `POST /jsonrpc` 共用，计入已解析且通过认证的请求，包括 `events.subscribe`。认证失败不消耗令牌；Server 生成的事件 heartbeat 和 HTTP `OPTIONS` 预检请求也不消耗令牌。带 `id` 的请求超额时返回 JSON-RPC 错误 `-32002`；HTTP `/jsonrpc` 仍返回状态码 `200`，错误位于 JSON 响应体中。没有 `id` 的通知会被丢弃，不返回 JSON-RPC 响应；HTTP 使用状态码 `204`。CLI 在执行命令前会先查询版本，Desktop 启动时也会连续调用多次，因此应设置足以覆盖这些调用的突发容量（示例使用 20）。
 
 ## Desktop
 

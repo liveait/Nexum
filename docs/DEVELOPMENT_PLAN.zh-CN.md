@@ -65,7 +65,8 @@
 - [ ] 在信封校验之外执行 Protocol 兼容性检查
 - [x] 通过独立 TCP 订阅发布事件并让客户端接收；事件流没有回放缓冲，重连时先获取完整 Task 快照
 - [x] 按配置校验并执行 Bearer/ApiKey Credential，覆盖 RPC 请求和事件订阅
-- [ ] 按配置执行 TLS 与限流
+- [x] 按配置对 TCP 和 HTTP `/jsonrpc` 执行可选的 RPC 限流
+- [ ] 按配置执行 TLS
 
 ### Phase 7 - Server 与 CLI
 
@@ -123,9 +124,10 @@
 
 ## 2. 基于当前代码的实施顺序
 
-1. 补齐剩余的 Server/客户端合约：有界事件流的可靠交付语义，以及按配置启用的 TLS/限流。
+1. 补齐剩余的 Server/客户端合约：有界事件流的可靠交付语义，以及按配置启用的 TLS。
    - [x] 明确 v1 断线重连和事件丢弃行为：Desktop 忽略重复/过期 sequence，将前进方向的缺口或断线视为状态过期，重连并刷新完整快照；Server 仍没有回放缓冲。
    - [ ] 在需要可靠事件投递时增加持久回放缓冲和显式 after-sequence 订阅。
+   - [x] 增加可选的进程级 RPC 限流，让 TCP 和 HTTP `/jsonrpc` 共用令牌桶。计入已解析且通过认证的请求（含事件订阅），不计入 heartbeat 和 HTTP 预检；带 `id` 的超额调用返回 JSON-RPC `-32002`，无 `id` 的超额通知不响应。默认关闭，配置无效或不完整时拒绝启动。
    - 在 Desktop 和 Browser 的安全存储流程就绪后增加凭据设置。
    - 在 Desktop 增加凭据设置时保持各客户端的认证配置一致。
 2. 完成 Desktop 发布层：键盘导航、可访问性标签、减少动效/系统外观行为，以及中英文文案。
@@ -134,4 +136,4 @@
 
 ## 3. 当前重点
 
-Phase 0-9 各自具有不同程度的脚手架和库级覆盖。运行中的 Server 使用 SQLite 持久化任务并在重启后恢复，在任务入队、启动恢复以及 Worker 完成或失败后自动派发符合条件的 HTTP/HTTPS 工作。`task.start` 仍是手动 kick 和兼容接口。Server 会节流持久化中间进度，通过任务视图返回最近一次传输错误，并在传输成功后写入最终进度与完成状态。活跃的 Server HTTP 传输支持协作式块边界暂停、同进程恢复和破坏性删除取消；阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时，`task.remove` 无法及时停止时会在等待 Worker 30 秒后返回错误。Server 现在会在进程重启后保留并校验 HTTP 部分响应。只有 sidecar 匹配且服务端返回 `206 Partial Content` 时才续传；无效或没有校验器的响应会被丢弃并从零下载。Task 与 Scheduler Events 现在由 Server Event Pump 从 Core 取出，并通过独立的 `events.subscribe` TCP 流发送；Desktop 对通知去抖后刷新完整 Task 快照，事件流不可用时按已配置的刷新策略回退到轮询。Server 还通过同一认证门提供单请求 CORS HTTP `/jsonrpc`，Browser Extension 可用它创建并排队任务。Magnet 和本地文件传输仍不受支持。Plugin 与 Media crates 已包含数据类型之外的代码，但 Provider 回调和真实处理尚未接入产品路径。macOS Desktop 信息架构已记录在[Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)中；React 页面现在已有侧边栏/列表/Inspector 壳层、设置页、带原生目标选择器的 Add Download Sheet、明确的 RPC 错误展示、自适应事件刷新和持久化 Server 设置。键盘/可访问性打磨、本地化、Desktop 凭据设置、TLS/限流和 Browser 凭据设置仍待完成。
+Phase 0-9 各自具有不同程度的脚手架和库级覆盖。运行中的 Server 使用 SQLite 持久化任务并在重启后恢复，在任务入队、启动恢复以及 Worker 完成或失败后自动派发符合条件的 HTTP/HTTPS 工作。`task.start` 仍是手动 kick 和兼容接口。Server 会节流持久化中间进度，通过任务视图返回最近一次传输错误，并在传输成功后写入最终进度与完成状态。活跃的 Server HTTP 传输支持协作式块边界暂停、同进程恢复和破坏性删除取消；阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时，`task.remove` 无法及时停止时会在等待 Worker 30 秒后返回错误。Server 现在会在进程重启后保留并校验 HTTP 部分响应。只有 sidecar 匹配且服务端返回 `206 Partial Content` 时才续传；无效或没有校验器的响应会被丢弃并从零下载。Task 与 Scheduler Events 现在由 Server Event Pump 从 Core 取出，并通过独立的 `events.subscribe` TCP 流发送；Desktop 对通知去抖后刷新完整 Task 快照，事件流不可用时按已配置的刷新策略回退到轮询。Server 还通过同一认证门提供单请求 CORS HTTP `/jsonrpc`，Browser Extension 可用它创建并排队任务。可选的进程级限流现在覆盖通过认证的 TCP 与 HTTP RPC 请求。Magnet 和本地文件传输仍不受支持。Plugin 与 Media crates 已包含数据类型之外的代码，但 Provider 回调和真实处理尚未接入产品路径。macOS Desktop 信息架构已记录在[Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)中；React 页面现在已有侧边栏/列表/Inspector 壳层、设置页、带原生目标选择器的 Add Download Sheet、明确的 RPC 错误展示、自适应事件刷新和持久化 Server 设置。键盘/可访问性打磨、本地化、Desktop 凭据设置、TLS 和 Browser 凭据设置仍待完成。

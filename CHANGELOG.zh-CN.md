@@ -13,7 +13,7 @@
 - **CLI**：任务命令、可复用的 TCP JSON-RPC Client、保存服务器地址与凭据的配置、`auth set`/`auth clear` 校验、服务器信息查询和 RPC 错误格式化。
 - **Desktop**：通过 TCP 连接 Server 的 Tauri 2 + React 任务界面，提供服务器地址输入、原生目标选择器、独立事件订阅、按连接检测 sequence 缺口、去抖任务刷新，以及重连后完整快照同步的轮询回退。
 - **Browser**：Manifest V3 右键菜单、链接检测和弹窗配置。扩展通过 Server 回环 HTTP `POST /jsonrpc` 桥接发送 `task.create` 和 `task.queue`；通过校验的扩展 Origin 可收到 JSON 请求的 CORS 头，网页 Origin 会被拒绝，事件订阅仍只走 TCP，凭据设置尚未提供。
-- **Security**：凭据、TLS 和限流配置类型；Server 现在会在配置后执行 Bearer/ApiKey 鉴权，TLS 和限流仍未接入。
+- **Security**：凭据、TLS 和限流配置类型。Server 现在会按配置执行 Bearer/ApiKey 鉴权，以及由 TCP 与 HTTP `/jsonrpc` 共用一个令牌桶的可选进程级 RPC 限流。限流默认关闭，启用时须提供完整、有效的速率和突发容量参数。已解析且通过认证的请求（包括 `events.subscribe`）消耗令牌；认证失败、事件 heartbeat 和 HTTP `OPTIONS` 预检不消耗。带 `id` 的超额调用返回 JSON-RPC `-32002`（HTTP 状态码 `200`）；无 `id` 的通知会被丢弃，不返回 JSON-RPC 响应。限流配置无效或不完整，以及显式传入的 `--config` 文件无法读取，会阻止启动。TLS 仍未实现。
 - **Plugin**：Manifest、Permission、Capability、生命周期状态及 Provider Trait 基础；Core 可记录插件 Manifest，但尚未加载 Provider 提供的 Engine 或 Resolver。
 - **Media**：媒体与工作流模型，以及模拟的内存探测和任务执行；尚未接入实际媒体处理。
 

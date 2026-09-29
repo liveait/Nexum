@@ -13,8 +13,8 @@ use nexum_core::{
     nexum_task::TaskState,
 };
 use nexum_protocol::{
-    Credential, EventBuffer, EventEnvelope, EventNotification, RpcDispatcher, RpcErrorObject,
-    RpcRequest, RpcResponse, parse_request, serialize_response,
+    Credential, EventBuffer, EventEnvelope, EventNotification, RateLimit, RpcDispatcher,
+    RpcErrorObject, RpcRequest, RpcResponse, parse_request, serialize_response,
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -37,6 +37,7 @@ struct ServerState {
     active_destinations: HashSet<PathBuf>,
     events: EventHub,
     authentication: AuthenticationConfig,
+    rate_limiter: Option<RateLimiter>,
 }
 
 #[derive(Default)]
@@ -50,6 +51,34 @@ struct EventHub {
 struct AuthenticationConfig {
     required: bool,
     credential: Option<Credential>,
+}
+
+struct RateLimiter {
+    config: RateLimit,
+    tokens: f64,
+    updated_at: Instant,
+}
+
+impl RateLimiter {
+    fn new(config: RateLimit, now: Instant) -> Self {
+        Self {
+            tokens: f64::from(config.burst_size),
+            config,
+            updated_at: now,
+        }
+    }
+
+    fn try_acquire(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.updated_at).as_secs_f64();
+        self.tokens = (self.tokens + elapsed * self.config.requests_per_second)
+            .min(f64::from(self.config.burst_size));
+        self.updated_at = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
 }
 
 impl AuthenticationConfig {
@@ -283,6 +312,7 @@ pub struct ServerConfig {
     pub require_auth: bool,
     pub auth_scheme: Option<String>,
     pub auth_token: Option<String>,
+    pub rate_limit: Option<RateLimit>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -294,6 +324,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("data_dir", &self.data_dir)
             .field("require_auth", &self.require_auth)
             .field("auth_scheme", &self.auth_scheme)
+            .field("rate_limit", &self.rate_limit)
             .field(
                 "auth_token",
                 &self.auth_token.as_ref().map(|_| "<redacted>"),
@@ -311,7 +342,29 @@ impl Default for ServerConfig {
             require_auth: false,
             auth_scheme: None,
             auth_token: None,
+            rate_limit: None,
         }
+    }
+}
+
+fn configured_rate_limit(
+    requests_per_second: Option<f64>,
+    burst_size: Option<u32>,
+) -> Result<Option<RateLimit>, String> {
+    match (requests_per_second, burst_size) {
+        (None, None) => Ok(None),
+        (Some(requests_per_second), Some(burst_size))
+            if requests_per_second.is_finite() && requests_per_second > 0.0 && burst_size > 0 =>
+        {
+            Ok(Some(RateLimit {
+                requests_per_second,
+                burst_size,
+            }))
+        }
+        (Some(_), Some(_)) => {
+            Err("rate limit requires a positive finite rps and a positive burst".to_owned())
+        }
+        _ => Err("rate_limit_rps and rate_limit_burst must be configured together".to_owned()),
     }
 }
 
@@ -326,6 +379,8 @@ impl ServerConfig {
         let mut require_auth = None;
         let mut auth_scheme = None;
         let mut auth_token = None;
+        let mut rate_limit_rps = None;
+        let mut rate_limit_burst = None;
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -351,8 +406,23 @@ impl ServerConfig {
                     }
                     "auth_scheme" => auth_scheme = Some(value.trim().to_owned()),
                     "auth_token" => auth_token = Some(value.trim().to_owned()),
+                    "rate_limit_rps" => {
+                        rate_limit_rps = Some(value.trim().parse::<f64>().map_err(|_| {
+                            "rate_limit_rps must be a positive finite number".to_owned()
+                        })?);
+                    }
+                    "rate_limit_burst" => {
+                        rate_limit_burst = Some(value.trim().parse::<u32>().map_err(|_| {
+                            "rate_limit_burst must be a positive integer".to_owned()
+                        })?);
+                    }
+                    key if key.starts_with("rate_limit_") => {
+                        return Err(format!("unknown rate limit config key: {key}"));
+                    }
                     _ => {}
                 }
+            } else if line.starts_with("rate_limit_") {
+                return Err(format!("invalid rate limit config line: {line}"));
             }
         }
         Ok(Self {
@@ -362,6 +432,7 @@ impl ServerConfig {
             require_auth: require_auth.unwrap_or(Self::default().require_auth),
             auth_scheme,
             auth_token,
+            rate_limit: configured_rate_limit(rate_limit_rps, rate_limit_burst)?,
         })
     }
 
@@ -1095,12 +1166,20 @@ fn http_cors_origin(origin: Option<&str>) -> Result<Option<&str>, ()> {
     }
 }
 
-fn authorize_request(
+fn authorize_and_limit_request(
     state: &Arc<Mutex<ServerState>>,
     request: &RpcRequest,
 ) -> Result<(), RpcErrorObject> {
-    let locked = state.lock().expect("server state mutex poisoned");
-    locked.authentication.authorize(request)
+    let mut locked = state.lock().expect("server state mutex poisoned");
+    locked.authentication.authorize(request)?;
+    if locked
+        .rate_limiter
+        .as_mut()
+        .is_some_and(|limiter| !limiter.try_acquire(Instant::now()))
+    {
+        return Err(RpcErrorObject::rate_limited("rate limit exceeded"));
+    }
+    Ok(())
 }
 
 fn read_http_request(
@@ -1298,7 +1377,7 @@ fn handle_http_connection(
             return write_http_jsonrpc_response(&mut stream, Some(response), cors_origin);
         }
     };
-    if let Err(error) = authorize_request(&state, &request) {
+    if let Err(error) = authorize_and_limit_request(&state, &request) {
         return write_http_jsonrpc_response(&mut stream, reply_error(&request, error), cors_origin);
     }
     if request.method == "events.subscribe" {
@@ -1397,7 +1476,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) -> i
         }
 
         let response = match parse_request(&first_line) {
-            Ok(request) => match authorize_request(&state, &request) {
+            Ok(request) => match authorize_and_limit_request(&state, &request) {
                 Err(error) => reply_error(&request, error),
                 Ok(()) if request.method == "events.subscribe" => {
                     return handle_event_subscription(stream, state, request);
@@ -1423,7 +1502,12 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) -> i
     Ok(())
 }
 
-fn parse_cli_flags() -> (ServerConfig, PathBuf, bool, bool) {
+fn parse_cli_flags() -> Result<(ServerConfig, PathBuf, bool, bool), String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    parse_cli_args(&args)
+}
+
+fn parse_cli_args(args: &[String]) -> Result<(ServerConfig, PathBuf, bool, bool), String> {
     let mut config = ServerConfig::default();
     let mut config_path = PathBuf::new();
     let mut show_version = false;
@@ -1434,16 +1518,19 @@ fn parse_cli_flags() -> (ServerConfig, PathBuf, bool, bool) {
     let mut has_cli_require_auth = false;
     let mut has_cli_auth_scheme = false;
     let mut has_cli_auth_token = false;
+    let mut cli_rate_limit_rps = None;
+    let mut cli_rate_limit_burst = None;
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--config" => {
                 i += 1;
-                if i < args.len() {
-                    config_path = PathBuf::from(&args[i]);
+                let path = args.get(i).ok_or("--config requires a path")?;
+                if path.is_empty() {
+                    return Err("--config requires a non-empty path".to_owned());
                 }
+                config_path = PathBuf::from(path);
             }
             "--port" => {
                 has_cli_port = true;
@@ -1493,17 +1580,37 @@ fn parse_cli_flags() -> (ServerConfig, PathBuf, bool, bool) {
                     config.auth_token = Some(args[i].clone());
                 }
             }
+            "--rate-limit-rps" => {
+                i += 1;
+                let value = args.get(i).ok_or("--rate-limit-rps requires a value")?;
+                cli_rate_limit_rps = Some(
+                    value
+                        .parse::<f64>()
+                        .map_err(|_| "--rate-limit-rps must be a positive finite number")?,
+                );
+            }
+            "--rate-limit-burst" => {
+                i += 1;
+                let value = args.get(i).ok_or("--rate-limit-burst requires a value")?;
+                cli_rate_limit_burst = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| "--rate-limit-burst must be a positive integer")?,
+                );
+            }
             "--version" => show_version = true,
             "--help" | "-h" => show_help = true,
+            flag if flag.starts_with("--rate-limit-") => {
+                return Err(format!("unknown rate limit option: {flag}"));
+            }
             _ => {}
         }
         i += 1;
     }
 
     // Load from config file if provided, applying file defaults only where CLI didn't override
-    if !config_path.is_empty()
-        && let Ok(file_config) = ServerConfig::from_file(config_path.to_str().unwrap_or(""))
-    {
+    if !config_path.is_empty() {
+        let file_config = ServerConfig::from_file(config_path.to_str().unwrap_or(""))?;
         if !has_cli_port {
             config.port = file_config.port;
         }
@@ -1522,9 +1629,15 @@ fn parse_cli_flags() -> (ServerConfig, PathBuf, bool, bool) {
         if !has_cli_auth_token {
             config.auth_token = file_config.auth_token;
         }
+        if cli_rate_limit_rps.is_none() && cli_rate_limit_burst.is_none() {
+            config.rate_limit = file_config.rate_limit;
+        }
+    }
+    if cli_rate_limit_rps.is_some() || cli_rate_limit_burst.is_some() {
+        config.rate_limit = configured_rate_limit(cli_rate_limit_rps, cli_rate_limit_burst)?;
     }
 
-    (config, config_path, show_version, show_help)
+    Ok((config, config_path, show_version, show_help))
 }
 
 fn print_usage() {
@@ -1537,6 +1650,8 @@ fn print_usage() {
     eprintln!("  --require-auth BOOL Require authentication for all requests");
     eprintln!("  --auth-scheme SCHEME Authentication scheme (Bearer or ApiKey)");
     eprintln!("  --auth-token TOKEN  Authentication secret");
+    eprintln!("  --rate-limit-rps N  Maximum average RPC requests per second (requires burst)");
+    eprintln!("  --rate-limit-burst N Maximum RPC burst size (requires rps)");
     eprintln!("  --version           Show server and protocol version");
     eprintln!("  --help, -h          Show this help");
 }
@@ -1588,7 +1703,8 @@ fn open_core(data_dir: &Path) -> io::Result<ServerCore> {
 }
 
 fn main() -> io::Result<()> {
-    let (config, _config_path, show_version, show_help) = parse_cli_flags();
+    let (config, _config_path, show_version, show_help) =
+        parse_cli_flags().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
     if show_version {
         eprintln!("nexum-server {}", env!("CARGO_PKG_VERSION"));
@@ -1612,6 +1728,10 @@ fn main() -> io::Result<()> {
         active_destinations: HashSet::new(),
         events: EventHub::default(),
         authentication,
+        rate_limiter: config
+            .rate_limit
+            .clone()
+            .map(|limit| RateLimiter::new(limit, Instant::now())),
     }));
     let address = format!("127.0.0.1:{}", config.port);
     let listener = TcpListener::bind(&address)?;
@@ -1622,8 +1742,8 @@ fn main() -> io::Result<()> {
 
     eprintln!("Nexum server listening on {address}");
     eprintln!(
-        "max_connections: {}, data_dir: {:?}",
-        config.max_connections, config.data_dir
+        "max_connections: {}, data_dir: {:?}, rate_limit: {:?}",
+        config.max_connections, config.data_dir, config.rate_limit
     );
 
     for connection in listener.incoming() {
@@ -1663,6 +1783,7 @@ mod tests {
         assert!(!config.require_auth);
         assert!(config.auth_scheme.is_none());
         assert!(config.auth_token.is_none());
+        assert!(config.rate_limit.is_none());
     }
 
     #[test]
@@ -1686,6 +1807,42 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_refills_at_configured_rate_up_to_burst() {
+        let start = Instant::now();
+        let mut limiter = RateLimiter::new(
+            RateLimit {
+                requests_per_second: 2.0,
+                burst_size: 2,
+            },
+            start,
+        );
+        assert!(limiter.try_acquire(start));
+        assert!(limiter.try_acquire(start));
+        assert!(!limiter.try_acquire(start));
+        assert!(limiter.try_acquire(start + Duration::from_millis(500)));
+        assert!(!limiter.try_acquire(start + Duration::from_millis(500)));
+        assert!(limiter.try_acquire(start + Duration::from_secs(10)));
+        assert!(limiter.try_acquire(start + Duration::from_secs(10)));
+        assert!(!limiter.try_acquire(start + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn rate_limit_requires_complete_positive_finite_configuration() {
+        assert!(configured_rate_limit(None, None).unwrap().is_none());
+        assert!(
+            configured_rate_limit(Some(10.0), Some(20))
+                .unwrap()
+                .is_some()
+        );
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(configured_rate_limit(Some(invalid), Some(20)).is_err());
+        }
+        assert!(configured_rate_limit(Some(10.0), Some(0)).is_err());
+        assert!(configured_rate_limit(Some(10.0), None).is_err());
+        assert!(configured_rate_limit(None, Some(20)).is_err());
+    }
+
+    #[test]
     fn parse_config_file_with_all_fields() {
         let dir = std::env::temp_dir().join("nexum-server-test-config");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1699,6 +1856,8 @@ mod tests {
             writeln!(f, "require_auth=true").unwrap();
             writeln!(f, "auth_scheme=ApiKey").unwrap();
             writeln!(f, "auth_token=test-secret").unwrap();
+            writeln!(f, "rate_limit_rps=10").unwrap();
+            writeln!(f, "rate_limit_burst=20").unwrap();
         }
         let config = ServerConfig::from_file(config_file.to_str().unwrap()).unwrap();
         assert_eq!(config.port, 8080);
@@ -1707,6 +1866,9 @@ mod tests {
         assert!(config.require_auth);
         assert_eq!(config.auth_scheme.as_deref(), Some("ApiKey"));
         assert_eq!(config.auth_token.as_deref(), Some("test-secret"));
+        let rate_limit = config.rate_limit.unwrap();
+        assert_eq!(rate_limit.requests_per_second, 10.0);
+        assert_eq!(rate_limit.burst_size, 20);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1748,6 +1910,23 @@ mod tests {
     fn parse_config_file_returns_error_for_missing_file() {
         let result = ServerConfig::from_file("/nonexistent/path/config.txt");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_config_file_rejects_incomplete_rate_limit() {
+        let dir =
+            std::env::temp_dir().join(format!("nexum-server-rate-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.txt");
+        std::fs::write(&config_file, "rate_limit_rps=10\n").unwrap();
+        assert!(ServerConfig::from_file(config_file.to_str().unwrap()).is_err());
+        std::fs::write(&config_file, "rate_limit_rps=NaN\nrate_limit_burst=20\n").unwrap();
+        assert!(ServerConfig::from_file(config_file.to_str().unwrap()).is_err());
+        std::fs::write(&config_file, "rate_limit_rpss=10\nrate_limit_bursts=20\n").unwrap();
+        assert!(ServerConfig::from_file(config_file.to_str().unwrap()).is_err());
+        std::fs::write(&config_file, "rate_limit_rps 10\nrate_limit_burst=20\n").unwrap();
+        assert!(ServerConfig::from_file(config_file.to_str().unwrap()).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1794,12 +1973,56 @@ mod tests {
 
     #[test]
     fn parse_args_returns_default_config_without_flags() {
-        let (config, config_path, show_version, show_help) = parse_cli_flags();
+        let (config, config_path, show_version, show_help) = parse_cli_args(&[]).unwrap();
         assert_eq!(config.port, 39100);
         assert_eq!(config.max_connections, 100);
         assert!(config_path.is_empty());
         assert!(!show_version);
         assert!(!show_help);
+    }
+
+    #[test]
+    fn parse_args_rejects_incomplete_rate_limit_and_missing_config_file() {
+        let rps_only = ["--rate-limit-rps".to_owned(), "10".to_owned()];
+        assert!(parse_cli_args(&rps_only).is_err());
+        let invalid_burst = [
+            "--rate-limit-rps".to_owned(),
+            "10".to_owned(),
+            "--rate-limit-burst".to_owned(),
+            "0".to_owned(),
+        ];
+        assert!(parse_cli_args(&invalid_burst).is_err());
+        let missing_config = [
+            "--config".to_owned(),
+            "/nonexistent/path/config.txt".to_owned(),
+        ];
+        assert!(parse_cli_args(&missing_config).is_err());
+        let empty_config = ["--config".to_owned(), String::new()];
+        assert!(parse_cli_args(&empty_config).is_err());
+        let misspelled_flag = ["--rate-limit-rsp".to_owned(), "10".to_owned()];
+        assert!(parse_cli_args(&misspelled_flag).is_err());
+    }
+
+    #[test]
+    fn cli_rate_limit_pair_overrides_config_file_pair() {
+        let dir =
+            std::env::temp_dir().join(format!("nexum-server-rate-override-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.txt");
+        std::fs::write(&config_file, "rate_limit_rps=10\nrate_limit_burst=20\n").unwrap();
+        let args = [
+            "--config".to_owned(),
+            config_file.to_string_lossy().into_owned(),
+            "--rate-limit-rps".to_owned(),
+            "5".to_owned(),
+            "--rate-limit-burst".to_owned(),
+            "7".to_owned(),
+        ];
+        let (config, _, _, _) = parse_cli_args(&args).unwrap();
+        let rate_limit = config.rate_limit.unwrap();
+        assert_eq!(rate_limit.requests_per_second, 5.0);
+        assert_eq!(rate_limit.burst_size, 7);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
