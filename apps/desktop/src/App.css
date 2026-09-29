@@ -1204,6 +1204,42 @@ input::placeholder {
   margin-top: 18px;
 }
 
+.credential-card {
+  margin-top: 14px;
+}
+
+.credential-help {
+  margin-top: -7px;
+  margin-bottom: 15px;
+}
+
+.credential-help strong {
+  color: #bec6dc;
+  font-weight: 600;
+}
+
+.credential-guidance {
+  margin: 0 0 12px;
+  color: #f4cd86;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.credential-feedback {
+  margin: 13px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.credential-feedback.error { color: #ff9fb0; }
+.credential-feedback.success { color: #9ef0bd; }
+
+.credential-actions {
+  display: flex;
+  gap: 9px;
+  margin-top: 18px;
+}
+
 .settings-planned {
   max-width: 680px;
 }

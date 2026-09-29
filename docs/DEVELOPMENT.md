@@ -84,14 +84,14 @@ cargo run -p nexum-server -- \
 
 `require_auth=true` requires a supported scheme and non-empty token; a missing pair, empty token, or unsupported scheme makes startup fail. When enabled, the server checks the request credential before dispatching every RPC and before accepting `events.subscribe`. Both the scheme and secret must match. Missing or invalid credentials return JSON-RPC error `-32001` with message `authentication required`. `server.auth` returns only the configured scheme, and server logs and debug output redact the token.
 
-The CLI stores its credential in the same config directory as the default server address. Set or clear it with:
+The CLI stores its credential as plain text in the same config directory as the default server address. Set or clear it with:
 
 ```bash
 cargo run -p nexum-cli -- auth set ApiKey replace-with-a-secret
 cargo run -p nexum-cli -- auth clear
 ```
 
-`auth set` accepts only `Bearer` or `ApiKey` and rejects an empty token. `auth clear` removes both credential fields. The current Desktop client does not send credentials; keep `require_auth` disabled until Desktop credential settings and secure storage are implemented.
+`auth set` accepts only `Bearer` or `ApiKey` and rejects an empty token. `auth clear` clears both credential field values in the CLI config. On macOS, first save a loopback Server address in Desktop Settings. Under General, select `Bearer` or `ApiKey`, enter the matching secret, and save it. The Tauri backend keeps both values in Keychain under that saved address, sends them with ordinary RPC and `events.subscribe`, and returns only the configured scheme to React when reading Keychain state. Saving or clearing the credential restarts the event subscription and refreshes the task snapshot. The secret field is write-only; clearing removes the Keychain item. Without TLS, Desktop does not store or attach credentials for non-loopback addresses; unauthenticated RPC connections can still be attempted. Desktop on other platforms can connect without authentication, but saving and clearing credentials are unsupported. The Browser extension still has no credential setting.
 
 ## RPC Rate Limiting
 
@@ -120,7 +120,7 @@ pnpm install
 pnpm dev
 ```
 
-Vite uses port `1420`. The frontend calls Tauri commands and the Tauri dialog plugin, so testing the full application requires a running Nexum server and a native Tauri window. With the Tauri 2 CLI installed, keep Vite running and start `cargo tauri dev` from `apps/desktop` in another terminal. `pnpm build` runs the TypeScript compiler and Vite build; this is a separate check from Rust CI.
+Vite uses port `1420`. The frontend calls Tauri commands, Keychain-backed credential commands on macOS, and the Tauri dialog plugin, so testing the full application requires a running Nexum server and a native Tauri window. With the Tauri 2 CLI installed, keep Vite running and start `cargo tauri dev` from `apps/desktop` in another terminal. `pnpm build` runs the TypeScript compiler and Vite build; this is a separate check from Rust CI. To create a local macOS development app from `apps/desktop`, run `pnpm dlx @tauri-apps/cli@2 build --debug --bundles app`; the bundle is written to `target/debug/bundle/macos/Nexum.app` at the repository root. For a local ad-hoc signature, run `codesign --force --deep --sign - ../../target/debug/bundle/macos/Nexum.app` from `apps/desktop` after bundling. Distribution signing and notarization are still separate release work. Keep the Tauri JavaScript and Rust package minor versions aligned when updating dependencies.
 
 The macOS-first information architecture, task states, add flow, settings, event subscription, polling fallback, and implementation slices are documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md).
 

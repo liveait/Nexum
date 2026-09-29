@@ -13,7 +13,7 @@ Nexum is under active development. Its runnable path is a local TCP JSON-RPC ser
 
 The CLI and early Tauri desktop client can call the local server; the desktop client requires the server to run separately. The server opens `nexum.sqlite` under its data directory (default `./data`) and recovers stored tasks on startup. Queuing a supported HTTP/HTTPS task, restarting the server with a queued task, or completing/failing an active HTTP transfer causes the server to fill available scheduler slots automatically. An interrupted HTTP response can resume after restart when its stable partial file, sidecar, and ETag or Last-Modified validator still match a server-confirmed range. `task.start` remains a manual kick and compatibility method for starting one queued HTTP/HTTPS task, after which the same dispatcher fills other available slots. The Desktop client now subscribes to a dedicated TCP event stream for debounced live task refreshes and falls back to its configured polling policy when that stream is unavailable. Magnet and local-file sources can be created but have no transfer path yet. The browser extension sends task.create and task.queue through the server's loopback HTTP `/jsonrpc` bridge; event subscriptions remain TCP-only.
 
-The server can enforce Bearer or ApiKey authentication when `require_auth` is enabled and can apply optional, process-wide RPC rate limiting. TLS, executable plugins, and real media processing are not active in the running server. The CLI can store and attach a credential; the current Desktop client does not send credentials, so keep authentication disabled when using that client. See [Architecture](docs/ARCHITECTURE.md) for the code-level boundaries and current call paths, and the [Development Plan](docs/DEVELOPMENT_PLAN.md) for remaining integration work.
+The server can enforce Bearer or ApiKey authentication when `require_auth` is enabled and can apply optional, process-wide RPC rate limiting. TLS, executable plugins, and real media processing are not active in the running server. The CLI saves credentials in its config file; the macOS Desktop saves a credential for each Server address in Keychain and can connect to an authenticated loopback Server. The Browser extension has no credential setting yet. See [Architecture](docs/ARCHITECTURE.md) for the code-level boundaries and current call paths, and the [Development Plan](docs/DEVELOPMENT_PLAN.md) for remaining integration work.
 
 ## Run the local task flow
 
@@ -40,7 +40,7 @@ auth_scheme=ApiKey
 auth_token=replace-with-a-secret
 ```
 
-Start with `cargo run -p nexum-server -- --config server.conf`, then save the same credential for the CLI (the token is stored in the CLI config directory):
+Start with `cargo run -p nexum-server -- --config server.conf`, then save the same credential for the CLI (the token is stored as plain text in the CLI config directory):
 
 ```bash
 cargo run -p nexum-cli -- auth set ApiKey replace-with-a-secret
@@ -48,7 +48,7 @@ cargo run -p nexum-cli -- task list
 cargo run -p nexum-cli -- auth clear
 ```
 
-Missing, invalid, or mismatched credentials return JSON-RPC error `-32001` (`authentication required`). `server.auth` reports the configured scheme without returning the secret. If `require_auth=true` is set without a valid scheme and non-empty token, the server refuses to start. Authentication applies to ordinary RPC requests and `events.subscribe`; clients must attach the saved credential to either request type, and the CLI attaches it to its task and server requests.
+Missing, invalid, or mismatched credentials return JSON-RPC error `-32001` (`authentication required`). `server.auth` reports the configured scheme without returning the secret. If `require_auth=true` is set without a valid scheme and non-empty token, the server refuses to start. Authentication applies to ordinary RPC requests and `events.subscribe`. On macOS, save the matching scheme and secret under Desktop Settings → General for the current saved loopback Server address; the Desktop attaches that credential to both request types. Its secret field is write-only, and clearing the credential removes it from Keychain. Credential storage and sending for non-loopback addresses await TLS support.
 
 RPC rate limiting is disabled by default. Set both `--rate-limit-rps` and `--rate-limit-burst` on the server, or both `rate_limit_rps` and `rate_limit_burst` in its configuration file, to enable one shared token bucket for TCP and HTTP `/jsonrpc`. Excess calls with an `id` receive JSON-RPC error `-32002`; HTTP replies keep status `200`. Notifications without an `id` are dropped without a JSON-RPC response. Invalid or incomplete rate-limit settings and an unreadable file explicitly passed with `--config` stop server startup. See the [Development Guide](docs/DEVELOPMENT.md) for examples and counting rules.
 

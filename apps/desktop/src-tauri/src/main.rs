@@ -62,6 +62,21 @@ fn save_settings(app: AppHandle, settings: DesktopSettings) -> Result<(), String
 }
 
 #[tauri::command]
+fn credential_status(server: String) -> Result<Option<String>, String> {
+    desktop_lib::credential_status(&server)
+}
+
+#[tauri::command]
+fn save_credential(server: String, scheme: String, secret: String) -> Result<(), String> {
+    desktop_lib::save_credential(&server, &scheme, secret)
+}
+
+#[tauri::command]
+fn clear_credential(server: String) -> Result<(), String> {
+    desktop_lib::clear_credential(&server)
+}
+
+#[tauri::command]
 fn server_version(server: String) -> Result<String, String> {
     desktop_lib::server_version(&server, 5000)
 }
@@ -152,6 +167,9 @@ fn main() {
             stop_event_stream,
             load_settings,
             save_settings,
+            credential_status,
+            save_credential,
+            clear_credential,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Nexum desktop");
