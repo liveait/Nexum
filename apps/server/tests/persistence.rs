@@ -86,6 +86,21 @@ impl ServerProcess {
         max_connections: usize,
         auth: Option<(&str, &str)>,
     ) -> Self {
+        Self::start_with_options_and_rate_limit(data_dir, max_connections, auth, None)
+    }
+
+    fn start_with_rate_limit(data_dir: &Path, auth: Option<(&str, &str)>, burst: usize) -> Self {
+        // A refill takes 1,000 seconds, so normal CI scheduling cannot change
+        // which request consumes the deliberately small test budget.
+        Self::start_with_options_and_rate_limit(data_dir, 100, auth, Some(("0.001", burst)))
+    }
+
+    fn start_with_options_and_rate_limit(
+        data_dir: &Path,
+        max_connections: usize,
+        auth: Option<(&str, &str)>,
+        rate_limit: Option<(&str, usize)>,
+    ) -> Self {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
@@ -106,6 +121,13 @@ impl ServerProcess {
                 .arg(scheme)
                 .arg("--auth-token")
                 .arg(token);
+        }
+        if let Some((rps, burst)) = rate_limit {
+            command
+                .arg("--rate-limit-rps")
+                .arg(rps)
+                .arg("--rate-limit-burst")
+                .arg(burst.to_string());
         }
         let child = command
             .stdout(Stdio::null())
@@ -1069,6 +1091,11 @@ fn assert_unauthorized(response: &Value) {
     assert_eq!(response["error"]["message"], "authentication required");
 }
 
+fn assert_rate_limited(response: &Value) {
+    assert_eq!(response["error"]["code"], -32002, "{response}");
+    assert!(response.get("result").is_none(), "{response}");
+}
+
 #[test]
 fn require_auth_rejects_missing_and_invalid_credentials() {
     let _test_guard = server_test_guard();
@@ -1296,6 +1323,214 @@ fn require_auth_applies_to_event_subscriptions() {
     );
     drop(events);
     server.stop();
+}
+
+#[test]
+fn rate_limit_is_disabled_by_default_for_tcp_http_and_subscriptions() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+
+    for _ in 0..8 {
+        assert_eq!(server.call("server.version", None), "1");
+        let (status, _, response) = server.http_request(
+            "POST",
+            "/jsonrpc",
+            Some(json!({"jsonrpc": "2.0", "id": 1, "method": "server.version"})),
+        );
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(response["result"], "1");
+    }
+    let first = server.subscribe_events();
+    let second = server.subscribe_events();
+    drop((first, second));
+    server.stop();
+}
+
+#[test]
+fn rate_limit_budget_is_shared_across_tcp_connections_and_http() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_rate_limit(dir.path(), None, 2);
+
+    let (status, _, body) = server.http_request("OPTIONS", "/jsonrpc", None);
+    assert_eq!(status, "HTTP/1.1 204 No Content");
+    assert_eq!(body, Value::Null);
+
+    assert_eq!(server.call("server.version", None), "1");
+    let (status, _, response) = server.http_request(
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 2, "method": "server.version"})),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(response["result"], "1");
+
+    // request() opens a new TCP connection for each call. Both transports now
+    // see the exhausted process-level budget.
+    assert_rate_limited(&server.request("server.version", None));
+    let (status, _, response) = server.http_request(
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 3, "method": "server.version"})),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_rate_limited(&response);
+    server.stop();
+}
+
+#[test]
+fn tcp_notifications_stay_silent_when_accepted_or_rate_limited() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_rate_limit(dir.path(), None, 1);
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+
+    let notification = json!({"jsonrpc": "2.0", "method": "server.version"});
+    writeln!(stream, "{notification}").unwrap();
+    writeln!(stream, "{notification}").unwrap();
+    writeln!(
+        stream,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 77, "method": "server.version"})
+    )
+    .unwrap();
+
+    // The first notification consumes the only token. Neither it nor the
+    // rejected notification can write a response ahead of the numbered call.
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 77);
+    assert_rate_limited(&response);
+
+    let (status, _, response) = server.http_request(
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 78, "method": "server.version"})),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_rate_limited(&response);
+    server.stop();
+}
+
+#[test]
+fn http_notifications_return_no_content_when_accepted_or_rate_limited() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_rate_limit(dir.path(), None, 1);
+    let notification = json!({"jsonrpc": "2.0", "method": "server.version"});
+
+    let (status, _, response) = server.http_request("POST", "/jsonrpc", Some(notification.clone()));
+    assert_eq!(status, "HTTP/1.1 204 No Content");
+    assert_eq!(response, Value::Null);
+
+    // HTTP notification spent the shared token, so both transports reject
+    // subsequent calls while another over-limit notification remains silent.
+    assert_rate_limited(&server.request("server.version", None));
+    let (status, _, response) = server.http_request("POST", "/jsonrpc", Some(notification));
+    assert_eq!(status, "HTTP/1.1 204 No Content");
+    assert_eq!(response, Value::Null);
+    let (status, _, response) = server.http_request(
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 79, "method": "server.version"})),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_rate_limited(&response);
+    server.stop();
+}
+
+#[test]
+fn failed_authentication_does_not_spend_rate_limit_budget() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server =
+        ServerProcess::start_with_rate_limit(dir.path(), Some(("ApiKey", "rate-secret")), 1);
+
+    let mut malformed_stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    malformed_stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    writeln!(malformed_stream, "{{invalid json").unwrap();
+    let mut malformed_response = String::new();
+    BufReader::new(malformed_stream)
+        .read_line(&mut malformed_response)
+        .unwrap();
+    let malformed_response: Value = serde_json::from_str(&malformed_response).unwrap();
+    assert_eq!(malformed_response["error"]["code"], -32700);
+
+    assert_unauthorized(&server.request("server.version", None));
+    assert_unauthorized(&server.request_with_credential(
+        "server.version",
+        None,
+        Some(Credential::ApiKey {
+            key: "wrong-secret".to_owned(),
+        }),
+    ));
+    let (status, _, response) = server.http_request(
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "server.version"})),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_unauthorized(&response);
+
+    let credential = Credential::ApiKey {
+        key: "rate-secret".to_owned(),
+    };
+    assert_eq!(
+        server.call_with_credential("server.version", None, credential.clone()),
+        "1"
+    );
+    assert_rate_limited(&server.request_with_credential("server.version", None, Some(credential)));
+    server.stop();
+}
+
+#[test]
+fn event_heartbeat_does_not_spend_budget_and_excess_subscription_is_rejected() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_rate_limit(dir.path(), None, 2);
+    let mut events = server.subscribe_events();
+    events
+        .get_mut()
+        .set_read_timeout(Some(Duration::from_secs(25)))
+        .unwrap();
+
+    let mut line = String::new();
+    events.read_line(&mut line).unwrap();
+    let heartbeat: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(heartbeat["method"], "events.event");
+    assert_eq!(heartbeat["params"]["event"], "events.heartbeat");
+
+    assert_eq!(server.call("server.version", None), "1");
+    let (rejected_events, rejected) = server.subscribe_events_with_credential(None);
+    assert_rate_limited(&rejected);
+    drop(rejected_events);
+    drop(events);
+    server.stop();
+}
+
+#[test]
+fn rate_limit_arguments_must_be_paired_and_positive() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    for args in [
+        &["--rate-limit-rps", "1"][..],
+        &["--rate-limit-burst", "1"],
+        &["--rate-limit-rps", "0", "--rate-limit-burst", "1"],
+        &["--rate-limit-rps", "-1", "--rate-limit-burst", "1"],
+        &["--rate-limit-rps", "NaN", "--rate-limit-burst", "1"],
+        &["--rate-limit-rps", "inf", "--rate-limit-burst", "1"],
+        &["--rate-limit-rps", "1", "--rate-limit-burst", "0"],
+    ] {
+        let output = server_output_with_args(dir.path(), None, args);
+        assert!(!output.status.success(), "server accepted {args:?}");
+    }
 }
 
 #[test]
