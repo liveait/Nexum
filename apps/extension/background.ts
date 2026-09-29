@@ -1,8 +1,25 @@
 // Nexum browser extension background service worker
 
 type ServerConfig = {
-  address: string;
+  server?: string;
 };
+
+type JsonRpcError = {
+  code?: number;
+  message?: string;
+};
+
+type JsonRpcResponse<T> = {
+  result?: T;
+  error?: JsonRpcError;
+};
+
+type RuntimeMessage = {
+  type?: unknown;
+  url?: unknown;
+};
+
+let nextRequestId = 1;
 
 type NexumTask = {
   id: string;
@@ -13,12 +30,20 @@ type NexumTask = {
   total_bytes: number | null;
 };
 
-/** Add context menu item "Send to Nexum" for links */
-chrome.contextMenus.create({
-  id: "sendToNexum",
-  title: "Send to Nexum",
-  contexts: ["link"],
-});
+/** Add the context-menu item once the extension is installed or updated. */
+function registerContextMenu(): void {
+  // Context-menu entries survive service-worker restarts. Remove this
+  // extension's old entry first so updates and reloads stay idempotent.
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "sendToNexum",
+      title: "Send to Nexum",
+      contexts: ["link"],
+    });
+  });
+}
+
+chrome.runtime.onInstalled.addListener(registerContextMenu);
 
 /** Listen for context menu clicks */
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -27,17 +52,34 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
+/** Listen for send requests from the content script's link badge. */
+chrome.runtime.onMessage.addListener((message: unknown, sender) => {
+  if (!isSendToNexumMessage(message)) {
+    return;
+  }
+
+  void sendToNexum(message.url, sender.tab?.id);
+});
+
+function isSendToNexumMessage(message: unknown): message is { type: "sendToNexum"; url: string } {
+  if (typeof message !== "object" || message === null) {
+    return false;
+  }
+  const candidate = message as RuntimeMessage;
+  return candidate.type === "sendToNexum" && typeof candidate.url === "string";
+}
+
 /** Get the configured server address */
 async function getServerAddress(): Promise<string> {
-  const result = await chrome.storage.local.get(["server"]);
+  const result = await chrome.storage.local.get("server");
   const config = result as ServerConfig;
-  return config.address || "127.0.0.1:39100";
+  return config.server?.trim() || "127.0.0.1:39100";
 }
 
 /** Send a URL to the Nexum server */
 async function sendToNexum(url: string, tabId?: number): Promise<void> {
-  const server = await getServerAddress();
   try {
+    const server = await getServerAddress();
     const task = await createTask(server, url);
     // Show notification with task ID
     chrome.notifications?.create({
@@ -56,7 +98,7 @@ async function sendToNexum(url: string, tabId?: number): Promise<void> {
       type: "basic",
       iconUrl: "icons/nexum-48.png",
       title: "Nexum",
-      message: `Failed: ${(error as Error).message}`,
+      message: `Failed: ${error instanceof Error ? error.message : String(error)}`,
       priority: 1,
     });
   }
@@ -67,21 +109,53 @@ async function createTask(server: string, source: string): Promise<NexumTask> {
   const id = `browser-${Date.now()}`;
   const destination = `/tmp/nexum-${id}`;
 
-  // Use fetch to call the server (JSON-RPC over HTTP)
-  const response = await fetch(`http://${server}/jsonrpc`, {
+  // The server keeps creation and queueing as separate operations. Create the
+  // persisted task first, then queue that same ID so the dispatcher can start it.
+  const task = await callRpc<NexumTask>(server, "task.create", {
+    id,
+    source,
+    destination,
+  });
+  const queued = await callRpc<boolean>(server, "task.queue", { id: task.id });
+  if (!queued) {
+    throw new Error("Server did not queue the task");
+  }
+  return task;
+}
+
+/** Call the server's HTTP JSON-RPC bridge. */
+async function callRpc<T>(server: string, method: string, params: unknown): Promise<T> {
+  const response = await fetch(jsonRpcUrl(server), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       jsonrpc: "2.0",
-      id: 1,
-      method: "task.create",
-      params: { id, source, destination },
+      id: nextRequestId++,
+      method,
+      params,
     }),
   });
 
-  const data = await response.json();
-  if (data.error) {
-    throw new Error(data.error.message || "Unknown error");
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
   }
-  return data.result as NexumTask;
+
+  let data: JsonRpcResponse<T>;
+  try {
+    data = (await response.json()) as JsonRpcResponse<T>;
+  } catch {
+    throw new Error("Server returned invalid JSON");
+  }
+  if (data.error) {
+    throw new Error(data.error.message || `RPC error ${data.error.code ?? "unknown"}`);
+  }
+  if (!("result" in data)) {
+    throw new Error("Server response did not include a result");
+  }
+  return data.result as T;
+}
+
+function jsonRpcUrl(server: string): string {
+  const base = /^https?:\/\//i.test(server) ? server : `http://${server}`;
+  return `${base.replace(/\/+$/, "")}/jsonrpc`;
 }

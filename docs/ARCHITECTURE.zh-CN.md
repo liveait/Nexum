@@ -31,10 +31,10 @@ Desktop (Tauri) ───┼── 基于 TCP 的按行 JSON-RPC 2.0
              /              \
        InMemoryEngine     HttpEngine
 
-Browser 扩展 ── HTTP POST /jsonrpc（Server 尚无对应端点）
+Browser 扩展 ── HTTP POST /jsonrpc + CORS（复用回环监听器）
 ```
 
-Server 默认监听 `127.0.0.1:39100`。当前实现始终绑定回环地址，`--port` 只改变端口。CLI 可以连接配置的 TCP 地址，Desktop UI 可以填写 Server 地址。Browser 扩展发送的 HTTP 请求与当前仅支持 TCP 行协议的 Server 不兼容。
+Server 默认监听 `127.0.0.1:39100`。当前实现始终绑定回环地址，`--port` 只改变端口。CLI 可以连接配置的 TCP 地址，Desktop UI 可以填写 Server 地址。同一个监听器同时接受按行分隔的 TCP JSON-RPC 和单请求 HTTP `POST /jsonrpc`。HTTP 请求必须使用 `Content-Type: application/json` 并提供有上限的 `Content-Length`；分块请求和事件订阅仍不支持 HTTP 传输。只有通过校验的 Chrome、Firefox 或 Safari 扩展 Origin 会收到 CORS 响应；网页 Origin 会在 RPC 分发前被拒绝。
 
 ## Crate 职责
 
@@ -81,7 +81,7 @@ Resolver 接受 HTTP/HTTPS URL、包含 `xt=urn:btih:` 参数的 Magnet URI，�
 
 Server 每次从 TCP 连接读取一行 JSON-RPC 请求，对带 `id` 的请求写回一行响应。它会在 Dispatcher 之前处理 `task.start` 和活跃 HTTP 控制；Dispatcher 支持 `task.get`、`task.list`、`task.create`、`task.queue`、`task.start`、`task.pause`、`task.resume`、`task.remove`、`server.version` 和 `server.auth`，没有通用的 Task Update 方法。对 Server 的活跃 HTTP Worker，`task.pause` 会等待响应块边界确认并持久化为 `Paused`，`task.resume` 在有 Scheduler 槽位时唤醒同一 Worker，`task.remove` 会取消 Worker，最多等待 30 秒后删除任务。超时删除会返回错误，Worker 退出后可以重试。`task.queue` 成功后会在 Core 操作结束时派发符合条件的 HTTP/HTTPS 工作；`task.start` 仍可手动 kick 一个排队任务。`task.get` 和 `task.list` 返回带当前持久化进度以及最近一次传输错误 `error` 字段的 `TaskView`；新一轮领取任务时会清除该字段。Protocol 包含 V1 版本字段和版本查询方法，但没有协商功能集合；除 JSON-RPC `2.0` 信封校验外，也没有版本强制校验。客户端可以建立独立 TCP 连接发送 `events.subscribe`，收到确认后持续接收 `events.event` JSON-RPC 通知。非 heartbeat 通知携带增量 Task 或 Scheduler 数据，并使用单调递增的 Server 序号；Server 每 15 秒发送一次 heartbeat，复用当前序号，不代表任务更新。每个订阅者使用有界队列，队列满时会断开订阅。当前没有回放缓冲，断线或订阅被丢弃后应先获取完整快照。
 
-CLI 通过 TCP 协议管理任务、查询 Server。Tauri 2 + React Desktop 通过 Tauri 命令调用 TCP JSON-RPC，使用 Tauri 后台线程建立独立事件订阅，在收到 Task 或 Scheduler 通知后去抖刷新任务快照；事件流断开时按已配置的策略回退到空闲每五秒、下载中每秒的轮询，手动策略会禁用该回退。窗口隐藏时暂停轮询；Server 地址和刷新策略通过 Tauri 持久化，并通过 dialog 插件的原生保存面板选择目标路径。快捷键层和本地化 Message Catalog 仍待完成。Manifest V3 Browser 扩展有右键菜单和链接标记 UI，但发送流程向 `/jsonrpc` 发 HTTP 请求，目前没有兼容端点。Popup 写入 Storage 的 `server` 键，后台脚本却读取 `address` 字段，因此保存的地址不会生效。扩展也没有设备选择。
+CLI 通过 TCP 协议管理任务、查询 Server。Tauri 2 + React Desktop 通过 Tauri 命令调用 TCP JSON-RPC，使用 Tauri 后台线程建立独立事件订阅，在收到 Task 或 Scheduler 通知后去抖刷新任务快照；事件流断开时按已配置的策略回退到空闲每五秒、下载中每秒的轮询，手动策略会禁用该回退。窗口隐藏时暂停轮询；Server 地址和刷新策略通过 Tauri 持久化，并通过 dialog 插件的原生保存面板选择目标路径。快捷键层和本地化 Message Catalog 仍待完成。Manifest V3 Browser 扩展通过 HTTP 桥接发送 `task.create` 和 `task.queue`，读取 Popup 写入的 `server` 键，接收链接标记消息，并在发送前解析相对链接。扩展仍没有设备选择或凭据设置，因此无法使用要求认证的 Server。
 
 Protocol 请求可以携带一个 `Credential`（`Bearer` 或 `ApiKey`）。启用 `require_auth` 后，Server 会在进入任何 Dispatcher 方法或处理 `events.subscribe` 前校验请求凭据。配置的 scheme 和 secret 必须精确匹配；缺少、无效或不匹配的凭据会返回 JSON-RPC 错误 `-32001`，消息为 `authentication required`。`require_auth=true` 要求配置受支持的 `auth_scheme` 和非空 `auth_token`；配置不完整或不受支持时 Server 会拒绝启动。`server.auth` 只返回当前 scheme（`none`、`Bearer` 或 `ApiKey`），不会暴露 secret。CLI 将 `default_auth_scheme` 和 `default_auth_token` 保存在配置中，并为 RPC 请求附加凭据。当前 Desktop 客户端没有凭据设置，因此不能使用要求认证的 Server。Server 不会记录凭据 secret。`max_connections` 会限制活动 TCP 连接处理器，超过上限的连接在处理请求前关闭；TLS 和限流类型也未接入 Server。
 

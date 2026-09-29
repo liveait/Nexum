@@ -18,7 +18,7 @@ use nexum_protocol::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -975,6 +975,349 @@ fn write_json_line(stream: &mut TcpStream, encoded: &str) -> io::Result<()> {
     stream.flush()
 }
 
+const HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
+const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    content_length: Option<usize>,
+    body: Vec<u8>,
+    origin: Option<String>,
+    content_type: Option<String>,
+}
+
+fn is_http_request_line(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    matches!(
+        parts.next(),
+        Some("GET" | "HEAD" | "OPTIONS" | "POST" | "PUT" | "DELETE")
+    ) && parts.next().is_some()
+        && parts
+            .next()
+            .is_some_and(|version| version.starts_with("HTTP/"))
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    cors_origin: Option<&str>,
+) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n",
+        body.len()
+    )?;
+    if let Some(origin) = cors_origin {
+        write!(stream, "Access-Control-Allow-Origin: {origin}\r\n")?;
+        stream.write_all(b"Vary: Origin\r\n")?;
+        stream.write_all(b"Access-Control-Allow-Methods: POST, OPTIONS\r\n")?;
+        stream.write_all(b"Access-Control-Allow-Headers: Content-Type\r\n")?;
+    }
+    stream.write_all(b"Connection: close\r\n\r\n")?;
+    stream.write_all(body)?;
+    stream.flush()
+}
+
+fn write_http_json(
+    stream: &mut TcpStream,
+    status: &str,
+    value: &serde_json::Value,
+    cors_origin: Option<&str>,
+) -> io::Result<()> {
+    let body = serde_json::to_vec(value).map_err(|error| io::Error::other(error.to_string()))?;
+    write_http_response(stream, status, "application/json", &body, cors_origin)
+}
+
+fn write_http_jsonrpc_response(
+    stream: &mut TcpStream,
+    response: Option<RpcResponse>,
+    cors_origin: Option<&str>,
+) -> io::Result<()> {
+    let Some(response) = response else {
+        return write_http_response(
+            stream,
+            "204 No Content",
+            "application/json",
+            &[],
+            cors_origin,
+        );
+    };
+    let encoded =
+        serialize_response(&response).map_err(|error| io::Error::other(error.to_string()))?;
+    write_http_response(
+        stream,
+        "200 OK",
+        "application/json",
+        encoded.as_bytes(),
+        cors_origin,
+    )
+}
+
+fn http_error(
+    stream: &mut TcpStream,
+    status: &str,
+    message: &str,
+    cors_origin: Option<&str>,
+) -> io::Result<()> {
+    write_http_json(
+        stream,
+        status,
+        &serde_json::json!({"error": message}),
+        cors_origin,
+    )
+}
+
+fn http_cors_origin(origin: Option<&str>) -> Result<Option<&str>, ()> {
+    let Some(origin) = origin else {
+        return Ok(None);
+    };
+    let is_extension_origin = [
+        "chrome-extension://",
+        "moz-extension://",
+        "safari-web-extension://",
+    ]
+    .into_iter()
+    .any(|prefix| {
+        origin.strip_prefix(prefix).is_some_and(|extension_id| {
+            !extension_id.is_empty()
+                && extension_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    });
+    if is_extension_origin {
+        Ok(Some(origin))
+    } else {
+        Err(())
+    }
+}
+
+fn authorize_request(
+    state: &Arc<Mutex<ServerState>>,
+    request: &RpcRequest,
+) -> Result<(), RpcErrorObject> {
+    let locked = state.lock().expect("server state mutex poisoned");
+    locked.authentication.authorize(request)
+}
+
+fn read_http_request(
+    reader: &mut BufReader<TcpStream>,
+    first_line: &str,
+) -> io::Result<HttpRequest> {
+    if first_line.len() > HTTP_MAX_HEADER_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "HTTP request line is too large",
+        ));
+    }
+    let mut request_line = first_line.split_whitespace();
+    let method = request_line.next().unwrap_or_default().to_owned();
+    let path = request_line.next().unwrap_or_default().to_owned();
+    let version = request_line.next().unwrap_or_default().to_owned();
+    if method.is_empty() || path.is_empty() || !version.starts_with("HTTP/") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "malformed HTTP request line",
+        ));
+    }
+
+    let mut header_bytes = first_line.len();
+    let mut content_length = None;
+    let mut content_type = None;
+    let mut origin = None;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "HTTP headers ended unexpectedly",
+            ));
+        }
+        header_bytes = header_bytes.saturating_add(read);
+        if header_bytes > HTTP_MAX_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP headers are too large",
+            ));
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "malformed HTTP header",
+            ));
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            let length = value.trim().parse::<usize>().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid HTTP content length")
+            })?;
+            if content_length.replace(length).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate HTTP content length",
+                ));
+            }
+        } else if name.trim().eq_ignore_ascii_case("content-type") {
+            if content_type.replace(value.trim().to_owned()).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate HTTP content type",
+                ));
+            }
+        } else if name.trim().eq_ignore_ascii_case("origin") {
+            if origin.replace(value.trim().to_owned()).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate HTTP origin",
+                ));
+            }
+        } else if name.trim().eq_ignore_ascii_case("transfer-encoding")
+            && !value.trim().eq_ignore_ascii_case("identity")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "chunked HTTP requests are not supported",
+            ));
+        }
+    }
+
+    let mut body = Vec::new();
+    if let Some(length) = content_length {
+        if length > HTTP_MAX_BODY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP request body is too large",
+            ));
+        }
+        body.resize(length, 0);
+        reader.read_exact(&mut body)?;
+    }
+    Ok(HttpRequest {
+        method,
+        path,
+        content_length,
+        body,
+        origin,
+        content_type,
+    })
+}
+
+fn handle_http_connection(
+    mut stream: TcpStream,
+    mut reader: BufReader<TcpStream>,
+    first_line: String,
+    state: Arc<Mutex<ServerState>>,
+) -> io::Result<()> {
+    let parsed = read_http_request(&mut reader, &first_line);
+    let HttpRequest {
+        method,
+        path,
+        content_length,
+        body,
+        origin,
+        content_type,
+    } = match parsed {
+        Ok(request) => request,
+        Err(error) => {
+            return http_error(&mut stream, "400 Bad Request", &error.to_string(), None);
+        }
+    };
+    let cors_origin = match http_cors_origin(origin.as_deref()) {
+        Ok(origin) => origin,
+        Err(()) => {
+            return http_error(
+                &mut stream,
+                "403 Forbidden",
+                "cross-origin request is not allowed",
+                None,
+            );
+        }
+    };
+
+    if path != "/jsonrpc" {
+        return http_error(
+            &mut stream,
+            "404 Not Found",
+            "unknown HTTP endpoint",
+            cors_origin,
+        );
+    }
+    if method == "OPTIONS" {
+        return write_http_response(
+            &mut stream,
+            "204 No Content",
+            "application/json",
+            &[],
+            cors_origin,
+        );
+    }
+    if method != "POST" {
+        return http_error(
+            &mut stream,
+            "405 Method Not Allowed",
+            "only POST /jsonrpc is supported",
+            cors_origin,
+        );
+    }
+    if !content_type.as_deref().is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+    }) {
+        return http_error(
+            &mut stream,
+            "415 Unsupported Media Type",
+            "Content-Type application/json is required",
+            cors_origin,
+        );
+    }
+    if content_length.is_none() {
+        return http_error(
+            &mut stream,
+            "411 Length Required",
+            "HTTP content length is required",
+            cors_origin,
+        );
+    }
+
+    let request = match std::str::from_utf8(&body)
+        .map_err(|error| error.to_string())
+        .and_then(|body| parse_request(body).map_err(|error| error.to_string()))
+    {
+        Ok(request) => request,
+        Err(error) => {
+            let response = RpcResponse::error(None, RpcErrorObject::parse_error(error));
+            return write_http_jsonrpc_response(&mut stream, Some(response), cors_origin);
+        }
+    };
+    if let Err(error) = authorize_request(&state, &request) {
+        return write_http_jsonrpc_response(&mut stream, reply_error(&request, error), cors_origin);
+    }
+    if request.method == "events.subscribe" {
+        return write_http_jsonrpc_response(
+            &mut stream,
+            reply_error(
+                &request,
+                RpcErrorObject::invalid_params("events.subscribe requires a TCP connection"),
+            ),
+            cors_origin,
+        );
+    }
+    write_http_jsonrpc_response(
+        &mut stream,
+        dispatch_server_request(&state, &request),
+        cors_origin,
+    )
+}
+
 fn handle_event_subscription(
     mut stream: TcpStream,
     state: Arc<Mutex<ServerState>>,
@@ -1040,28 +1383,29 @@ fn handle_event_subscription(
 
 fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) -> io::Result<()> {
     let reader_stream = stream.try_clone()?;
-    let reader = BufReader::new(reader_stream);
+    let mut reader = BufReader::new(reader_stream);
+    let mut first_line = String::new();
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    loop {
+        first_line.clear();
+        if reader.read_line(&mut first_line)? == 0 {
+            break;
+        }
+        if first_line.trim().is_empty() {
             continue;
         }
+        if is_http_request_line(&first_line) {
+            return handle_http_connection(stream, reader, first_line, state);
+        }
 
-        let response = match parse_request(&line) {
-            Ok(request) => {
-                let authorization = {
-                    let locked = state.lock().expect("server state mutex poisoned");
-                    locked.authentication.authorize(&request)
-                };
-                match authorization {
-                    Err(error) => reply_error(&request, error),
-                    Ok(()) if request.method == "events.subscribe" => {
-                        return handle_event_subscription(stream, state, request);
-                    }
-                    Ok(()) => dispatch_server_request(&state, &request),
+        let response = match parse_request(&first_line) {
+            Ok(request) => match authorize_request(&state, &request) {
+                Err(error) => reply_error(&request, error),
+                Ok(()) if request.method == "events.subscribe" => {
+                    return handle_event_subscription(stream, state, request);
                 }
-            }
+                Ok(()) => dispatch_server_request(&state, &request),
+            },
             Err(error) => {
                 let response =
                     RpcResponse::error(None, RpcErrorObject::parse_error(error.to_string()));

@@ -48,7 +48,7 @@ CI 在 Ubuntu 上执行这些 Rust 检查。目前未构建或检查 TypeScript 
 cargo run -p nexum-server -- --port 39100
 ```
 
-默认绑定 `127.0.0.1:39100`，通过 TCP 提供以换行符分隔的 JSON-RPC 2.0 服务。在另一个终端运行 CLI：
+默认绑定 `127.0.0.1:39100`，通过 TCP 提供以换行符分隔的 JSON-RPC 2.0 服务，并提供每个连接一个请求的 HTTP `POST /jsonrpc`；通过校验的浏览器扩展 Origin 会收到 CORS 头。在另一个终端运行 CLI：
 
 ```bash
 cargo run -p nexum-cli -- task list
@@ -120,6 +120,6 @@ pnpm build
 
 扩展的 `pnpm dev` 会监听文件变化并重新构建。以 `apps/extension` 为目录加载未打包扩展：根目录的 `manifest.json` 引用 `dist/` 下的构建产物和 `icons/` 下的图标。
 
-扩展当前向 `/jsonrpc` 发送 HTTP 请求，而 `nexum-server` 只接受 TCP JSON-RPC。在增加 HTTP 桥接或统一传输方式之前，扩展的发送到 Nexum 操作无法通过当前 Server 创建任务。
+Server 的 HTTP 桥接在 `/jsonrpc` 接受每个连接一个 JSON-RPC 请求，复用同一认证门，要求 `Content-Type: application/json`，并只向通过校验的浏览器扩展 Origin 返回 CORS 头；网页 Origin、分块请求和超过 1 MiB 的请求体会被拒绝。扩展发送流程会先调用 `task.create`，再调用 `task.queue`；它使用保存的 `server` 地址，处理 Content Script 消息，并在发送前解析相对链接。事件订阅仍只走 TCP，扩展没有凭据设置，因此使用扩展时请保持 `require_auth` 关闭。
 
 英文版见 [DEVELOPMENT.md](DEVELOPMENT.md)。
