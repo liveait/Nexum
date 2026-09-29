@@ -131,6 +131,17 @@
    - [x] 增加可选的进程级 RPC 限流，让 TCP 和 HTTP `/jsonrpc` 共用令牌桶。计入已解析且通过认证的请求（含事件订阅），不计入 heartbeat 和 HTTP 预检；带 `id` 的超额调用返回 JSON-RPC `-32002`，无 `id` 的超额通知不响应。默认关闭，配置无效或不完整时拒绝启动。
    - [x] 增加基于 macOS Keychain 的逐 Server Desktop 凭据设置；普通 RPC 和事件订阅都携带凭据，凭据变化时重启事件流。
    - [ ] 在确定合适的存储和配对流程后增加 Browser 凭据设置。
+
+### TLS 实施计划（计划中；尚未启用传输代码）
+
+- [ ] 定义唯一且显式的传输语法：不带 scheme 的 `host:port` 为兼容保留的明文连接，`tls://host:port` 选择 TLS；证书或握手失败时绝不回退到匿名明文。
+- [ ] 增加 Server `tls_cert_path`/`tls_key_path` 成对校验，并在监听前加载 PEM 材料；TCP JSON-RPC、`events.subscribe` 和 HTTP `/jsonrpc` 桥接共用加密流。
+- [ ] 增加共用客户端信任处理，默认使用系统根证书，并支持显式 CA 或证书固定；主机名、证书链或信任失败时不得发送凭据。
+- [ ] 分别接入 CLI、Desktop RPC/事件流和 Browser HTTPS 桥接；TLS 关闭时保持现有明文回环路径。
+- [ ] 将传输身份纳入 Desktop 凭据作用域；已校验的 TLS 端点可以使用凭据，明文凭据仍只允许发给实际回环 peer。
+- [ ] 使用生成证书增加握手、无效配置、禁止降级、RPC/事件/HTTPS、凭据策略和 CORS 集成测试；私钥不得进入仓库。
+
+分阶段传输决策及其不包含项见 [ADR 0005](decisions/0005-tls-transport.zh-CN.md)。
 2. 完成 Desktop 发布层：键盘导航、可访问性标签、减少动效/系统外观行为，以及中英文文案。
 3. 接入 Plugin Provider 并执行其声明的权限。
 4. 用真实处理替换模拟的 Media 操作，再对外提供 Automation 与远程设备工作流。

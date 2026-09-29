@@ -131,6 +131,17 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
    - [x] Add optional process-wide RPC rate limiting with one shared token bucket for TCP and HTTP `/jsonrpc`. Count parsed, authenticated requests, including event subscriptions; exclude heartbeats and HTTP preflight. Return JSON-RPC `-32002` for excess calls with an `id` and drop excess notifications without a response. Keep limiting disabled by default and reject invalid or incomplete configuration at startup.
    - [x] Add per-server Desktop credential settings backed by macOS Keychain; apply credentials to RPC and event subscriptions, and restart the stream after credential changes.
    - [ ] Add Browser credential settings after defining an appropriate storage and pairing flow.
+
+### TLS implementation plan (planned; no transport code is enabled yet)
+
+- [ ] Define one explicit transport syntax: bare `host:port` stays plaintext for compatibility, while `tls://host:port` selects TLS; never fall back from a certificate or handshake failure to anonymous plaintext.
+- [ ] Add all-or-nothing Server `tls_cert_path`/`tls_key_path` validation and load PEM material before listening; use the secured stream for TCP JSON-RPC, `events.subscribe`, and the HTTP `/jsonrpc` bridge.
+- [ ] Add shared client trust handling with system roots plus an explicit CA or certificate pin option; reject hostname, chain, and trust failures without sending credentials.
+- [ ] Wire the CLI, Desktop RPC/event stream, and Browser HTTPS bridge in separate slices, preserving the existing plaintext loopback path while TLS is disabled.
+- [ ] Include transport identity in Desktop credential scoping; permit credentials on verified TLS endpoints and keep plaintext credentials restricted to actual loopback peers.
+- [ ] Add generated-certificate integration tests for handshake, invalid configuration, no downgrade, RPC/events/HTTPS, credential policy, and CORS; keep private keys out of the repository.
+
+The staged transport decision and its non-goals are recorded in [ADR 0005](decisions/0005-tls-transport.md).
 2. Finish the Desktop release layer: keyboard navigation, accessibility labels, reduced-motion/system appearance behavior, and English/Simplified Chinese strings.
 3. Connect plugin providers and enforce their declared permissions.
 4. Replace simulated media operations with real processing, then expose automation and remote-device workflows.
