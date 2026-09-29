@@ -285,7 +285,10 @@ mod tests {
             normalize_credential_account("tls://Example.COM:443").unwrap(),
             Some("tls://example.com:443".to_owned())
         );
-        assert_eq!(normalize_credential_account("example.com:443").unwrap(), None);
+        assert_eq!(
+            normalize_credential_account("example.com:443").unwrap(),
+            None
+        );
         assert_eq!(
             credential_scheme(&new_credential("Bearer", "secret".to_owned()).unwrap()).unwrap(),
             "Bearer"
