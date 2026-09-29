@@ -8,3 +8,5 @@ description = "Nexum command-line client"
 [dependencies]
 nexum-protocol = { path = "../../crates/protocol" }
 serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-native-certs = "0.8"
