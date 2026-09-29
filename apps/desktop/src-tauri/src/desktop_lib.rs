@@ -43,6 +43,7 @@ pub struct EventStreamStatus {
     pub server: String,
     pub connected: bool,
     pub error: Option<String>,
+    pub resync_required: bool,
 }
 
 #[derive(Default)]
@@ -110,9 +111,12 @@ fn run_event_subscription(app: AppHandle, server: String, stop: Arc<AtomicBool>)
                         server: server.clone(),
                         connected: true,
                         error: None,
+                        resync_required: false,
                     },
                 );
                 let disconnected_error;
+                let mut resync_required = false;
+                let mut last_sequence = None;
                 loop {
                     if stop.load(Ordering::Acquire) {
                         return;
@@ -124,11 +128,24 @@ fn run_event_subscription(app: AppHandle, server: String, stop: Arc<AtomicBool>)
                             break;
                         }
                         Ok(_) => {
-                            if let Some(mut event) = parse_server_event(&line)
-                                && event.event != "events.heartbeat"
-                            {
-                                event.server = server.clone();
-                                let _ = app.emit("server-event", event);
+                            if let Some(mut event) = parse_server_event(&line) {
+                                if event.event == "events.heartbeat" {
+                                    continue;
+                                }
+                                match record_event_sequence(&mut last_sequence, event.sequence) {
+                                    Ok(true) => {
+                                        event.server = server.clone();
+                                        let _ = app.emit("server-event", event);
+                                    }
+                                    Ok(_) => {}
+                                    Err((expected, received)) => {
+                                        disconnected_error = Some(format!(
+                                            "event sequence gap: expected {expected}, received {received}"
+                                        ));
+                                        resync_required = true;
+                                        break;
+                                    }
+                                }
                             }
                         }
                         Err(error) if is_timeout(&error) => continue,
@@ -144,6 +161,7 @@ fn run_event_subscription(app: AppHandle, server: String, stop: Arc<AtomicBool>)
                         server: server.clone(),
                         connected: false,
                         error: disconnected_error,
+                        resync_required,
                     },
                 );
             }
@@ -154,6 +172,7 @@ fn run_event_subscription(app: AppHandle, server: String, stop: Arc<AtomicBool>)
                         server: server.clone(),
                         connected: false,
                         error: Some(error),
+                        resync_required: false,
                     },
                 );
             }
@@ -240,6 +259,31 @@ fn parse_server_event(line: &str) -> Option<ServerEvent> {
     let mut event: ServerEvent = serde_json::from_value(value.get("params")?.clone()).ok()?;
     event.server.clear();
     Some(event)
+}
+
+/// Accept only the first or next contiguous event sequence on one stream.
+/// Duplicate and stale notifications are harmless; a forward gap means the
+/// client must reconnect and refresh its full task snapshot because the server
+/// does not provide replay.
+fn record_event_sequence(
+    last_sequence: &mut Option<u64>,
+    sequence: u64,
+) -> Result<bool, (u64, u64)> {
+    let Some(previous) = *last_sequence else {
+        *last_sequence = Some(sequence);
+        return Ok(true);
+    };
+    if sequence == previous {
+        return Ok(false);
+    }
+    if sequence == previous.saturating_add(1) {
+        *last_sequence = Some(sequence);
+        return Ok(true);
+    }
+    if sequence > previous {
+        return Err((previous.saturating_add(1), sequence));
+    }
+    Ok(false)
 }
 
 fn is_timeout(error: &std::io::Error) -> bool {
@@ -465,5 +509,15 @@ mod tests {
         assert_eq!(event.event, "task.created");
         assert_eq!(event.data["task_id"], "t1");
         assert!(parse_server_event(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#).is_none());
+    }
+
+    #[test]
+    fn event_sequence_requires_contiguous_forward_progress() {
+        let mut last = None;
+        assert_eq!(record_event_sequence(&mut last, 4), Ok(true));
+        assert_eq!(record_event_sequence(&mut last, 4), Ok(false));
+        assert_eq!(record_event_sequence(&mut last, 5), Ok(true));
+        assert_eq!(record_event_sequence(&mut last, 3), Ok(false));
+        assert_eq!(record_event_sequence(&mut last, 7), Err((6, 7)));
     }
 }
