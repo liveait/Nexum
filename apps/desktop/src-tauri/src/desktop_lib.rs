@@ -6,14 +6,211 @@ mod credential_store;
 pub use credential_store::{clear_credential, credential_status, save_credential};
 
 use nexum_protocol::{Credential, RpcRequest};
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(test)]
+use std::net::SocketAddr;
+use std::net::{IpAddr, TcpStream};
+use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+
+enum ClientTransport {
+    Plain(TcpStream),
+    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
+
+impl Read for ClientTransport {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for ClientTransport {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TransportAddress {
+    Plain {
+        authority: String,
+    },
+    Tls {
+        authority: String,
+        server_name: String,
+    },
+}
+
+fn parse_transport_address(address: &str) -> Result<TransportAddress, String> {
+    if let Some(authority) = address.strip_prefix("tls://") {
+        let authority = authority.trim();
+        if authority.is_empty() || authority.contains('/') || authority.contains('?') {
+            return Err(format!("invalid TLS server address: {address}"));
+        }
+        let server_name = server_name_from_authority(authority)?;
+        return Ok(TransportAddress::Tls {
+            authority: authority.to_owned(),
+            server_name,
+        });
+    }
+
+    let authority = address.trim();
+    if address.contains("://")
+        || authority.is_empty()
+        || authority.contains('/')
+        || authority.contains('?')
+    {
+        return Err(format!("invalid server address: {address}"));
+    }
+    authority_host_port(authority).map_err(|_| format!("invalid server address: {address}"))?;
+    Ok(TransportAddress::Plain {
+        authority: authority.to_owned(),
+    })
+}
+
+fn authority_host_port(authority: &str) -> Result<(&str, u16), String> {
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, rest) = bracketed
+            .split_once(']')
+            .ok_or_else(|| "IPv6 server address must close the bracket".to_owned())?;
+        let port = rest
+            .strip_prefix(':')
+            .ok_or_else(|| "server address must include a port".to_owned())?;
+        (host, port)
+    } else {
+        let (host, port) = authority
+            .rsplit_once(':')
+            .ok_or_else(|| "server address must include a port".to_owned())?;
+        if host.contains(':') {
+            return Err("IPv6 server addresses must use [address]:port".to_owned());
+        }
+        (host, port)
+    };
+    if host.is_empty() {
+        return Err("server address must include a host".to_owned());
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| "server address port must be between 1 and 65535".to_owned())?;
+    if port == 0 {
+        return Err("server address port must be between 1 and 65535".to_owned());
+    }
+    Ok((host, port))
+}
+
+fn server_name_from_authority(authority: &str) -> Result<String, String> {
+    let (host, _) = authority_host_port(authority)
+        .map_err(|error| format!("invalid TLS server address: {authority} ({error})"))?;
+    if host.parse::<IpAddr>().is_err() {
+        ServerName::try_from(host.to_owned())
+            .map_err(|_| format!("invalid TLS server name: {host}"))?;
+    }
+    Ok(host.to_owned())
+}
+
+fn native_client_config() -> Result<StdArc<ClientConfig>, String> {
+    let native = rustls_native_certs::load_native_certs();
+    let mut roots = RootCertStore::empty();
+    let mut invalid_roots = 0usize;
+    for certificate in native.certs {
+        if roots.add(certificate).is_err() {
+            invalid_roots = invalid_roots.saturating_add(1);
+        }
+    }
+    if roots.is_empty() {
+        let detail = native
+            .errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        let suffix = if detail.is_empty() {
+            if invalid_roots == 0 {
+                String::new()
+            } else {
+                format!(" ({invalid_roots} invalid certificates)")
+            }
+        } else {
+            format!(
+                ": {}; {} invalid certificates",
+                detail.join("; "),
+                invalid_roots
+            )
+        };
+        return Err(format!("no system root certificates are available{suffix}"));
+    }
+    Ok(StdArc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
+}
+
+fn connect_transport(address: &str, timeout: Duration) -> Result<(ClientTransport, bool), String> {
+    let parsed = parse_transport_address(address)?;
+    let (authority, server_name) = match parsed {
+        TransportAddress::Plain { authority } => {
+            let stream =
+                TcpStream::connect(&authority).map_err(|error| format!("connect: {error}"))?;
+            stream
+                .set_read_timeout(Some(timeout))
+                .map_err(|error| format!("read timeout: {error}"))?;
+            stream
+                .set_write_timeout(Some(timeout))
+                .map_err(|error| format!("write timeout: {error}"))?;
+            let credential_allowed = stream
+                .peer_addr()
+                .map(|peer| peer.ip().is_loopback())
+                .unwrap_or(false);
+            return Ok((ClientTransport::Plain(stream), credential_allowed));
+        }
+        TransportAddress::Tls {
+            authority,
+            server_name,
+        } => (authority, server_name),
+    };
+
+    let stream = TcpStream::connect(&authority).map_err(|error| format!("connect: {error}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| format!("read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| format!("write timeout: {error}"))?;
+    let server_name = if let Ok(ip) = server_name.parse::<IpAddr>() {
+        ServerName::IpAddress(ip.into())
+    } else {
+        ServerName::try_from(server_name.clone())
+            .map_err(|_| format!("invalid TLS server name: {server_name}"))?
+    };
+    let connection = ClientConnection::new(native_client_config()?, server_name)
+        .map_err(|error| format!("cannot initialize TLS connection: {error}"))?;
+    let mut transport = StreamOwned::new(connection, stream);
+    transport
+        .conn
+        .complete_io(&mut transport.sock)
+        .map_err(|error| format!("TLS handshake failed: {error}"))?;
+    Ok((ClientTransport::Tls(Box::new(transport)), true))
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -247,19 +444,21 @@ fn run_event_subscription(
     }
 }
 
-fn connect_event_stream(server: &str, stop: &AtomicBool) -> Result<BufReader<TcpStream>, String> {
+fn connect_event_stream(
+    server: &str,
+    stop: &AtomicBool,
+) -> Result<BufReader<ClientTransport>, String> {
     if stop.load(Ordering::Acquire) {
         return Err("event subscription stopped".to_owned());
     }
+    let (mut stream, credential_allowed) = connect_transport(server, EVENT_READ_TIMEOUT)?;
     let credential = credential_store::credential_for_request(server)?;
-    let mut stream = TcpStream::connect(server).map_err(|error| format!("connect: {error}"))?;
-    ensure_safe_credential_peer(&stream, credential.is_some())?;
-    stream
-        .set_read_timeout(Some(EVENT_READ_TIMEOUT))
-        .map_err(|error| format!("read timeout: {error}"))?;
-    stream
-        .set_write_timeout(Some(EVENT_READ_TIMEOUT))
-        .map_err(|error| format!("write timeout: {error}"))?;
+    if credential.is_some() && !credential_allowed {
+        return Err(
+            "credentials can only be sent to a loopback plaintext server or a verified TLS server"
+                .to_owned(),
+        );
+    }
 
     let payload = encode_request("events.subscribe", None, credential)?;
     stream
@@ -292,7 +491,7 @@ fn connect_event_stream(server: &str, stop: &AtomicBool) -> Result<BufReader<Tcp
 }
 
 fn read_line_until_available(
-    reader: &mut BufReader<TcpStream>,
+    reader: &mut BufReader<ClientTransport>,
     stop: &AtomicBool,
 ) -> Result<Option<String>, String> {
     loop {
@@ -378,22 +577,9 @@ fn encode_request(
     serde_json::to_string(&request).map_err(|_| "could not serialize RPC request".to_owned())
 }
 
+#[cfg(test)]
 fn peer_is_safe_for_credential(has_credential: bool, peer: SocketAddr) -> bool {
     !has_credential || peer.ip().is_loopback()
-}
-
-fn ensure_safe_credential_peer(stream: &TcpStream, has_credential: bool) -> Result<(), String> {
-    if !has_credential {
-        return Ok(());
-    }
-    let peer = stream
-        .peer_addr()
-        .map_err(|_| "could not verify credential destination".to_owned())?;
-    if peer_is_safe_for_credential(has_credential, peer) {
-        Ok(())
-    } else {
-        Err("credential can only be sent to a loopback server".to_owned())
-    }
 }
 
 impl RpcResult {
@@ -426,20 +612,21 @@ impl RpcResult {
 
 /// Call a JSON-RPC method on the server.
 pub fn call_rpc(server: &str, method: &str, params: Option<Value>, timeout_ms: u64) -> RpcResult {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let (mut stream, credential_allowed) = match connect_transport(server, timeout) {
+        Ok(stream) => stream,
+        Err(error) => return RpcResult::err(error),
+    };
     let credential = match credential_store::credential_for_request(server) {
         Ok(credential) => credential,
         Err(error) => return RpcResult::err(error),
     };
-    let mut stream = match TcpStream::connect(server) {
-        Ok(s) => s,
-        Err(e) => return RpcResult::err(format!("connect: {e}")),
-    };
-    if let Err(error) = ensure_safe_credential_peer(&stream, credential.is_some()) {
-        return RpcResult::err(error);
+    if credential.is_some() && !credential_allowed {
+        return RpcResult::err(
+            "credentials can only be sent to a loopback plaintext server or a verified TLS server"
+                .to_owned(),
+        );
     }
-
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(timeout_ms)));
-    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(timeout_ms)));
 
     let payload = match encode_request(method, params, credential) {
         Ok(p) => p,
@@ -588,6 +775,39 @@ mod tests {
         // We can't actually test with a real server without one running,
         // but this test verifies the function signature is correct.
         let _ = call_rpc("127.0.0.1:1", "server.version", None, 1000);
+    }
+
+    #[test]
+    fn parses_plain_and_tls_transport_addresses() {
+        assert_eq!(
+            parse_transport_address("127.0.0.1:39100").unwrap(),
+            TransportAddress::Plain {
+                authority: "127.0.0.1:39100".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_transport_address("tls://example.com:443").unwrap(),
+            TransportAddress::Tls {
+                authority: "example.com:443".to_owned(),
+                server_name: "example.com".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_transport_address("tls://[::1]:39100").unwrap(),
+            TransportAddress::Tls {
+                authority: "[::1]:39100".to_owned(),
+                server_name: "::1".to_owned()
+            }
+        );
+        for address in [
+            "",
+            "https://example.com:443",
+            "tls://example.com",
+            "tls://example.com:0",
+            "::1:39100",
+        ] {
+            assert!(parse_transport_address(address).is_err(), "{address}");
+        }
     }
 
     #[test]

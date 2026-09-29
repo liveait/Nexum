@@ -66,12 +66,13 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Publish events through a dedicated TCP subscription and expose them to clients; reconnects begin with a full task snapshot because the stream has no replay buffer
 - [x] Validate and enforce configured Bearer/ApiKey credentials for RPC requests and event subscriptions
 - [x] Enforce optional configured RPC rate limiting for TCP and HTTP `/jsonrpc`
-- [ ] Enforce configured TLS
+- [x] Enforce configured TLS on the Server listener, CLI transport, Desktop RPC/event stream, and Browser HTTPS bridge
 
 ### Phase 7 - Server and CLI
 
 - [x] Loopback TCP server using line-delimited JSON-RPC
 - [x] CLI TCP client with task-control, address configuration, and server inspection commands
+- [x] CLI TLS client with explicit `tls://host:port` addresses, system-root hostname verification, and credential gating
 - [x] Server CLI flags and key-value configuration parsing
 - [x] Enforce `max_connections` at TCP admission; excess connections close before request processing
 - [x] Apply `require_auth` with `auth_scheme` and `auth_token` before RPC dispatch and event subscription
@@ -92,7 +93,7 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Add a Tauri event subscription with debounced task refreshes and retain periodic polling as a disconnected-stream fallback
 - [x] Persist server address and refresh policy through Tauri commands
 - [x] Surface connection/action failures without discarding the last successful task list
-- [x] Store per-server Bearer/ApiKey credentials in macOS Keychain, attach them to RPC and event subscriptions, and allow saving/clearing them in Desktop Settings; restrict credentials to loopback addresses until TLS is available
+- [x] Store per-server Bearer/ApiKey credentials in macOS Keychain, attach them to RPC and event subscriptions, and allow saving/clearing them in Desktop Settings; scope accounts by transport identity, allow verified TLS endpoints, and restrict plaintext credentials to loopback peers
 - [ ] Add keyboard navigation, accessibility labels, system appearance, and English/Simplified Chinese UI strings
 
 ### Phase 9 - Browser Integration
@@ -102,6 +103,7 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Connect send-to-Nexum to the loopback HTTP `/jsonrpc` bridge; the bridge accepts CORS POST requests and applies the RPC authentication gate
 - [x] Use the saved `server` address in the background script and queue created tasks
 - [x] Handle the content script's send message, resolve absolute links, and cover the bridge with an end-to-end task-creation test
+- [x] Map an explicit `tls://host:port` address to the browser's HTTPS `/jsonrpc` bridge; keep bare `host:port` on the HTTP compatibility path and rely on browser trust without downgrade
 - [ ] Add device selection if multi-device delivery is still a product requirement
 
 ### Phase 10 - Extensibility
@@ -131,10 +133,24 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
    - [x] Add optional process-wide RPC rate limiting with one shared token bucket for TCP and HTTP `/jsonrpc`. Count parsed, authenticated requests, including event subscriptions; exclude heartbeats and HTTP preflight. Return JSON-RPC `-32002` for excess calls with an `id` and drop excess notifications without a response. Keep limiting disabled by default and reject invalid or incomplete configuration at startup.
    - [x] Add per-server Desktop credential settings backed by macOS Keychain; apply credentials to RPC and event subscriptions, and restart the stream after credential changes.
    - [ ] Add Browser credential settings after defining an appropriate storage and pairing flow.
+
+### TLS implementation plan (in progress; Server transport slice is enabled)
+
+- [x] Define one explicit transport syntax: bare `host:port` stays plaintext for compatibility, while `tls://host:port` selects TLS; never fall back from a certificate or handshake failure to anonymous plaintext.
+- [x] Add all-or-nothing Server `tls_cert_path`/`tls_key_path` validation and load PEM material before listening; use the secured stream for TCP JSON-RPC, `events.subscribe`, and the HTTP `/jsonrpc` bridge.
+- [x] Add CLI and Desktop client trust handling with platform system roots and hostname verification; reject chain or trust failures without sending credentials.
+- [ ] Add an explicit CA bundle or certificate pin option without introducing an insecure bypass.
+- [x] Wire the CLI TLS RPC client with system-root and hostname verification, preserving the existing plaintext loopback path while TLS is disabled.
+- [x] Wire Desktop RPC/event stream with system-root TLS verification, preserving the existing plaintext loopback path while TLS is disabled.
+- [x] Wire the Browser HTTPS bridge in a separate slice: map `tls://host:port` to browser HTTPS, preserve the existing plaintext loopback path, and do not retry TLS failures over HTTP.
+- [x] Include transport identity in Desktop credential scoping; permit credentials on verified TLS endpoints and keep plaintext credentials restricted to actual loopback peers.
+- [ ] Add generated-certificate integration tests for handshake, invalid configuration, no downgrade, RPC/events/HTTPS, credential policy, and CORS; keep private keys out of the repository.
+
+The staged transport decision and its non-goals are recorded in [ADR 0005](decisions/0005-tls-transport.md).
 2. Finish the Desktop release layer: keyboard navigation, accessibility labels, reduced-motion/system appearance behavior, and English/Simplified Chinese strings.
 3. Connect plugin providers and enforce their declared permissions.
 4. Replace simulated media operations with real processing, then expose automation and remote-device workflows.
 
 ## 3. Current Focus
 
-Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Task and Scheduler events now leave Core through the server event pump and a dedicated `events.subscribe` TCP stream; Desktop refreshes a full task snapshot after debounced notifications and falls back to its configured polling policy when the stream is unavailable. The server also accepts one-request CORS HTTP `/jsonrpc` calls for the Browser extension, which creates and queues tasks through the same dispatcher and authentication gate. Optional process-wide rate limiting now covers authenticated TCP and HTTP RPC calls. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path. The macOS Desktop information architecture is documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md); the React surface now has the sidebar/list/inspector shell, Settings page, Add Download sheet with a native destination chooser, explicit RPC errors, adaptive event-driven refresh, persisted Server settings, and Keychain-backed credentials for a saved loopback Server. Keyboard/accessibility polish, localization, TLS, and Browser credential settings remain outstanding.
+Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Task and Scheduler events now leave Core through the server event pump and a dedicated `events.subscribe` TCP stream; Desktop refreshes a full task snapshot after debounced notifications and falls back to its configured polling policy when the stream is unavailable. The server also accepts one-request CORS HTTP `/jsonrpc` calls through the Browser bridge, which creates and queues tasks through the same dispatcher and authentication gate. Optional process-wide rate limiting now covers authenticated TCP and HTTP RPC calls. Server TLS can now be enabled with paired PEM certificate and private-key paths, with the same secured stream serving TCP, event subscriptions, and the HTTP bridge; the CLI and Desktop use verified `tls://host:port` connections, while the Browser extension maps `tls://host:port` to browser HTTPS and uses the browser trust store. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path. The macOS Desktop information architecture is documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md); the React surface now has the sidebar/list/inspector shell, Settings page, Add Download sheet with a native destination chooser, explicit RPC errors, adaptive event-driven refresh, persisted Server settings, and Keychain-backed credentials for a saved loopback or TLS Server. Keyboard/accessibility polish, localization, explicit Desktop CA/pinning controls, Browser credential settings, and generated TLS integration tests remain outstanding.

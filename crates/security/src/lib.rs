@@ -1,5 +1,6 @@
 //! Nexum security primitives.
 
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -80,7 +81,103 @@ impl TlsConfig {
     pub fn is_complete(&self) -> bool {
         self.cert_path.is_some() && self.key_path.is_some()
     }
+
+    /// Validate the configured certificate and key paths and build a server
+    /// configuration suitable for a TLS acceptor.
+    ///
+    /// The first TLS slice authenticates the server only. A CA path would
+    /// enable client certificate authentication and is rejected until a later
+    /// pairing decision defines that behavior.
+    pub fn load_server_config(&self) -> Result<rustls::ServerConfig, TlsConfigError> {
+        if self.ca_path.is_some() {
+            return Err(TlsConfigError::ClientAuthenticationUnsupported);
+        }
+        let (Some(cert_path), Some(key_path)) = (&self.cert_path, &self.key_path) else {
+            if self.cert_path.is_some() || self.key_path.is_some() {
+                return Err(TlsConfigError::IncompletePair);
+            }
+            return Err(TlsConfigError::Disabled);
+        };
+
+        let cert_file =
+            std::fs::File::open(cert_path).map_err(|source| TlsConfigError::ReadFile {
+                path: cert_path.clone(),
+                source,
+            })?;
+        let mut cert_reader = std::io::BufReader::new(cert_file);
+        let certificates: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(TlsConfigError::CertificatePem)?;
+        if certificates.is_empty() {
+            return Err(TlsConfigError::NoCertificates(cert_path.clone()));
+        }
+
+        let key_file =
+            std::fs::File::open(key_path).map_err(|source| TlsConfigError::ReadFile {
+                path: key_path.clone(),
+                source,
+            })?;
+        let mut key_reader = std::io::BufReader::new(key_file);
+        let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
+            .map_err(TlsConfigError::PrivateKeyPem)?
+            .ok_or_else(|| TlsConfigError::NoPrivateKey(key_path.clone()))?;
+
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificates, key)
+            .map_err(TlsConfigError::Build)
+    }
 }
+
+/// Errors raised while loading a server's TLS material.
+#[derive(Debug)]
+pub enum TlsConfigError {
+    Disabled,
+    IncompletePair,
+    ClientAuthenticationUnsupported,
+    ReadFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    CertificatePem(std::io::Error),
+    PrivateKeyPem(std::io::Error),
+    NoCertificates(PathBuf),
+    NoPrivateKey(PathBuf),
+    Build(rustls::Error),
+}
+
+impl std::fmt::Display for TlsConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "TLS is disabled"),
+            Self::IncompletePair => {
+                write!(f, "TLS certificate and key must be configured together")
+            }
+            Self::ClientAuthenticationUnsupported => write!(
+                f,
+                "TLS client certificate authentication is not supported yet"
+            ),
+            Self::ReadFile { path, source } => {
+                write!(f, "cannot read TLS file {}: {source}", path.display())
+            }
+            Self::CertificatePem(error) => write!(f, "invalid TLS certificate PEM: {error}"),
+            Self::PrivateKeyPem(error) => write!(f, "invalid TLS private key PEM: {error}"),
+            Self::NoCertificates(path) => write!(
+                f,
+                "TLS certificate file {} contains no certificates",
+                path.display()
+            ),
+            Self::NoPrivateKey(path) => write!(
+                f,
+                "TLS private key file {} contains no private key",
+                path.display()
+            ),
+            Self::Build(error) => write!(f, "cannot build TLS server configuration: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for TlsConfigError {}
 
 /// Authentication validation errors.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -219,6 +316,56 @@ mod tests {
             ca_path: Some(PathBuf::from("/ca.pem")),
         };
         assert!(full.is_complete());
+    }
+
+    #[test]
+    fn tls_loader_rejects_an_incomplete_pair() {
+        let config = TlsConfig {
+            cert_path: Some(PathBuf::from("cert.pem")),
+            key_path: None,
+            ca_path: None,
+        };
+        assert!(matches!(
+            config.load_server_config(),
+            Err(TlsConfigError::IncompletePair)
+        ));
+    }
+
+    #[test]
+    fn tls_loader_rejects_client_auth_material_until_supported() {
+        let config = TlsConfig {
+            cert_path: None,
+            key_path: None,
+            ca_path: Some(PathBuf::from("ca.pem")),
+        };
+        assert!(matches!(
+            config.load_server_config(),
+            Err(TlsConfigError::ClientAuthenticationUnsupported)
+        ));
+    }
+
+    #[test]
+    fn tls_loader_rejects_invalid_pem() {
+        let directory = std::env::temp_dir().join(format!(
+            "nexum-tls-invalid-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let cert_path = directory.join("cert.pem");
+        let key_path = directory.join("key.pem");
+        std::fs::write(&cert_path, b"not a certificate").unwrap();
+        std::fs::write(&key_path, b"not a key").unwrap();
+        let config = TlsConfig {
+            cert_path: Some(cert_path.clone()),
+            key_path: Some(key_path),
+            ca_path: None,
+        };
+        assert!(matches!(
+            config.load_server_config(),
+            Err(TlsConfigError::CertificatePem(_)) | Err(TlsConfigError::NoCertificates(_))
+        ));
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

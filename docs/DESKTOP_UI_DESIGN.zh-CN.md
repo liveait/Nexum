@@ -124,7 +124,7 @@ Sheet 只承担一条清晰流程：
 设置是一个独立页面，按分区组织内容，不是第二个任务工作流：
 
 - **Server：** 地址（默认 `127.0.0.1:39100`）、连接/测试按钮、最近连接结果和协议版本。
-- **认证：** 在通用设置中针对当前已保存的 Server 显示 `Bearer`/`ApiKey` scheme 选择器、只写 secret 输入框、已配置 scheme 状态，以及保存/清除操作。将 scheme 和 secret 一起按 Server 地址保存在 macOS Keychain，不能把 secret 回读到 React。保存、清除或切换当前 Server 后重启事件订阅并刷新 Task 快照。TLS 可用前，仅允许回环 Server 地址保存和发送凭据。
+- **认证：** 在通用设置中针对当前已保存的 Server 显示 `Bearer`/`ApiKey` scheme 选择器、只写 secret 输入框、已配置 scheme 状态，以及保存/清除操作。将 scheme 和 secret 一起按 Server 地址保存在 macOS Keychain，不能把 secret 回读到 React。保存、清除或切换当前 Server 后重启事件订阅并刷新 Task 快照。允许为回环明文地址和显式 `tls://` 地址保存凭据。明文凭据仍只允许回环地址；TLS 客户端会先校验 Server 名称和系统根证书链，再发送凭据。
 - **更新：** 自动策略使用事件刷新；事件流断开时回退到空闲每五秒、下载中每秒的轮询。手动策略会禁用该轮询回退。
 - **外观：** 跟随系统外观；语言和强调色选择先预留给客户端设置模型。
 - **通知：** 在本次 Desktop 会话的 Activity Center 显示任务完成、失败和重试事件；通知偏好与静音控制留待后续切片。

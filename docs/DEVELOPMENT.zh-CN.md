@@ -10,6 +10,8 @@ Nexum 是使用 Rust 2024 edition 的工作区，桌面客户端采用 Tauri 2�
 
 Ubuntu CI 在检查 Rust 工作区前安装 `libgtk-3-dev` 和 `libwebkit2gtk-4.1-dev`。本地构建还需满足对应平台的 Tauri 依赖要求。
 
+当前 Linux Tauri 依赖图通过 GTK 3（`gtk 0.18.2`）引入 `glib 0.18.5`。Dependabot 将其报告为 `GHSA-wrw7-89jp-8q8g` / RustSec `RUSTSEC-2024-0429`；不能把 `glib 0.20` 强制 patch 进依赖图，因为 GTK 3 的 `glib = ^0.18` 约束不兼容。Tauri 2.12.0 和 wry 0.57.0 仍声明 GTK 3 / `glib = 0.18`，常规小版本升级无法移除该告警。在上游 Tauri/wry 的 Linux runtime 迁移到已修复的 GTK binding 版本线，或项目明确迁移到兼容的 GTK 4 栈之前，应保留该告警；macOS 构建不包含这条仅 Linux 的依赖路径。
+
 ## 工作区
 
 根目录 `Cargo.toml` 包含下列全部 crate 和 `apps/desktop/src-tauri`。浏览器扩展是独立的前端包。
@@ -59,6 +61,7 @@ cargo run -p nexum-cli -- task queue task-1
 编译出的可执行文件分别名为 `nexum-server` 和 `nexum-cli`。使用 `cargo run -p nexum-server -- --help` 和 `cargo run -p nexum-cli -- --help` 查看当前参数与命令。CLI 默认连接 `127.0.0.1:39100`；如需覆盖地址，将 `--server ADDR` 放在 `task` 或 `server` 前面。
 
 Server 将任务元数据和进度保存到 `--data-dir` 下的 `nexum.sqlite`（默认 `./data`，相对于 Server 工作目录）。启动时会按需创建目录，并在退出前一直持有同目录下 `nexum.lock` 的锁，因此同一数据目录只能由一个 Server 使用。Server 在监听前打开数据库并恢复任务；目录、锁、数据库或恢复失败会阻止启动。显式传入的 `--config` 文件无法读取时也会阻止启动。重启后，原先下载中、暂停或重试中的任务会在内存和 SQLite 中变为排队状态。恢复完成并开始监听后，符合条件的排队 HTTP/HTTPS 任务会自动派发；不支持的来源或受阻的目标会继续排队。`--max-connections` 限制活动 TCP 连接处理器；超过上限的连接会在请求处理前立即关闭。认证默认关闭。要强制认证，需同时设置 `require_auth=true`、`auth_scheme=Bearer|ApiKey` 和非空 `auth_token`；`server.auth` 只返回当前 scheme，不返回 secret。认证配置不完整或不受支持时会阻止启动。
+要启用 Server TLS 监听器，请在 key-value 配置中同时设置 `tls_cert_path` 与 `tls_key_path`，或传入 `--tls-cert-path PATH --tls-key-path PATH`。Server 会在监听器接受连接前加载 PEM 证书和私钥。TLS 使用同一流承载 TCP JSON-RPC、`events.subscribe` 和 HTTP `/jsonrpc`；握手失败会关闭连接，绝不会降级到明文。CLI 和 Desktop 使用 `--server tls://host:port` 或保存的 `tls://host:port` 地址选择 TLS，加载平台根证书（也支持 `rustls-native-certs` 提供的 `SSL_CERT_FILE`/`SSL_CERT_DIR` 来源），校验 Server 名称，并且只在握手验证成功后发送凭据；Browser Extension 将 `tls://host:port` 映射到 `https://host:port/jsonrpc`，使用浏览器正常的信任库，TLS 请求失败时不会改用 HTTP 重试。
 
 `task queue` 会持久化任务并触发 Server 派发器。派发器会持续选取符合条件的排队 HTTP/HTTPS 任务，直到达到 Scheduler 并发上限或目标路径规则不允许继续领取。`task start` 仍是手动 kick，会选取一个排队 HTTP/HTTPS 任务，启动 Worker 后返回任务 ID，然后调用同一派发器填充其他可用槽位。Worker 每写入一个响应块就报告进度；Server 在新增至少 1 MiB 或经过 250 ms 时持久化中间快照，并在任务标记为 `Completed` 前刷新最终快照。传输异步完成，可再次执行 `task list` 或 `task get ID` 查看字节数和完成状态。Server 会拒绝数据目录内的目标、符号链接目标，以及与活动传输重叠的目标。Worker 会将响应写入目标目录的隐藏稳定部分文件，并原子维护记录来源、目标、校验器和预期长度的 JSON sidecar，完整后再重命名到目标路径。传输失败会保留已有目标文件，并将错误文本保存到任务视图的 `error` 字段；在重试策略允许时重新排队，有可用槽位时派发器会自动启动重试。默认策略允许重试三次。领取新一轮传输时会清除旧错误；如果 sidecar 匹配，Server 会在领取后恢复部分字节进度。活跃 HTTP 传输可以在响应块边界暂停，并在同一 Server 进程内恢复；Worker 暂停时保留临时文件和 HTTP 响应。`task remove` 会取消活跃 HTTP Worker，最多等待其退出 30 秒后删除任务，并保留已有目标文件。超时会返回错误，Worker 可能继续阻塞到 30 分钟 HTTP 请求超时，退出后可以重试删除。阻塞中的响应读取可能让暂停等到 HTTP 请求超时；Server 重启后，只有来源、目标、ETag 或 Last-Modified 校验器、预期长度以及服务端确认的 `206 Partial Content` 范围都匹配时，才会复用稳定的部分文件和 sidecar。收到 `200`、校验器变化或缺失、范围格式错误或长度不一致时，会丢弃部分响应并从零开始；没有校验器的响应无法在重启后续传。Magnet 和本地文件来源仍无传输 Engine。
 
@@ -91,7 +94,7 @@ cargo run -p nexum-cli -- auth set ApiKey replace-with-a-secret
 cargo run -p nexum-cli -- auth clear
 ```
 
-`auth set` 只接受 `Bearer` 或 `ApiKey`，并拒绝空 token。`auth clear` 会将 CLI 配置中的两个凭据字段值清空。在 macOS 上，先到 Desktop 设置保存回环 Server 地址，再在“通用”中选择 `Bearer` 或 `ApiKey`、输入匹配的 secret 并保存。Tauri 后端按该地址将 scheme 与 secret 保存到 Keychain，为普通 RPC 和 `events.subscribe` 附加凭据；查询 Keychain 配置状态时只把已配置的 scheme 返回给 React。保存或清除凭据会重启事件订阅并刷新 Task 快照。secret 输入框只写；清除操作会删除 Keychain 条目。由于尚无 TLS，Desktop 不会为非回环地址保存或附加凭据，但仍可尝试无认证的 RPC 连接。其他平台的 Desktop 可以无认证连接，但不支持保存和清除凭据。Browser Extension 仍没有凭据设置。
+`auth set` 只接受 `Bearer` 或 `ApiKey`，并拒绝空 token。`auth clear` 会将 CLI 配置中的两个凭据字段值清空。CLI 可在已验证的 `tls://` 连接上附加已保存凭据；对于不带 scheme 的明文地址，CLI 会先确认实际 peer 为回环地址，否则拒绝发送凭据。在 macOS 上，先到 Desktop 设置保存回环或 `tls://` Server 地址，再在“通用”中选择 `Bearer` 或 `ApiKey`、输入匹配的 secret 并保存。Tauri 后端按包含传输身份的账户将 scheme 与 secret 保存到 Keychain，为普通 RPC 和 `events.subscribe` 附加凭据；查询 Keychain 配置状态时只把已配置的 scheme 返回给 React。保存或清除凭据会重启事件订阅并刷新 Task 快照。secret 输入框只写；清除操作会删除 Keychain 条目。明文凭据仍只允许回环地址，已校验的 TLS 凭据可以用于配置的 Server 地址。其他平台的 Desktop 可以无认证连接，但不支持保存和清除凭据。Browser Extension 仍没有凭据设置。
 
 ## RPC 限流
 
@@ -137,6 +140,6 @@ pnpm build
 
 扩展的 `pnpm dev` 会监听文件变化并重新构建。以 `apps/extension` 为目录加载未打包扩展：根目录的 `manifest.json` 引用 `dist/` 下的构建产物和 `icons/` 下的图标。
 
-Server 的 HTTP 桥接在 `/jsonrpc` 接受每个连接一个 JSON-RPC 请求，复用同一认证门，要求 `Content-Type: application/json`，并只向通过校验的浏览器扩展 Origin 返回 CORS 头；网页 Origin、分块请求和超过 1 MiB 的请求体会被拒绝。扩展发送流程会先调用 `task.create`，再调用 `task.queue`；它使用保存的 `server` 地址，处理 Content Script 消息，并在发送前解析相对链接。事件订阅仍只走 TCP，扩展没有凭据设置，因此使用扩展时请保持 `require_auth` 关闭。
+Server 的 HTTP 桥接在 `/jsonrpc` 接受每个连接一个 JSON-RPC 请求，复用同一认证门，要求 `Content-Type: application/json`，并只向通过校验的浏览器扩展 Origin 返回 CORS 头；网页 Origin、分块请求和超过 1 MiB 的请求体会被拒绝。扩展发送流程会先调用 `task.create`，再调用 `task.queue`；它使用保存的 `server` 地址，将不带 scheme 的地址映射到 HTTP、将 `tls://` 地址映射到 HTTPS，处理 Content Script 消息，并在发送前解析相对链接。事件订阅仍只走 TCP，扩展没有凭据设置，因此使用扩展时请保持 `require_auth` 关闭。
 
 英文版见 [DEVELOPMENT.md](DEVELOPMENT.md)。

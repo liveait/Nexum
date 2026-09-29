@@ -1,8 +1,11 @@
 use nexum_protocol::{Credential, RpcRequest};
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Simple config file management for the CLI.
 pub struct Config {
@@ -36,6 +39,7 @@ impl Config {
     }
 
     pub fn set_server_address(&self, address: &str) -> Result<(), String> {
+        parse_transport_address(address)?;
         self.write_config_value("default_server", address)
     }
 
@@ -114,17 +118,197 @@ impl Default for Config {
     }
 }
 
+enum ClientTransport {
+    Plain(TcpStream),
+    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
+
+impl Read for ClientTransport {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            Self::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for ClientTransport {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            Self::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TransportAddress {
+    Plain {
+        authority: String,
+    },
+    Tls {
+        authority: String,
+        server_name: String,
+    },
+}
+
+fn parse_transport_address(address: &str) -> Result<TransportAddress, String> {
+    if let Some(authority) = address.strip_prefix("tls://") {
+        let authority = authority.trim();
+        if authority.is_empty() || authority.contains('/') || authority.contains('?') {
+            return Err(format!("invalid TLS server address: {address}"));
+        }
+        let server_name = server_name_from_authority(authority)?;
+        return Ok(TransportAddress::Tls {
+            authority: authority.to_owned(),
+            server_name,
+        });
+    }
+
+    let authority = address.trim();
+    if address.contains("://")
+        || authority.is_empty()
+        || authority.contains('/')
+        || authority.contains('?')
+    {
+        return Err(format!("invalid server address: {address}"));
+    }
+    let _ =
+        authority_host_port(authority).map_err(|_| format!("invalid server address: {address}"))?;
+    Ok(TransportAddress::Plain {
+        authority: authority.to_owned(),
+    })
+}
+
+fn authority_host_port(authority: &str) -> Result<(&str, u16), String> {
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, rest) = bracketed
+            .split_once(']')
+            .ok_or_else(|| "IPv6 server address must close the bracket".to_owned())?;
+        let port = rest
+            .strip_prefix(':')
+            .ok_or_else(|| "server address must include a port".to_owned())?;
+        (host, port)
+    } else {
+        let (host, port) = authority
+            .rsplit_once(':')
+            .ok_or_else(|| "server address must include a port".to_owned())?;
+        if host.contains(':') {
+            return Err("IPv6 server addresses must use [address]:port".to_owned());
+        }
+        (host, port)
+    };
+    if host.is_empty() {
+        return Err("server address must include a host".to_owned());
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| "server address port must be between 1 and 65535".to_owned())?;
+    if port == 0 {
+        return Err("server address port must be between 1 and 65535".to_owned());
+    }
+    Ok((host, port))
+}
+
+fn server_name_from_authority(authority: &str) -> Result<String, String> {
+    let (host, _) = authority_host_port(authority)
+        .map_err(|error| format!("invalid TLS server address: {authority} ({error})"))?;
+    // Validate the name now so malformed SNI values fail before a socket is opened.
+    if host.parse::<std::net::IpAddr>().is_err() {
+        ServerName::try_from(host.to_owned())
+            .map_err(|_| format!("invalid TLS server name: {host}"))?;
+    }
+    Ok(host.to_owned())
+}
+
+fn native_client_config() -> Result<Arc<ClientConfig>, String> {
+    let native = rustls_native_certs::load_native_certs();
+    let mut roots = RootCertStore::empty();
+    let mut invalid_roots = 0usize;
+    for certificate in native.certs {
+        if roots.add(certificate).is_err() {
+            invalid_roots = invalid_roots.saturating_add(1);
+        }
+    }
+    if roots.is_empty() {
+        let detail = native
+            .errors
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        let suffix = if detail.is_empty() {
+            if invalid_roots == 0 {
+                String::new()
+            } else {
+                format!(" ({invalid_roots} invalid certificates)")
+            }
+        } else {
+            format!(
+                ": {}; {} invalid certificates",
+                detail.join("; "),
+                invalid_roots
+            )
+        };
+        return Err(format!("no system root certificates are available{suffix}"));
+    }
+    Ok(Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ))
+}
+
 pub struct JsonRpcClient {
-    stream: TcpStream,
-    reader: BufReader<TcpStream>,
+    stream: ClientTransport,
+    credential_allowed: bool,
 }
 
 impl JsonRpcClient {
     pub fn connect(address: &str) -> Result<Self, String> {
-        let stream = TcpStream::connect(address)
-            .map_err(|e| format!("cannot connect to Nexum server at {address}: {e}"))?;
-        let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
-        Ok(Self { stream, reader })
+        let parsed = parse_transport_address(address)?;
+        let (stream, credential_allowed) = match parsed {
+            TransportAddress::Plain { authority } => {
+                let stream = TcpStream::connect(&authority)
+                    .map_err(|e| format!("cannot connect to Nexum server at {address}: {e}"))?;
+                let credential_allowed = stream
+                    .peer_addr()
+                    .map(|peer| peer.ip().is_loopback())
+                    .unwrap_or(false);
+                (ClientTransport::Plain(stream), credential_allowed)
+            }
+            TransportAddress::Tls {
+                authority,
+                server_name,
+            } => {
+                let stream = TcpStream::connect(&authority)
+                    .map_err(|e| format!("cannot connect to Nexum server at {address}: {e}"))?;
+                let server_name = if let Ok(ip) = server_name.parse::<std::net::IpAddr>() {
+                    ServerName::IpAddress(ip.into())
+                } else {
+                    ServerName::try_from(server_name.clone())
+                        .map_err(|_| format!("invalid TLS server name: {server_name}"))?
+                };
+                let connection = ClientConnection::new(native_client_config()?, server_name)
+                    .map_err(|error| format!("cannot initialize TLS connection: {error}"))?;
+                let mut stream = StreamOwned::new(connection, stream);
+                stream
+                    .conn
+                    .complete_io(&mut stream.sock)
+                    .map_err(|error| format!("TLS handshake failed: {error}"))?;
+                (ClientTransport::Tls(Box::new(stream)), true)
+            }
+        };
+        Ok(Self {
+            stream,
+            credential_allowed,
+        })
     }
 
     pub fn call_with_credential(
@@ -134,6 +318,12 @@ impl JsonRpcClient {
         params: Option<Value>,
         credential: Option<Credential>,
     ) -> Result<Value, String> {
+        if credential.is_some() && !self.credential_allowed {
+            return Err(
+                "credentials can only be sent to a loopback plaintext server or a verified TLS server"
+                    .to_owned(),
+            );
+        }
         let request = match credential {
             Some(credential) => RpcRequest::new(id, method, params).with_credential(credential),
             None => RpcRequest::new(id, method, params),
@@ -145,12 +335,26 @@ impl JsonRpcClient {
         self.stream.write_all(b"\n").map_err(|e| e.to_string())?;
         self.stream.flush().map_err(|e| e.to_string())?;
 
-        let mut line = String::new();
-        self.reader
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
+        let mut line = Vec::with_capacity(256);
+        loop {
+            let mut byte = [0_u8; 1];
+            let read = self.stream.read(&mut byte).map_err(|e| e.to_string())?;
+            if read == 0 {
+                break;
+            }
+            line.push(byte[0]);
+            if byte[0] == b'\n' {
+                break;
+            }
+            if line.len() > 16 * 1024 * 1024 {
+                return Err("Nexum server response exceeds the maximum size".into());
+            }
+        }
+        if line.is_empty() {
+            return Err("Nexum server closed the connection without a response".into());
+        }
         let response: nexum_protocol::RpcResponse =
-            serde_json::from_str(&line).map_err(|e| e.to_string())?;
+            serde_json::from_slice(&line).map_err(|e| e.to_string())?;
         if let Some(error) = response.error {
             return Err(format!("[{}] {}", error.code, error.message));
         }
@@ -415,6 +619,55 @@ mod tests {
         assert!(config.set_credential("Basic", "secret").is_err());
         assert!(config.set_credential("Bearer", "  ").is_err());
         assert_eq!(config.default_credential(), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parses_plain_and_tls_server_addresses() {
+        assert_eq!(
+            parse_transport_address("127.0.0.1:39100").unwrap(),
+            TransportAddress::Plain {
+                authority: "127.0.0.1:39100".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_transport_address("tls://example.com:443").unwrap(),
+            TransportAddress::Tls {
+                authority: "example.com:443".to_owned(),
+                server_name: "example.com".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_transport_address("tls://[::1]:39100").unwrap(),
+            TransportAddress::Tls {
+                authority: "[::1]:39100".to_owned(),
+                server_name: "::1".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_invalid_server_addresses() {
+        for address in [
+            "",
+            "https://example.com:443",
+            "tls://example.com",
+            "tls://[::1]:0",
+            "example.com",
+            "example.com:0",
+            "::1:39100",
+        ] {
+            assert!(
+                parse_transport_address(address).is_err(),
+                "expected invalid address: {address}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_rejects_invalid_server_address() {
+        let (config, dir) = test_config();
+        assert!(config.set_server_address("tls://example.com").is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 

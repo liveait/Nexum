@@ -12,6 +12,7 @@ The recorded decisions are:
 - [0002: Server-Owned Automatic Dispatch for HTTP Transfers](0002-auto-dispatch-http-transfers.md)
 - [0003: Cooperative Controls for Server HTTP Transfers](0003-http-transfer-controls.md)
 - [0004: Validated Cross-Restart HTTP Resume](0004-cross-restart-http-resume.md)
+- [0005: Staged TLS Transport](0005-tls-transport.md)
 
 ADR 0002 supersedes ADR 0001's temporary decision to dispatch retries manually. New decisions should use the next numbered filename.
 

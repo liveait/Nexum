@@ -2058,6 +2058,8 @@ name = "nexum-cli"
 version = "0.1.0"
 dependencies = [
  "nexum-protocol",
+ "rustls",
+ "rustls-native-certs",
  "serde_json",
 ]
 
@@ -2079,6 +2081,8 @@ name = "nexum-desktop"
 version = "0.1.0"
 dependencies = [
  "nexum-protocol",
+ "rustls",
+ "rustls-native-certs",
  "security-framework",
  "security-framework-sys",
  "serde",
@@ -2153,6 +2157,8 @@ dependencies = [
 name = "nexum-security"
 version = "0.1.0"
 dependencies = [
+ "rustls",
+ "rustls-pemfile",
  "serde",
 ]
 
@@ -2162,6 +2168,7 @@ version = "0.1.0"
 dependencies = [
  "nexum-core",
  "nexum-protocol",
+ "rustls",
  "serde_json",
 ]
 
@@ -2430,6 +2437,12 @@ dependencies = [
  "is-wsl",
  "libc",
 ]
+
+[[package]]
+name = "openssl-probe"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "option-ext"
@@ -3045,6 +3058,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-native-certs"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
+dependencies = [
+ "openssl-probe",
+ "rustls-pki-types",
+ "schannel",
+ "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3084,6 +3118,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "schannel"
+version = "0.1.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

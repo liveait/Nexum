@@ -7,3 +7,5 @@ description = "Nexum security component"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pemfile = "2"
