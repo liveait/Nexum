@@ -28,9 +28,9 @@ impl Config {
     pub fn default_credential(&self) -> Option<Credential> {
         let scheme = self.read_config_value("default_auth_scheme")?;
         let token = self.read_config_value("default_auth_token")?;
-        match scheme.as_str() {
-            "Bearer" => Some(Credential::Bearer { token }),
-            "ApiKey" => Some(Credential::ApiKey { key: token }),
+        match scheme.to_ascii_lowercase().as_str() {
+            "bearer" if !token.is_empty() => Some(Credential::Bearer { token }),
+            "apikey" if !token.is_empty() => Some(Credential::ApiKey { key: token }),
             _ => None,
         }
     }
@@ -40,8 +40,19 @@ impl Config {
     }
 
     pub fn set_credential(&self, scheme: &str, token: &str) -> Result<(), String> {
+        if !matches!(scheme.to_ascii_lowercase().as_str(), "bearer" | "apikey") {
+            return Err("authentication scheme must be Bearer or ApiKey".into());
+        }
+        if token.trim().is_empty() {
+            return Err("authentication token must not be empty".into());
+        }
         self.write_config_value("default_auth_scheme", scheme)?;
         self.write_config_value("default_auth_token", token)
+    }
+
+    pub fn clear_credential(&self) -> Result<(), String> {
+        self.write_config_value("default_auth_scheme", "")?;
+        self.write_config_value("default_auth_token", "")
     }
 
     fn read_config_value(&self, key: &str) -> Option<String> {
@@ -50,11 +61,10 @@ impl Config {
             return None;
         }
         std::fs::read_to_string(&file).ok().and_then(|content| {
-            content
-                .lines()
-                .find(|l| l.trim().starts_with(&format!("{key}=")))
-                .and_then(|line| line.trim().split_once('='))
-                .map(|(_, value)| value.trim().to_owned())
+            content.lines().find_map(|line| {
+                let (name, value) = line.trim().split_once('=')?;
+                (name.trim() == key).then(|| value.trim().to_owned())
+            })
         })
     }
 
@@ -65,17 +75,26 @@ impl Config {
         if file.is_file() {
             let existing =
                 std::fs::read_to_string(&file).map_err(|e| format!("cannot read config: {e}"))?;
-            let new_content: String = existing
+            let mut found = false;
+            let mut lines = existing
                 .lines()
-                .map(|l| {
-                    if l.trim().starts_with(&format!("{key}=")) {
+                .map(|line| {
+                    let matches_key = line
+                        .trim()
+                        .split_once('=')
+                        .is_some_and(|(name, _)| name.trim() == key);
+                    if matches_key {
+                        found = true;
                         format!("{key} = {value}")
                     } else {
-                        l.to_owned()
+                        line.to_owned()
                     }
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect::<Vec<_>>();
+            if !found {
+                lines.push(format!("{key} = {value}"));
+            }
+            let new_content = lines.join("\n");
             std::fs::write(&file, new_content).map_err(|e| format!("cannot write config: {e}"))?;
         } else {
             std::fs::write(&file, format!("{key} = {value}"))
@@ -249,11 +268,7 @@ fn main() {
         ("auth", "set") if args.len() == 4 => {
             match Config::new().set_credential(&args[2], &args[3]) {
                 Ok(()) => {
-                    println!(
-                        "Authentication set: {} (token: {}...)",
-                        args[2],
-                        args[3].chars().take(4).collect::<String>()
-                    );
+                    println!("Authentication set: {}", args[2]);
                     return;
                 }
                 Err(e) => {
@@ -262,7 +277,7 @@ fn main() {
                 }
             }
         }
-        ("auth", "clear") => match Config::new().write_config_value("default_auth_scheme", "") {
+        ("auth", "clear") => match Config::new().clear_credential() {
             Ok(()) => {
                 println!("Authentication cleared");
                 return;
@@ -320,6 +335,19 @@ fn main() {
 mod tests {
     use super::*;
 
+    fn test_config() -> (Config, PathBuf) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "nexum-cli-config-test-{}-{stamp}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        (Config { dir: dir.clone() }, dir)
+    }
+
     #[test]
     fn config_round_trips_server_address() {
         let dir = std::env::temp_dir().join("nexum-cli-config-test");
@@ -345,6 +373,49 @@ mod tests {
         // core logic: if no config file exists, default_server_address returns None.
         let no_file = PathBuf::from("/nonexistent/config/nexum/config.txt");
         assert!(!no_file.is_file());
+    }
+
+    #[test]
+    fn config_round_trips_credentials_and_clear_removes_both_values() {
+        let (config, dir) = test_config();
+        config.set_server_address("127.0.0.1:9999").unwrap();
+        config.set_credential("Bearer", "secret-token").unwrap();
+        assert_eq!(
+            config.default_credential(),
+            Some(Credential::Bearer {
+                token: "secret-token".to_owned()
+            })
+        );
+
+        config.set_credential("ApiKey", "api-key").unwrap();
+        assert_eq!(
+            config.default_credential(),
+            Some(Credential::ApiKey {
+                key: "api-key".to_owned()
+            })
+        );
+        assert_eq!(
+            config.default_server_address().as_deref(),
+            Some("127.0.0.1:9999")
+        );
+
+        config.clear_credential().unwrap();
+        assert_eq!(config.default_credential(), None);
+        let content = std::fs::read_to_string(dir.join("config.txt")).unwrap();
+        assert!(content.contains("default_auth_scheme = "));
+        assert!(content.contains("default_auth_token = "));
+        assert!(content.contains("default_server = 127.0.0.1:9999"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_rejects_unknown_scheme_and_empty_token() {
+        let (config, dir) = test_config();
+        assert!(config.set_credential("Basic", "secret").is_err());
+        assert!(config.set_credential("Bearer", "  ").is_err());
+        assert_eq!(config.default_credential(), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

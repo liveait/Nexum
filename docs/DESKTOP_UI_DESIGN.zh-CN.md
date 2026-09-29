@@ -124,12 +124,13 @@ Sheet 只承担一条清晰流程：
 设置是一个独立页面，按分区组织内容，不是第二个任务工作流：
 
 - **Server：** 地址（默认 `127.0.0.1:39100`）、连接/测试按钮、最近连接结果和协议版本。
+- **认证（Desktop 后续切片）：** 为 Server 的 `Bearer` 或 `ApiKey` 配置提供 scheme 选择器和 secret 输入框，并通过 macOS 安全存储保存。当前 Desktop 客户端尚未发送凭据。
 - **更新：** 自动策略使用事件刷新；事件流断开时回退到空闲每五秒、下载中每秒的轮询。手动策略会禁用该轮询回退。
 - **外观：** 跟随系统外观；语言和强调色选择先预留给客户端设置模型。
 - **通知：** 在本次 Desktop 会话的 Activity Center 显示任务完成、失败和重试事件；通知偏好与静音控制留待后续切片。
 - 第一版 Server 是独立进程的说明。
 
-通过 Tauri 命令将地址和刷新策略保存到 macOS Application Support 目录。不能只依赖 React state 或浏览器存储。Server 认证真正执行前，不在此页面展示 Credential。
+通过 Tauri 命令将地址和刷新策略保存到 macOS Application Support 目录。未来 Desktop 凭据应保存到 macOS Keychain 或等效的安全存储，不要使用浏览器存储。在该客户端切片完成前，Desktop 会话不要启用 `require_auth`；启用认证的 Server 会拒绝当前客户端请求。
 
 ## 6. 状态模型与数据新鲜度
 

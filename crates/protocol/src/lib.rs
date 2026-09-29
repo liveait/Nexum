@@ -35,6 +35,7 @@ impl std::fmt::Display for ProtocolVersion {
 }
 
 pub const ERR_TASK_NOT_FOUND: i32 = -32004;
+pub const ERR_UNAUTHORIZED: i32 = -32001;
 pub const ERR_INTERNAL: i32 = -32603;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -159,6 +160,13 @@ impl RpcErrorObject {
     pub fn task_not_found(message: impl Into<String>) -> Self {
         Self {
             code: ERR_TASK_NOT_FOUND,
+            message: message.into(),
+            data: None,
+        }
+    }
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            code: ERR_UNAUTHORIZED,
             message: message.into(),
             data: None,
         }
