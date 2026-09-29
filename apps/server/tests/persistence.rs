@@ -1,6 +1,7 @@
 use nexum_core::nexum_domain::TaskId;
 use nexum_core::nexum_storage::{SqliteRepository, TaskRepository};
 use nexum_core::nexum_task::TaskState;
+use nexum_protocol::Credential;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -73,17 +74,40 @@ impl ServerProcess {
     }
 
     fn start_with_max_connections(data_dir: &Path, max_connections: usize) -> Self {
+        Self::start_with_options(data_dir, max_connections, None)
+    }
+
+    fn start_with_auth(data_dir: &Path, scheme: &str, token: &str) -> Self {
+        Self::start_with_options(data_dir, 100, Some((scheme, token)))
+    }
+
+    fn start_with_options(
+        data_dir: &Path,
+        max_connections: usize,
+        auth: Option<(&str, &str)>,
+    ) -> Self {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
 
-        let child = Command::new(env!("CARGO_BIN_EXE_nexum-server"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nexum-server"));
+        command
             .arg("--port")
             .arg(port.to_string())
             .arg("--max-connections")
             .arg(max_connections.to_string())
             .arg("--data-dir")
-            .arg(data_dir)
+            .arg(data_dir);
+        if let Some((scheme, token)) = auth {
+            command
+                .arg("--require-auth")
+                .arg("true")
+                .arg("--auth-scheme")
+                .arg(scheme)
+                .arg("--auth-token")
+                .arg(token);
+        }
+        let child = command
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -102,11 +126,23 @@ impl ServerProcess {
     }
 
     fn request(&self, method: &str, params: Option<Value>) -> Value {
+        self.request_with_credential(method, params, None)
+    }
+
+    fn request_with_credential(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        credential: Option<Credential>,
+    ) -> Value {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let mut request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        if let Some(credential) = credential {
+            request["credential"] = serde_json::to_value(credential).unwrap();
+        }
         writeln!(stream, "{request}").unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
@@ -120,19 +156,41 @@ impl ServerProcess {
         response["result"].clone()
     }
 
+    fn call_with_credential(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        credential: Credential,
+    ) -> Value {
+        let response = self.request_with_credential(method, params, Some(credential));
+        assert!(response.get("error").is_none(), "{response}");
+        response["result"].clone()
+    }
+
     fn subscribe_events(&self) -> BufReader<TcpStream> {
+        let (reader, response) = self.subscribe_events_with_credential(None);
+        assert_eq!(response["result"]["subscribed"], true);
+        reader
+    }
+
+    fn subscribe_events_with_credential(
+        &self,
+        credential: Option<Credential>,
+    ) -> (BufReader<TcpStream>, Value) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "events.subscribe"});
+        let mut request = json!({"jsonrpc": "2.0", "id": 1, "method": "events.subscribe"});
+        if let Some(credential) = credential {
+            request["credential"] = serde_json::to_value(credential).unwrap();
+        }
         writeln!(stream, "{request}").unwrap();
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         let response: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["result"]["subscribed"], true);
-        reader
+        (reader, response)
     }
 
     fn task_state(&self, id: &str) -> String {
@@ -855,11 +913,16 @@ fn http_downloads_to_the_same_destination_do_not_overlap() {
 }
 
 fn server_output_with_timeout(data_dir: &Path, port: Option<u16>) -> Output {
+    server_output_with_args(data_dir, port, &[])
+}
+
+fn server_output_with_args(data_dir: &Path, port: Option<u16>, extra_args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nexum-server"));
     command.arg("--data-dir").arg(data_dir);
     if let Some(port) = port {
         command.arg("--port").arg(port.to_string());
     }
+    command.args(extra_args);
     let mut child = command
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -939,6 +1002,116 @@ fn startup_fails_when_database_cannot_be_opened() {
     let output = server_output_with_timeout(dir.path(), None);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("nexum.sqlite"));
+}
+
+fn assert_unauthorized(response: &Value) {
+    assert_eq!(response["error"]["code"], -32001);
+    assert_eq!(response["error"]["message"], "authentication required");
+}
+
+#[test]
+fn require_auth_rejects_missing_and_invalid_credentials() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_auth(dir.path(), "ApiKey", "test-secret");
+
+    assert_unauthorized(&server.request("server.version", None));
+    assert_unauthorized(&server.request_with_credential(
+        "server.version",
+        None,
+        Some(Credential::ApiKey {
+            key: "wrong-secret".to_owned(),
+        }),
+    ));
+    assert_unauthorized(&server.request_with_credential(
+        "server.version",
+        None,
+        Some(Credential::Bearer {
+            token: "test-secret".to_owned(),
+        }),
+    ));
+
+    let credential = Credential::ApiKey {
+        key: "test-secret".to_owned(),
+    };
+    assert_eq!(
+        server.call_with_credential("server.version", None, credential.clone()),
+        "1"
+    );
+    assert_eq!(
+        server.call_with_credential("server.auth", None, credential),
+        json!(["ApiKey"])
+    );
+    server.stop();
+}
+
+#[test]
+fn require_auth_applies_to_event_subscriptions() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_auth(dir.path(), "Bearer", "event-secret");
+
+    let (rejected_events, rejected) = server.subscribe_events_with_credential(None);
+    assert_unauthorized(&rejected);
+    drop(rejected_events);
+
+    let credential = Credential::Bearer {
+        token: "event-secret".to_owned(),
+    };
+    let (mut events, subscribed) =
+        server.subscribe_events_with_credential(Some(credential.clone()));
+    assert_eq!(subscribed["result"]["subscribed"], true);
+
+    server.call_with_credential(
+        "task.create",
+        Some(json!({
+            "id": "authenticated-event",
+            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "destination": dir.output_path("authenticated-event").to_string_lossy(),
+        })),
+        credential.clone(),
+    );
+    server.call_with_credential(
+        "task.queue",
+        Some(json!({"id": "authenticated-event"})),
+        credential,
+    );
+
+    let mut observed = Vec::new();
+    for _ in 0..12 {
+        let mut line = String::new();
+        events.read_line(&mut line).unwrap();
+        if line.trim().is_empty() {
+            continue;
+        }
+        let message: Value = serde_json::from_str(&line).unwrap();
+        if message["method"] == "events.event" {
+            observed.push(message["params"]["event"].as_str().unwrap().to_owned());
+        }
+        if observed.iter().any(|event| event == "task.created") {
+            break;
+        }
+    }
+    assert!(
+        observed.iter().any(|event| event == "task.created"),
+        "authenticated event subscription did not receive task.created: {observed:?}"
+    );
+    drop(events);
+    server.stop();
+}
+
+#[test]
+fn startup_fails_when_authentication_is_required_without_credentials() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let output = server_output_with_args(dir.path(), None, &["--require-auth", "true"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("require_auth=true requires auth_scheme and a non-empty auth_token"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

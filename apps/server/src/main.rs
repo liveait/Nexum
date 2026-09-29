@@ -36,6 +36,7 @@ struct ServerState {
     active_http: HashMap<TaskId, HttpTransfer>,
     active_destinations: HashSet<PathBuf>,
     events: EventHub,
+    authentication: AuthenticationConfig,
 }
 
 #[derive(Default)]
@@ -43,6 +44,51 @@ struct EventHub {
     next_sequence: u64,
     next_subscriber: u64,
     subscribers: HashMap<u64, SyncSender<EventNotification>>,
+}
+
+#[derive(Clone)]
+struct AuthenticationConfig {
+    required: bool,
+    credential: Option<Credential>,
+}
+
+impl AuthenticationConfig {
+    fn from_server_config(config: &ServerConfig) -> Result<Self, String> {
+        let credential = config.configured_credential()?;
+        if config.require_auth && credential.is_none() {
+            return Err(
+                "require_auth=true requires auth_scheme and a non-empty auth_token".to_owned(),
+            );
+        }
+        Ok(Self {
+            required: config.require_auth,
+            credential,
+        })
+    }
+
+    fn authorize(&self, request: &RpcRequest) -> Result<(), RpcErrorObject> {
+        if !self.required {
+            return Ok(());
+        }
+        if self.credential.as_ref().is_some_and(|expected| {
+            request
+                .credential
+                .as_ref()
+                .is_some_and(|actual| actual.matches(expected))
+        }) {
+            Ok(())
+        } else {
+            Err(RpcErrorObject::unauthorized("authentication required"))
+        }
+    }
+
+    fn schemes(&self) -> Vec<String> {
+        match self.credential.as_ref() {
+            Some(Credential::Bearer { .. }) => vec!["Bearer".to_owned()],
+            Some(Credential::ApiKey { .. }) => vec!["ApiKey".to_owned()],
+            Some(Credential::None) | None => vec!["none".to_owned()],
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -230,12 +276,30 @@ impl ProgressReporter {
 }
 
 /// Server configuration loaded from a simple config file or defaults.
-#[derive(Debug)]
 pub struct ServerConfig {
     pub port: u16,
     pub max_connections: usize,
     pub data_dir: PathBuf,
     pub require_auth: bool,
+    pub auth_scheme: Option<String>,
+    pub auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerConfig")
+            .field("port", &self.port)
+            .field("max_connections", &self.max_connections)
+            .field("data_dir", &self.data_dir)
+            .field("require_auth", &self.require_auth)
+            .field("auth_scheme", &self.auth_scheme)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {
@@ -245,6 +309,8 @@ impl Default for ServerConfig {
             max_connections: 100,
             data_dir: PathBuf::from("./data"),
             require_auth: false,
+            auth_scheme: None,
+            auth_token: None,
         }
     }
 }
@@ -258,6 +324,8 @@ impl ServerConfig {
         let mut max_connections = None;
         let mut data_dir = None;
         let mut require_auth = None;
+        let mut auth_scheme = None;
+        let mut auth_token = None;
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -281,6 +349,8 @@ impl ServerConfig {
                     "require_auth" => {
                         require_auth = Some(value.trim().parse::<bool>().unwrap_or(false));
                     }
+                    "auth_scheme" => auth_scheme = Some(value.trim().to_owned()),
+                    "auth_token" => auth_token = Some(value.trim().to_owned()),
                     _ => {}
                 }
             }
@@ -290,7 +360,28 @@ impl ServerConfig {
             max_connections: max_connections.unwrap_or(Self::default().max_connections),
             data_dir: data_dir.unwrap_or(Self::default().data_dir),
             require_auth: require_auth.unwrap_or(Self::default().require_auth),
+            auth_scheme,
+            auth_token,
         })
+    }
+
+    fn configured_credential(&self) -> Result<Option<Credential>, String> {
+        match (&self.auth_scheme, &self.auth_token) {
+            (None, None) => Ok(None),
+            (Some(scheme), Some(token)) if !token.trim().is_empty() => {
+                match scheme.trim().to_ascii_lowercase().as_str() {
+                    "bearer" => Ok(Some(Credential::Bearer {
+                        token: token.clone(),
+                    })),
+                    "apikey" => Ok(Some(Credential::ApiKey { key: token.clone() })),
+                    _ => Err("auth_scheme must be Bearer or ApiKey".to_owned()),
+                }
+            }
+            (Some(_), Some(_)) => Err("auth_token must not be empty".to_owned()),
+            (Some(_), None) | (None, Some(_)) => {
+                Err("auth_scheme and auth_token must be configured together".to_owned())
+            }
+        }
     }
 }
 
@@ -836,6 +927,19 @@ fn dispatch_server_request(
         }
     }
 
+    if request.method == "server.auth" {
+        let schemes = {
+            let locked = state.lock().expect("server state mutex poisoned");
+            locked.authentication.schemes()
+        };
+        return request.id.clone().map(|id| {
+            RpcResponse::success(
+                Some(id),
+                serde_json::to_value(schemes).expect("authentication schemes serialize"),
+            )
+        });
+    }
+
     let response = {
         let mut locked = state.lock().expect("server state mutex poisoned");
         RpcDispatcher::dispatch(&mut locked.core, request)
@@ -944,23 +1048,20 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) -> i
             continue;
         }
 
-        // Log credential scheme for debugging (if present and not None)
-        if let Ok(request) = parse_request(&line)
-            && let Some(ref cred) = request.credential
-        {
-            match cred {
-                Credential::None => {}
-                Credential::Bearer { .. } | Credential::ApiKey { .. } => {
-                    eprintln!("  -> {} (credential: {})", request.method, cred);
+        let response = match parse_request(&line) {
+            Ok(request) => {
+                let authorization = {
+                    let locked = state.lock().expect("server state mutex poisoned");
+                    locked.authentication.authorize(&request)
+                };
+                match authorization {
+                    Err(error) => reply_error(&request, error),
+                    Ok(()) if request.method == "events.subscribe" => {
+                        return handle_event_subscription(stream, state, request);
+                    }
+                    Ok(()) => dispatch_server_request(&state, &request),
                 }
             }
-        }
-
-        let response = match parse_request(&line) {
-            Ok(request) if request.method == "events.subscribe" => {
-                return handle_event_subscription(stream, state, request);
-            }
-            Ok(request) => dispatch_server_request(&state, &request),
             Err(error) => {
                 let response =
                     RpcResponse::error(None, RpcErrorObject::parse_error(error.to_string()));
@@ -989,6 +1090,8 @@ fn parse_cli_flags() -> (ServerConfig, PathBuf, bool, bool) {
     let mut has_cli_data_dir = false;
     let mut has_cli_max_connections = false;
     let mut has_cli_require_auth = false;
+    let mut has_cli_auth_scheme = false;
+    let mut has_cli_auth_token = false;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -1034,6 +1137,20 @@ fn parse_cli_flags() -> (ServerConfig, PathBuf, bool, bool) {
                     config.require_auth = req;
                 }
             }
+            "--auth-scheme" => {
+                has_cli_auth_scheme = true;
+                i += 1;
+                if i < args.len() {
+                    config.auth_scheme = Some(args[i].clone());
+                }
+            }
+            "--auth-token" => {
+                has_cli_auth_token = true;
+                i += 1;
+                if i < args.len() {
+                    config.auth_token = Some(args[i].clone());
+                }
+            }
             "--version" => show_version = true,
             "--help" | "-h" => show_help = true,
             _ => {}
@@ -1057,6 +1174,12 @@ fn parse_cli_flags() -> (ServerConfig, PathBuf, bool, bool) {
         if !has_cli_require_auth {
             config.require_auth = file_config.require_auth;
         }
+        if !has_cli_auth_scheme {
+            config.auth_scheme = file_config.auth_scheme;
+        }
+        if !has_cli_auth_token {
+            config.auth_token = file_config.auth_token;
+        }
     }
 
     (config, config_path, show_version, show_help)
@@ -1070,6 +1193,8 @@ fn print_usage() {
     eprintln!("  --data-dir PATH     Data directory (default: ./data)");
     eprintln!("  --max-connections N Max concurrent connections (default: 100)");
     eprintln!("  --require-auth BOOL Require authentication for all requests");
+    eprintln!("  --auth-scheme SCHEME Authentication scheme (Bearer or ApiKey)");
+    eprintln!("  --auth-token TOKEN  Authentication secret");
     eprintln!("  --version           Show server and protocol version");
     eprintln!("  --help, -h          Show this help");
 }
@@ -1134,6 +1259,9 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    let authentication = AuthenticationConfig::from_server_config(&config)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+
     let _data_dir_lock = lock_data_dir(&config.data_dir)?;
     let state = Arc::new(Mutex::new(ServerState {
         core: open_core(&config.data_dir)?,
@@ -1141,6 +1269,7 @@ fn main() -> io::Result<()> {
         active_http: HashMap::new(),
         active_destinations: HashSet::new(),
         events: EventHub::default(),
+        authentication,
     }));
     let address = format!("127.0.0.1:{}", config.port);
     let listener = TcpListener::bind(&address)?;
@@ -1189,6 +1318,9 @@ mod tests {
         assert_eq!(config.port, 39100);
         assert_eq!(config.max_connections, 100);
         assert_eq!(config.data_dir, PathBuf::from("./data"));
+        assert!(!config.require_auth);
+        assert!(config.auth_scheme.is_none());
+        assert!(config.auth_token.is_none());
     }
 
     #[test]
@@ -1222,11 +1354,17 @@ mod tests {
             writeln!(f, "port=8080").unwrap();
             writeln!(f, "max_connections=50").unwrap();
             writeln!(f, "data_dir=/tmp/nexum").unwrap();
+            writeln!(f, "require_auth=true").unwrap();
+            writeln!(f, "auth_scheme=ApiKey").unwrap();
+            writeln!(f, "auth_token=test-secret").unwrap();
         }
         let config = ServerConfig::from_file(config_file.to_str().unwrap()).unwrap();
         assert_eq!(config.port, 8080);
         assert_eq!(config.max_connections, 50);
         assert_eq!(config.data_dir, PathBuf::from("/tmp/nexum"));
+        assert!(config.require_auth);
+        assert_eq!(config.auth_scheme.as_deref(), Some("ApiKey"));
+        assert_eq!(config.auth_token.as_deref(), Some("test-secret"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1268,6 +1406,48 @@ mod tests {
     fn parse_config_file_returns_error_for_missing_file() {
         let result = ServerConfig::from_file("/nonexistent/path/config.txt");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn configured_credential_requires_a_supported_complete_pair() {
+        let mut config = ServerConfig::default();
+        assert_eq!(config.configured_credential().unwrap(), None);
+
+        config.auth_scheme = Some("bearer".to_owned());
+        config.auth_token = Some("test-secret".to_owned());
+        assert_eq!(
+            config.configured_credential().unwrap(),
+            Some(Credential::Bearer {
+                token: "test-secret".to_owned()
+            })
+        );
+
+        config.auth_scheme = Some("Basic".to_owned());
+        assert_eq!(
+            config.configured_credential().unwrap_err(),
+            "auth_scheme must be Bearer or ApiKey"
+        );
+
+        config.auth_scheme = Some("ApiKey".to_owned());
+        config.auth_token = Some("  ".to_owned());
+        assert_eq!(
+            config.configured_credential().unwrap_err(),
+            "auth_token must not be empty"
+        );
+    }
+
+    #[test]
+    fn required_auth_rejects_missing_credentials_at_startup_configuration() {
+        let config = ServerConfig {
+            require_auth: true,
+            ..ServerConfig::default()
+        };
+        assert_eq!(
+            AuthenticationConfig::from_server_config(&config)
+                .err()
+                .unwrap(),
+            "require_auth=true requires auth_scheme and a non-empty auth_token"
+        );
     }
 
     #[test]

@@ -124,12 +124,13 @@ The current server requires an explicit task ID and destination, so the first im
 Settings is a dedicated page with grouped sections. It is not a second task workflow:
 
 - **Server:** address (default `127.0.0.1:39100`), Connect/Test, last connection result, and protocol version.
+- **Authentication (planned Desktop slice):** a scheme selector and secret field for the server's `Bearer` or `ApiKey` configuration, stored through macOS secure storage. The current Desktop client does not send credentials yet.
 - **Updates:** Automatic uses event refreshes and a five-second idle or one-second active polling fallback when the stream is disconnected; Manual disables that polling fallback.
 - **Appearance:** follow the system appearance; reserve language and accent choices for the client settings model.
 - **Notifications:** show task completion, failure, and retry events in the session Activity Center; reserve delivery preferences and mute controls for a later slice.
 - A note that the Server is a separate process in the first release.
 
-Persist the address and refresh policy in the macOS application support directory through a Tauri command. Do not rely only on React state or browser storage. Credentials should not be displayed in this page until server-side authentication is enforced.
+Persist the address and refresh policy in the macOS application support directory through a Tauri command. Store a future Desktop credential in the macOS Keychain or an equivalent secure store rather than browser storage. Until that client slice is implemented, do not enable `require_auth` for a Desktop session; an authenticated Server will reject the client's requests.
 
 ## 6. State model and data freshness
 

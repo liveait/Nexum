@@ -64,7 +64,8 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Credential, TLS, and rate-limit types with protocol/security unit tests
 - [ ] Enforce protocol compatibility beyond envelope validation
 - [x] Publish events through a dedicated TCP subscription and expose them to clients; reconnects begin with a full task snapshot because the stream has no replay buffer
-- [ ] Validate credentials and enforce authentication/TLS/rate limiting where configured
+- [x] Validate and enforce configured Bearer/ApiKey credentials for RPC requests and event subscriptions
+- [ ] Enforce configured TLS and rate limiting
 
 ### Phase 7 - Server and CLI
 
@@ -72,7 +73,7 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] CLI TCP client with task-control, address configuration, and server inspection commands
 - [x] Server CLI flags and key-value configuration parsing
 - [x] Enforce `max_connections` at TCP admission; excess connections close before request processing
-- [ ] Apply `require_auth`; it is currently parsed but not enforced
+- [x] Apply `require_auth` with `auth_scheme` and `auth_token` before RPC dispatch and event subscription
 - [x] Use `data_dir` for SQLite persistence and restart recovery
 - [x] Make normal `task.start` launch a real HTTP/HTTPS download for supported sources
 - [x] Persist transfer errors and expose them through task views instead of only server logs
@@ -122,14 +123,14 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 
 ## 2. Delivery Order From Current Code
 
-1. Complete the remaining server/client contracts: authenticated transport where configured, durable event-delivery semantics, and a browser-compatible endpoint or bridge.
+1. Complete the remaining server/client contracts: durable event-delivery semantics, configured TLS/rate limiting, and a browser-compatible endpoint or bridge.
    - Specify reconnect, dropped-event, and replay behavior for the bounded event stream.
    - Decide whether the browser uses an HTTP JSON-RPC endpoint or a TCP bridge, then connect the extension send flow.
-   - Enforce `require_auth` and configured TLS/rate-limit behavior.
+   - Keep authentication settings aligned across clients as Desktop credential storage is added.
 2. Finish the Desktop release layer: keyboard navigation, accessibility labels, reduced-motion/system appearance behavior, and English/Simplified Chinese strings.
 3. Connect plugin providers and enforce their declared permissions.
 4. Replace simulated media operations with real processing, then expose automation and remote-device workflows.
 
 ## 3. Current Focus
 
-Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Task and Scheduler events now leave Core through the server event pump and a dedicated `events.subscribe` TCP stream; Desktop refreshes a full task snapshot after debounced notifications and falls back to its configured polling policy when the stream is unavailable. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path. The macOS Desktop information architecture is documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md); the React surface now has the sidebar/list/inspector shell, Settings page, Add Download sheet with a native destination chooser, explicit RPC errors, adaptive event-driven refresh, and persisted Server settings. Keyboard/accessibility polish, localization, authentication, and browser transport remain outstanding.
+Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Task and Scheduler events now leave Core through the server event pump and a dedicated `events.subscribe` TCP stream; Desktop refreshes a full task snapshot after debounced notifications and falls back to its configured polling policy when the stream is unavailable. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path. The macOS Desktop information architecture is documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md); the React surface now has the sidebar/list/inspector shell, Settings page, Add Download sheet with a native destination chooser, explicit RPC errors, adaptive event-driven refresh, and persisted Server settings. Keyboard/accessibility polish, localization, Desktop credential settings, TLS/rate limiting, and browser transport remain outstanding.

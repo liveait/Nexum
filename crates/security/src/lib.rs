@@ -15,6 +15,22 @@ pub enum Credential {
     ApiKey { key: String },
 }
 
+impl Credential {
+    /// Compare two credentials without returning which part failed.
+    pub fn matches(&self, expected: &Self) -> bool {
+        match (self, expected) {
+            (Self::None, Self::None) => true,
+            (Self::Bearer { token }, Self::Bearer { token: expected }) => {
+                constant_time_eq(token.as_bytes(), expected.as_bytes())
+            }
+            (Self::ApiKey { key }, Self::ApiKey { key: expected }) => {
+                constant_time_eq(key.as_bytes(), expected.as_bytes())
+            }
+            _ => false,
+        }
+    }
+}
+
 impl std::fmt::Display for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -106,19 +122,40 @@ impl CredentialStore {
     ) -> Result<&Credential, AuthenticationError> {
         match scheme {
             AuthenticationScheme::None => Ok(&Credential::None),
-            _ => {
-                if self
-                    .credentials
-                    .iter()
-                    .any(|c| matches!(c, Credential::None))
-                {
-                    Ok(&Credential::None)
-                } else {
-                    Err(AuthenticationError::Invalid)
-                }
-            }
+            AuthenticationScheme::Bearer(token) => self
+                .credentials
+                .iter()
+                .find(|credential| {
+                    matches!(
+                        credential,
+                        Credential::Bearer { token: expected }
+                            if constant_time_eq(token.as_bytes(), expected.as_bytes())
+                    )
+                })
+                .ok_or(AuthenticationError::Invalid),
+            AuthenticationScheme::ApiKey(key) => self
+                .credentials
+                .iter()
+                .find(|credential| {
+                    matches!(
+                        credential,
+                        Credential::ApiKey { key: expected }
+                            if constant_time_eq(key.as_bytes(), expected.as_bytes())
+                    )
+                })
+                .ok_or(AuthenticationError::Invalid),
         }
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let length = left.len().max(right.len());
+    let mut difference = left.len() ^ right.len();
+    for index in 0..length {
+        difference |= usize::from(left.get(index).copied().unwrap_or_default())
+            ^ usize::from(right.get(index).copied().unwrap_or_default());
+    }
+    difference == 0
 }
 
 /// A rate limiting configuration for API endpoints.
@@ -195,5 +232,53 @@ mod tests {
             }
         );
         assert_eq!(bearer, "Bearer <redacted>");
+    }
+
+    #[test]
+    fn credentials_match_only_same_scheme_and_secret() {
+        let expected = Credential::Bearer {
+            token: "secret".into(),
+        };
+        assert!(
+            Credential::Bearer {
+                token: "secret".into()
+            }
+            .matches(&expected)
+        );
+        assert!(
+            !Credential::Bearer {
+                token: "wrong".into()
+            }
+            .matches(&expected)
+        );
+        assert!(
+            !Credential::ApiKey {
+                key: "secret".into()
+            }
+            .matches(&expected)
+        );
+    }
+
+    #[test]
+    fn credential_store_requires_an_exact_match() {
+        let mut store = CredentialStore::new();
+        store.add(Credential::ApiKey {
+            key: "key-1".into(),
+        });
+        assert!(
+            store
+                .validate(&AuthenticationScheme::ApiKey("key-1".into()))
+                .is_ok()
+        );
+        assert!(
+            store
+                .validate(&AuthenticationScheme::ApiKey("key-2".into()))
+                .is_err()
+        );
+        assert!(
+            store
+                .validate(&AuthenticationScheme::Bearer("key-1".into()))
+                .is_err()
+        );
     }
 }
