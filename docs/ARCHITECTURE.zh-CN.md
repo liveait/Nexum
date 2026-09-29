@@ -34,7 +34,7 @@ Desktop (Tauri) ───┼── 基于 TCP 的按行 JSON-RPC 2.0
 Browser 扩展 ── HTTP POST /jsonrpc + CORS（复用回环监听器）
 ```
 
-Server 默认监听 `127.0.0.1:39100`。当前实现始终绑定回环地址，`--port` 只改变端口。CLI 可以连接配置的 TCP 地址，Desktop UI 可以填写 Server 地址。同一个监听器同时接受按行分隔的 TCP JSON-RPC 和单请求 HTTP `POST /jsonrpc`，HTTP 响应带 CORS 头。HTTP 请求必须提供有上限的 `Content-Length`；分块请求和事件订阅仍不支持 HTTP 传输。
+Server 默认监听 `127.0.0.1:39100`。当前实现始终绑定回环地址，`--port` 只改变端口。CLI 可以连接配置的 TCP 地址，Desktop UI 可以填写 Server 地址。同一个监听器同时接受按行分隔的 TCP JSON-RPC 和单请求 HTTP `POST /jsonrpc`。HTTP 请求必须使用 `Content-Type: application/json` 并提供有上限的 `Content-Length`；分块请求和事件订阅仍不支持 HTTP 传输。只有通过校验的 Chrome、Firefox 或 Safari 扩展 Origin 会收到 CORS 响应；网页 Origin 会在 RPC 分发前被拒绝。
 
 ## Crate 职责
 

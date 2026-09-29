@@ -34,7 +34,7 @@ Desktop (Tauri) ───┼── line-delimited JSON-RPC 2.0 / TCP
 Browser extension ── HTTP POST /jsonrpc + CORS (same loopback listener)
 ```
 
-The server listens on `127.0.0.1:39100` by default. Its address is always bound to loopback in the current implementation; `--port` changes only the port. The CLI can connect to a configured TCP address, and the desktop UI accepts a server address. The same listener accepts line-delimited TCP JSON-RPC and one-request HTTP `POST /jsonrpc` calls with CORS headers. HTTP requests require a bounded `Content-Length`; chunked requests and event subscriptions remain unsupported over HTTP.
+The server listens on `127.0.0.1:39100` by default. Its address is always bound to loopback in the current implementation; `--port` changes only the port. The CLI can connect to a configured TCP address, and the desktop UI accepts a server address. The same listener accepts line-delimited TCP JSON-RPC and one-request HTTP `POST /jsonrpc` calls. HTTP requests require `Content-Type: application/json` and a bounded `Content-Length`; chunked requests and event subscriptions remain unsupported over HTTP. CORS responses are emitted only for validated Chrome, Firefox, or Safari extension origins; web-page origins are rejected before RPC dispatch.
 
 ## Crates and Responsibilities
 

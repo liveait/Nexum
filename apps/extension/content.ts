@@ -46,11 +46,12 @@ function showNexumBadge(link: Element, url: string): void {
   cancelBadgeRemoval();
   removeNexumBadge();
   const badge = document.createElement("div");
+  const linkRect = link.getBoundingClientRect();
   badge.id = "nexum-badge";
   badge.style.cssText = `
     position: fixed;
-    right: 10px;
-    top: ${link.getBoundingClientRect().top}px;
+    left: ${Math.max(4, Math.min(linkRect.right + 8, window.innerWidth - 72))}px;
+    top: ${Math.max(4, Math.min(linkRect.top, window.innerHeight - 30))}px;
     background: #1a1a2e;
     color: white;
     padding: 4px 8px;

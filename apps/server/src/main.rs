@@ -978,6 +978,15 @@ fn write_json_line(stream: &mut TcpStream, encoded: &str) -> io::Result<()> {
 const HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
 const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
 
+struct HttpRequest {
+    method: String,
+    path: String,
+    content_length: Option<usize>,
+    body: Vec<u8>,
+    origin: Option<String>,
+    content_type: Option<String>,
+}
+
 fn is_http_request_line(line: &str) -> bool {
     let mut parts = line.split_whitespace();
     matches!(
@@ -994,12 +1003,20 @@ fn write_http_response(
     status: &str,
     content_type: &str,
     body: &[u8],
+    cors_origin: Option<&str>,
 ) -> io::Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n",
         body.len()
     )?;
+    if let Some(origin) = cors_origin {
+        write!(stream, "Access-Control-Allow-Origin: {origin}\r\n")?;
+        stream.write_all(b"Vary: Origin\r\n")?;
+        stream.write_all(b"Access-Control-Allow-Methods: POST, OPTIONS\r\n")?;
+        stream.write_all(b"Access-Control-Allow-Headers: Content-Type\r\n")?;
+    }
+    stream.write_all(b"Connection: close\r\n\r\n")?;
     stream.write_all(body)?;
     stream.flush()
 }
@@ -1008,25 +1025,74 @@ fn write_http_json(
     stream: &mut TcpStream,
     status: &str,
     value: &serde_json::Value,
+    cors_origin: Option<&str>,
 ) -> io::Result<()> {
     let body = serde_json::to_vec(value).map_err(|error| io::Error::other(error.to_string()))?;
-    write_http_response(stream, status, "application/json", &body)
+    write_http_response(stream, status, "application/json", &body, cors_origin)
 }
 
 fn write_http_jsonrpc_response(
     stream: &mut TcpStream,
     response: Option<RpcResponse>,
+    cors_origin: Option<&str>,
 ) -> io::Result<()> {
     let Some(response) = response else {
-        return write_http_response(stream, "204 No Content", "application/json", &[]);
+        return write_http_response(
+            stream,
+            "204 No Content",
+            "application/json",
+            &[],
+            cors_origin,
+        );
     };
     let encoded =
         serialize_response(&response).map_err(|error| io::Error::other(error.to_string()))?;
-    write_http_response(stream, "200 OK", "application/json", encoded.as_bytes())
+    write_http_response(
+        stream,
+        "200 OK",
+        "application/json",
+        encoded.as_bytes(),
+        cors_origin,
+    )
 }
 
-fn http_error(stream: &mut TcpStream, status: &str, message: &str) -> io::Result<()> {
-    write_http_json(stream, status, &serde_json::json!({"error": message}))
+fn http_error(
+    stream: &mut TcpStream,
+    status: &str,
+    message: &str,
+    cors_origin: Option<&str>,
+) -> io::Result<()> {
+    write_http_json(
+        stream,
+        status,
+        &serde_json::json!({"error": message}),
+        cors_origin,
+    )
+}
+
+fn http_cors_origin(origin: Option<&str>) -> Result<Option<&str>, ()> {
+    let Some(origin) = origin else {
+        return Ok(None);
+    };
+    let is_extension_origin = [
+        "chrome-extension://",
+        "moz-extension://",
+        "safari-web-extension://",
+    ]
+    .into_iter()
+    .any(|prefix| {
+        origin.strip_prefix(prefix).is_some_and(|extension_id| {
+            !extension_id.is_empty()
+                && extension_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    });
+    if is_extension_origin {
+        Ok(Some(origin))
+    } else {
+        Err(())
+    }
 }
 
 fn authorize_request(
@@ -1040,7 +1106,7 @@ fn authorize_request(
 fn read_http_request(
     reader: &mut BufReader<TcpStream>,
     first_line: &str,
-) -> io::Result<(String, String, Option<usize>, Vec<u8>)> {
+) -> io::Result<HttpRequest> {
     if first_line.len() > HTTP_MAX_HEADER_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1060,6 +1126,8 @@ fn read_http_request(
 
     let mut header_bytes = first_line.len();
     let mut content_length = None;
+    let mut content_type = None;
+    let mut origin = None;
     let mut line = String::new();
     loop {
         line.clear();
@@ -1096,6 +1164,20 @@ fn read_http_request(
                     "duplicate HTTP content length",
                 ));
             }
+        } else if name.trim().eq_ignore_ascii_case("content-type") {
+            if content_type.replace(value.trim().to_owned()).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate HTTP content type",
+                ));
+            }
+        } else if name.trim().eq_ignore_ascii_case("origin") {
+            if origin.replace(value.trim().to_owned()).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate HTTP origin",
+                ));
+            }
         } else if name.trim().eq_ignore_ascii_case("transfer-encoding")
             && !value.trim().eq_ignore_ascii_case("identity")
         {
@@ -1117,7 +1199,14 @@ fn read_http_request(
         body.resize(length, 0);
         reader.read_exact(&mut body)?;
     }
-    Ok((method, path, content_length, body))
+    Ok(HttpRequest {
+        method,
+        path,
+        content_length,
+        body,
+        origin,
+        content_type,
+    })
 }
 
 fn handle_http_connection(
@@ -1127,29 +1216,75 @@ fn handle_http_connection(
     state: Arc<Mutex<ServerState>>,
 ) -> io::Result<()> {
     let parsed = read_http_request(&mut reader, &first_line);
-    let (method, path, content_length, body) = match parsed {
+    let HttpRequest {
+        method,
+        path,
+        content_length,
+        body,
+        origin,
+        content_type,
+    } = match parsed {
         Ok(request) => request,
-        Err(error) => return http_error(&mut stream, "400 Bad Request", &error.to_string()),
+        Err(error) => {
+            return http_error(&mut stream, "400 Bad Request", &error.to_string(), None);
+        }
+    };
+    let cors_origin = match http_cors_origin(origin.as_deref()) {
+        Ok(origin) => origin,
+        Err(()) => {
+            return http_error(
+                &mut stream,
+                "403 Forbidden",
+                "cross-origin request is not allowed",
+                None,
+            );
+        }
     };
 
+    if path != "/jsonrpc" {
+        return http_error(
+            &mut stream,
+            "404 Not Found",
+            "unknown HTTP endpoint",
+            cors_origin,
+        );
+    }
     if method == "OPTIONS" {
-        return write_http_response(&mut stream, "204 No Content", "application/json", &[]);
+        return write_http_response(
+            &mut stream,
+            "204 No Content",
+            "application/json",
+            &[],
+            cors_origin,
+        );
     }
     if method != "POST" {
         return http_error(
             &mut stream,
             "405 Method Not Allowed",
             "only POST /jsonrpc is supported",
+            cors_origin,
         );
     }
-    if path != "/jsonrpc" {
-        return http_error(&mut stream, "404 Not Found", "unknown HTTP endpoint");
+    if !content_type.as_deref().is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+    }) {
+        return http_error(
+            &mut stream,
+            "415 Unsupported Media Type",
+            "Content-Type application/json is required",
+            cors_origin,
+        );
     }
     if content_length.is_none() {
         return http_error(
             &mut stream,
             "411 Length Required",
             "HTTP content length is required",
+            cors_origin,
         );
     }
 
@@ -1160,11 +1295,11 @@ fn handle_http_connection(
         Ok(request) => request,
         Err(error) => {
             let response = RpcResponse::error(None, RpcErrorObject::parse_error(error));
-            return write_http_jsonrpc_response(&mut stream, Some(response));
+            return write_http_jsonrpc_response(&mut stream, Some(response), cors_origin);
         }
     };
     if let Err(error) = authorize_request(&state, &request) {
-        return write_http_jsonrpc_response(&mut stream, reply_error(&request, error));
+        return write_http_jsonrpc_response(&mut stream, reply_error(&request, error), cors_origin);
     }
     if request.method == "events.subscribe" {
         return write_http_jsonrpc_response(
@@ -1173,9 +1308,14 @@ fn handle_http_connection(
                 &request,
                 RpcErrorObject::invalid_params("events.subscribe requires a TCP connection"),
             ),
+            cors_origin,
         );
     }
-    write_http_jsonrpc_response(&mut stream, dispatch_server_request(&state, &request))
+    write_http_jsonrpc_response(
+        &mut stream,
+        dispatch_server_request(&state, &request),
+        cors_origin,
+    )
 }
 
 fn handle_event_subscription(

@@ -173,6 +173,33 @@ impl ServerProcess {
         path: &str,
         body: Option<Value>,
     ) -> (String, String, Value) {
+        self.http_request_with_origin(method, path, body, None)
+    }
+
+    fn http_request_with_origin(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        origin: Option<&str>,
+    ) -> (String, String, Value) {
+        self.http_request_with_origin_and_content_type(
+            method,
+            path,
+            body,
+            origin,
+            "application/json",
+        )
+    }
+
+    fn http_request_with_origin_and_content_type(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        origin: Option<&str>,
+        content_type: &str,
+    ) -> (String, String, Value) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -180,10 +207,13 @@ impl ServerProcess {
         let body = body.map(|value| value.to_string()).unwrap_or_default();
         write!(
             stream,
-            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Type: {content_type}\r\n"
         )
         .unwrap();
+        if let Some(origin) = origin {
+            write!(stream, "Origin: {origin}\r\n").unwrap();
+        }
+        write!(stream, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
         stream.flush().unwrap();
         let mut encoded = String::new();
         stream.read_to_string(&mut encoded).unwrap();
@@ -1083,8 +1113,29 @@ fn http_jsonrpc_bridge_supports_cors_and_task_queueing() {
 
     let (status, headers, options_body) = server.http_request("OPTIONS", "/jsonrpc", None);
     assert_eq!(status, "HTTP/1.1 204 No Content");
-    assert!(headers.contains("Access-Control-Allow-Origin: *"));
+    assert!(!headers.contains("Access-Control-Allow-Origin"));
     assert_eq!(options_body, Value::Null);
+
+    let (status, headers, _) = server.http_request_with_origin(
+        "OPTIONS",
+        "/jsonrpc",
+        None,
+        Some("chrome-extension://test-id"),
+    );
+    assert_eq!(status, "HTTP/1.1 204 No Content");
+    assert!(headers.contains("Access-Control-Allow-Origin: chrome-extension://test-id"));
+    assert!(headers.contains("Vary: Origin"));
+    assert!(headers.contains("Access-Control-Allow-Methods: POST, OPTIONS"));
+    assert!(headers.contains("Access-Control-Allow-Headers: Content-Type"));
+
+    let (status, headers, _) = server.http_request_with_origin(
+        "OPTIONS",
+        "/jsonrpc",
+        None,
+        Some("moz-extension://test-uuid"),
+    );
+    assert_eq!(status, "HTTP/1.1 204 No Content");
+    assert!(headers.contains("Access-Control-Allow-Origin: moz-extension://test-uuid"));
 
     let task = json!({
         "jsonrpc": "2.0",
@@ -1098,8 +1149,31 @@ fn http_jsonrpc_bridge_supports_cors_and_task_queueing() {
     });
     let (status, headers, response) = server.http_request("POST", "/jsonrpc", Some(task));
     assert_eq!(status, "HTTP/1.1 200 OK");
-    assert!(headers.contains("Access-Control-Allow-Origin: *"));
+    assert!(!headers.contains("Access-Control-Allow-Origin"));
     assert_eq!(response["result"]["id"], "browser-http");
+
+    let (status, headers, response) = server.http_request_with_origin(
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 3, "method": "server.version"})),
+        Some("chrome-extension://test-id"),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(headers.contains("Access-Control-Allow-Origin: chrome-extension://test-id"));
+    assert_eq!(response["result"], "1");
+
+    let (status, _, response) = server.http_request_with_origin_and_content_type(
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 4, "method": "server.version"})),
+        None,
+        "text/plain",
+    );
+    assert_eq!(status, "HTTP/1.1 415 Unsupported Media Type");
+    assert_eq!(
+        response["error"],
+        "Content-Type application/json is required"
+    );
 
     let queue = json!({
         "jsonrpc": "2.0",
@@ -1114,6 +1188,38 @@ fn http_jsonrpc_bridge_supports_cors_and_task_queueing() {
     let (status, _, response) = server.http_request("POST", "/unknown", Some(json!({})));
     assert_eq!(status, "HTTP/1.1 404 Not Found");
     assert_eq!(response["error"], "unknown HTTP endpoint");
+    server.stop();
+}
+
+#[test]
+fn http_jsonrpc_bridge_rejects_web_page_origins_before_dispatch() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let task = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "task.create",
+        "params": {
+            "id": "web-origin-task",
+            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "destination": dir.output_path("web-origin-task").to_string_lossy(),
+        }
+    });
+    let (status, headers, _) = server.http_request_with_origin(
+        "POST",
+        "/jsonrpc",
+        Some(task),
+        Some("https://evil.example"),
+    );
+    assert_eq!(status, "HTTP/1.1 403 Forbidden");
+    assert!(!headers.contains("Access-Control-Allow-Origin"));
+    assert_eq!(server.call("task.list", None), json!([]));
+
+    let (status, headers, _) =
+        server.http_request_with_origin("OPTIONS", "/jsonrpc", None, Some("https://evil.example"));
+    assert_eq!(status, "HTTP/1.1 403 Forbidden");
+    assert!(!headers.contains("Access-Control-Allow-Origin"));
     server.stop();
 }
 
