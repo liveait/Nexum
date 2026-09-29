@@ -9,3 +9,4 @@ description = "Nexum local JSON-RPC server"
 nexum-core = { path = "../../crates/core" }
 nexum-protocol = { path = "../../crates/protocol" }
 serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }

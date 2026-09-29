@@ -14,8 +14,9 @@ use nexum_core::{
 };
 use nexum_protocol::{
     Credential, EventBuffer, EventEnvelope, EventNotification, RateLimit, RpcDispatcher,
-    RpcErrorObject, RpcRequest, RpcResponse, parse_request, serialize_response,
+    RpcErrorObject, RpcRequest, RpcResponse, TlsConfig, parse_request, serialize_response,
 };
+use rustls::{ServerConnection, StreamOwned};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -25,6 +26,72 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+enum Transport {
+    Plain(TcpStream),
+    Tls(Box<StreamOwned<ServerConnection, TcpStream>>),
+}
+
+#[derive(Clone)]
+struct SharedStream(Arc<Mutex<Transport>>);
+
+impl SharedStream {
+    fn plain(stream: TcpStream) -> Self {
+        Self(Arc::new(Mutex::new(Transport::Plain(stream))))
+    }
+
+    fn tls(stream: StreamOwned<ServerConnection, TcpStream>) -> Self {
+        Self(Arc::new(Mutex::new(Transport::Tls(Box::new(stream)))))
+    }
+
+    fn complete_handshake(&self) -> io::Result<()> {
+        let mut locked = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("stream mutex poisoned"))?;
+        if let Transport::Tls(stream) = &mut *locked {
+            stream.conn.complete_io(&mut stream.sock)?;
+        }
+        Ok(())
+    }
+}
+
+impl Read for SharedStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut locked = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("stream mutex poisoned"))?;
+        match &mut *locked {
+            Transport::Plain(stream) => stream.read(buffer),
+            Transport::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for SharedStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let mut locked = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("stream mutex poisoned"))?;
+        match &mut *locked {
+            Transport::Plain(stream) => stream.write(buffer),
+            Transport::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut locked = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("stream mutex poisoned"))?;
+        match &mut *locked {
+            Transport::Plain(stream) => stream.flush(),
+            Transport::Tls(stream) => stream.flush(),
+        }
+    }
+}
 
 type ServerCore = Core<SqliteRepository>;
 const DATABASE_FILE: &str = "nexum.sqlite";
@@ -313,6 +380,8 @@ pub struct ServerConfig {
     pub auth_scheme: Option<String>,
     pub auth_token: Option<String>,
     pub rate_limit: Option<RateLimit>,
+    pub tls_cert_path: Option<PathBuf>,
+    pub tls_key_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -325,6 +394,8 @@ impl std::fmt::Debug for ServerConfig {
             .field("require_auth", &self.require_auth)
             .field("auth_scheme", &self.auth_scheme)
             .field("rate_limit", &self.rate_limit)
+            .field("tls_cert_path", &self.tls_cert_path)
+            .field("tls_key_path", &self.tls_key_path)
             .field(
                 "auth_token",
                 &self.auth_token.as_ref().map(|_| "<redacted>"),
@@ -343,6 +414,8 @@ impl Default for ServerConfig {
             auth_scheme: None,
             auth_token: None,
             rate_limit: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
@@ -381,6 +454,8 @@ impl ServerConfig {
         let mut auth_token = None;
         let mut rate_limit_rps = None;
         let mut rate_limit_burst = None;
+        let mut tls_cert_path = None;
+        let mut tls_key_path = None;
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -416,6 +491,8 @@ impl ServerConfig {
                             "rate_limit_burst must be a positive integer".to_owned()
                         })?);
                     }
+                    "tls_cert_path" => tls_cert_path = Some(PathBuf::from(value.trim())),
+                    "tls_key_path" => tls_key_path = Some(PathBuf::from(value.trim())),
                     key if key.starts_with("rate_limit_") => {
                         return Err(format!("unknown rate limit config key: {key}"));
                     }
@@ -433,6 +510,8 @@ impl ServerConfig {
             auth_scheme,
             auth_token,
             rate_limit: configured_rate_limit(rate_limit_rps, rate_limit_burst)?,
+            tls_cert_path,
+            tls_key_path,
         })
     }
 
@@ -1040,7 +1119,7 @@ fn spawn_event_pump(state: Arc<Mutex<ServerState>>) {
     }
 }
 
-fn write_json_line(stream: &mut TcpStream, encoded: &str) -> io::Result<()> {
+fn write_json_line(stream: &mut SharedStream, encoded: &str) -> io::Result<()> {
     stream.write_all(encoded.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()
@@ -1070,7 +1149,7 @@ fn is_http_request_line(line: &str) -> bool {
 }
 
 fn write_http_response(
-    stream: &mut TcpStream,
+    stream: &mut SharedStream,
     status: &str,
     content_type: &str,
     body: &[u8],
@@ -1093,7 +1172,7 @@ fn write_http_response(
 }
 
 fn write_http_json(
-    stream: &mut TcpStream,
+    stream: &mut SharedStream,
     status: &str,
     value: &serde_json::Value,
     cors_origin: Option<&str>,
@@ -1103,7 +1182,7 @@ fn write_http_json(
 }
 
 fn write_http_jsonrpc_response(
-    stream: &mut TcpStream,
+    stream: &mut SharedStream,
     response: Option<RpcResponse>,
     cors_origin: Option<&str>,
 ) -> io::Result<()> {
@@ -1128,7 +1207,7 @@ fn write_http_jsonrpc_response(
 }
 
 fn http_error(
-    stream: &mut TcpStream,
+    stream: &mut SharedStream,
     status: &str,
     message: &str,
     cors_origin: Option<&str>,
@@ -1183,7 +1262,7 @@ fn authorize_and_limit_request(
 }
 
 fn read_http_request(
-    reader: &mut BufReader<TcpStream>,
+    reader: &mut BufReader<SharedStream>,
     first_line: &str,
 ) -> io::Result<HttpRequest> {
     if first_line.len() > HTTP_MAX_HEADER_BYTES {
@@ -1289,8 +1368,8 @@ fn read_http_request(
 }
 
 fn handle_http_connection(
-    mut stream: TcpStream,
-    mut reader: BufReader<TcpStream>,
+    mut stream: SharedStream,
+    mut reader: BufReader<SharedStream>,
     first_line: String,
     state: Arc<Mutex<ServerState>>,
 ) -> io::Result<()> {
@@ -1398,7 +1477,7 @@ fn handle_http_connection(
 }
 
 fn handle_event_subscription(
-    mut stream: TcpStream,
+    mut stream: SharedStream,
     state: Arc<Mutex<ServerState>>,
     request: RpcRequest,
 ) -> io::Result<()> {
@@ -1458,8 +1537,8 @@ fn handle_event_subscription(
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<ServerState>>) -> io::Result<()> {
-    let reader_stream = stream.try_clone()?;
+fn handle_connection(mut stream: SharedStream, state: Arc<Mutex<ServerState>>) -> io::Result<()> {
+    let reader_stream = stream.clone();
     let mut reader = BufReader::new(reader_stream);
     let mut first_line = String::new();
 
@@ -1518,6 +1597,8 @@ fn parse_cli_args(args: &[String]) -> Result<(ServerConfig, PathBuf, bool, bool)
     let mut has_cli_require_auth = false;
     let mut has_cli_auth_scheme = false;
     let mut has_cli_auth_token = false;
+    let mut has_cli_tls_cert = false;
+    let mut has_cli_tls_key = false;
     let mut cli_rate_limit_rps = None;
     let mut cli_rate_limit_burst = None;
 
@@ -1580,6 +1661,20 @@ fn parse_cli_args(args: &[String]) -> Result<(ServerConfig, PathBuf, bool, bool)
                     config.auth_token = Some(args[i].clone());
                 }
             }
+            "--tls-cert-path" => {
+                has_cli_tls_cert = true;
+                i += 1;
+                config.tls_cert_path = Some(PathBuf::from(
+                    args.get(i).ok_or("--tls-cert-path requires a path")?,
+                ));
+            }
+            "--tls-key-path" => {
+                has_cli_tls_key = true;
+                i += 1;
+                config.tls_key_path = Some(PathBuf::from(
+                    args.get(i).ok_or("--tls-key-path requires a path")?,
+                ));
+            }
             "--rate-limit-rps" => {
                 i += 1;
                 let value = args.get(i).ok_or("--rate-limit-rps requires a value")?;
@@ -1629,6 +1724,12 @@ fn parse_cli_args(args: &[String]) -> Result<(ServerConfig, PathBuf, bool, bool)
         if !has_cli_auth_token {
             config.auth_token = file_config.auth_token;
         }
+        if !has_cli_tls_cert {
+            config.tls_cert_path = file_config.tls_cert_path;
+        }
+        if !has_cli_tls_key {
+            config.tls_key_path = file_config.tls_key_path;
+        }
         if cli_rate_limit_rps.is_none() && cli_rate_limit_burst.is_none() {
             config.rate_limit = file_config.rate_limit;
         }
@@ -1652,6 +1753,8 @@ fn print_usage() {
     eprintln!("  --auth-token TOKEN  Authentication secret");
     eprintln!("  --rate-limit-rps N  Maximum average RPC requests per second (requires burst)");
     eprintln!("  --rate-limit-burst N Maximum RPC burst size (requires rps)");
+    eprintln!("  --tls-cert-path PATH PEM server certificate (enables TLS with key)");
+    eprintln!("  --tls-key-path PATH PEM server private key (enables TLS with certificate)");
     eprintln!("  --version           Show server and protocol version");
     eprintln!("  --help, -h          Show this help");
 }
@@ -1702,6 +1805,27 @@ fn open_core(data_dir: &Path) -> io::Result<ServerCore> {
     Ok(core)
 }
 
+fn load_tls_server_config(config: &ServerConfig) -> io::Result<Option<Arc<rustls::ServerConfig>>> {
+    let tls_config = TlsConfig {
+        cert_path: config.tls_cert_path.clone(),
+        key_path: config.tls_key_path.clone(),
+        ca_path: None,
+    };
+    if tls_config.is_complete() {
+        return tls_config
+            .load_server_config()
+            .map(|server| Some(Arc::new(server)))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()));
+    }
+    if config.tls_cert_path.is_some() || config.tls_key_path.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "tls_cert_path and tls_key_path must be configured together",
+        ));
+    }
+    Ok(None)
+}
+
 fn main() -> io::Result<()> {
     let (config, _config_path, show_version, show_help) =
         parse_cli_flags().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -1719,6 +1843,7 @@ fn main() -> io::Result<()> {
 
     let authentication = AuthenticationConfig::from_server_config(&config)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let tls_server = load_tls_server_config(&config)?;
 
     let _data_dir_lock = lock_data_dir(&config.data_dir)?;
     let state = Arc::new(Mutex::new(ServerState {
@@ -1754,9 +1879,23 @@ fn main() -> io::Result<()> {
                     eprintln!("connection limit reached; closing incoming connection");
                     continue;
                 };
+                let stream = match tls_server.as_ref() {
+                    Some(config) => match ServerConnection::new(Arc::clone(config)) {
+                        Ok(connection) => SharedStream::tls(StreamOwned::new(connection, stream)),
+                        Err(error) => {
+                            eprintln!("could not initialize TLS connection: {error}");
+                            continue;
+                        }
+                    },
+                    None => SharedStream::plain(stream),
+                };
                 let state = Arc::clone(&state);
                 std::thread::spawn(move || {
                     let _permit = permit;
+                    if let Err(error) = stream.complete_handshake() {
+                        eprintln!("TLS handshake failed: {error}");
+                        return;
+                    }
                     if let Err(error) = handle_connection(stream, state) {
                         eprintln!("connection error: {error}");
                     }
@@ -1858,6 +1997,8 @@ mod tests {
             writeln!(f, "auth_token=test-secret").unwrap();
             writeln!(f, "rate_limit_rps=10").unwrap();
             writeln!(f, "rate_limit_burst=20").unwrap();
+            writeln!(f, "tls_cert_path=/tmp/server-cert.pem").unwrap();
+            writeln!(f, "tls_key_path=/tmp/server-key.pem").unwrap();
         }
         let config = ServerConfig::from_file(config_file.to_str().unwrap()).unwrap();
         assert_eq!(config.port, 8080);
@@ -1869,6 +2010,14 @@ mod tests {
         let rate_limit = config.rate_limit.unwrap();
         assert_eq!(rate_limit.requests_per_second, 10.0);
         assert_eq!(rate_limit.burst_size, 20);
+        assert_eq!(
+            config.tls_cert_path,
+            Some(PathBuf::from("/tmp/server-cert.pem"))
+        );
+        assert_eq!(
+            config.tls_key_path,
+            Some(PathBuf::from("/tmp/server-key.pem"))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1887,6 +2036,20 @@ mod tests {
         assert_eq!(config.port, 9090);
         assert_eq!(config.max_connections, 100);
         assert_eq!(config.data_dir, PathBuf::from("./data"));
+        assert!(config.tls_cert_path.is_none());
+        assert!(config.tls_key_path.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn startup_rejects_incomplete_tls_paths() {
+        let dir = std::env::temp_dir().join("nexum-server-test-tls-partial");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.txt");
+        std::fs::write(&config_file, "tls_cert_path=/tmp/server-cert.pem\n").unwrap();
+        let config = ServerConfig::from_file(config_file.to_str().unwrap()).unwrap();
+        assert!(load_tls_server_config(&config).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

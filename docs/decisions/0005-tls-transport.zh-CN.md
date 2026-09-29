@@ -1,10 +1,10 @@
 # ADR 0005：分阶段接入 TLS 传输
 
-状态：计划中
+状态：进行中
 
 ## 背景
 
-Nexum 当前使用一个逐行 TCP 监听器承载 JSON-RPC、事件订阅和 Browser HTTP 桥接。由于传输是明文，认证凭据只允许用于 Desktop 的回环连接。`nexum-security` 中已有 `TlsConfig` 占位类型，但 Server、CLI、Desktop 和 Browser 路径都还没有建立或校验 TLS。如果只改一个客户端，其他客户端会无法连接，或形成不安全的降级路径。
+Nexum 当前使用一个逐行 TCP 监听器承载 JSON-RPC、事件订阅和 Browser HTTP 桥接。由于客户端仍使用明文传输，认证凭据只允许用于 Desktop 的回环连接。Server 已完成第一段 TLS：在监听前校验并加载 PEM 材料，让 TCP、事件和 HTTP 桥接共用同一 rustls 流；CLI、Desktop 和 Browser 的地址解析与信任处理仍待接入。如果只改一个客户端，其他客户端会无法连接，或形成不安全的降级路径。
 
 ## 决策
 

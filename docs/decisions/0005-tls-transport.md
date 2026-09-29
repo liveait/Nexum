@@ -1,10 +1,10 @@
 # ADR 0005: Staged TLS Transport
 
-Status: Planned
+Status: In progress
 
 ## Context
 
-Nexum currently uses one line-delimited TCP listener for JSON-RPC, event subscriptions, and the Browser HTTP bridge. Authentication credentials are accepted only for loopback Desktop connections because the transport is plaintext. `nexum-security` contains a `TlsConfig` placeholder, but the Server, CLI, Desktop, and Browser paths do not establish or verify TLS. Adding TLS to only one client would leave the other clients unable to connect or would create an unsafe downgrade path.
+Nexum currently uses one line-delimited TCP listener for JSON-RPC, event subscriptions, and the Browser HTTP bridge. Authentication credentials are accepted only for loopback Desktop connections because the clients still use plaintext. The Server now has the first TLS slice: it validates and loads PEM material before listening and carries TCP, event, and HTTP bridge traffic through one rustls stream. CLI, Desktop, and Browser address parsing and trust handling are still pending. Adding TLS to only one client would leave the other clients unable to connect or would create an unsafe downgrade path.
 
 ## Decision
 
