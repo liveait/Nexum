@@ -23,7 +23,7 @@ TLS 将作为 Server、CLI、Desktop 和 Browser 桥接共用的一套版本化�
 - TLS 客户端可以完成普通 RPC、`events.subscribe` 和 HTTPS `/jsonrpc`；明文客户端不能连接 TLS-only 监听器。
 - 证书链、主机名或显式 CA 校验失败时，客户端不会发送凭据，也不会回退到匿名 RPC。
 - TLS 关闭时，现有明文回环 CLI、Desktop 和 Browser 流程继续通过。
-- 测试覆盖握手成功/失败、无效配置、禁止降级、凭据传输策略、事件订阅及 HTTPS CORS，不提交私钥文件。
+- 运行时生成证书的集成测试已覆盖 TLS 握手成功、明文拒绝、TCP RPC、HTTPS `/jsonrpc` `OPTIONS`/`POST`、Browser 扩展 CORS 允许/拒绝、TCP/HTTPS 上的配置鉴权，以及带鉴权的 `events.subscribe`；证书和私钥只在测试运行时生成。无效或不完整配置、信任/主机名/握手失败以及客户端凭据发送门控仍待覆盖。
 - 文档说明地址语法、信任来源、迁移行为，以及第一阶段不提供双向 TLS 和自动回退。
 
 ## 第一阶段不包含
