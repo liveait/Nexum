@@ -23,7 +23,7 @@ TLS will be added as one versioned transport contract shared by the Server, CLI,
 - A TLS client can perform ordinary RPC, `events.subscribe`, and HTTPS `/jsonrpc`; a plaintext client cannot use a TLS-only listener.
 - Certificate chain, hostname, and explicit CA failures are reported without sending a credential or falling back to anonymous RPC.
 - Existing plaintext loopback CLI, Desktop, and Browser flows continue to pass when TLS is disabled.
-- Tests cover handshake success/failure, invalid configuration, no downgrade, credential transport policy, event subscriptions, and Browser CORS over HTTPS without committing private keys.
+- Generated-certificate integration tests cover successful TLS handshake, plaintext rejection, TCP RPC, HTTPS `/jsonrpc` `OPTIONS`/`POST`, browser-extension CORS allow/reject behavior, configured authentication over TCP/HTTPS, and authenticated `events.subscribe`; certificates and private keys are generated at test runtime. Coverage for invalid or incomplete configuration, trust/hostname/handshake failures, and client credential-send gating remains outstanding.
 - Documentation names the address syntax, trust-source rules, migration behavior, and the absence of mutual TLS/automatic fallback.
 
 ## Non-goals for the first rollout

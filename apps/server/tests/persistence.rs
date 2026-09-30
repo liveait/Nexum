@@ -2,6 +2,9 @@ use nexum_core::nexum_domain::TaskId;
 use nexum_core::nexum_storage::{SqliteRepository, TaskRepository};
 use nexum_core::nexum_task::TaskState;
 use nexum_protocol::Credential;
+use rcgen::generate_simple_self_signed;
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -10,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -95,11 +98,52 @@ impl ServerProcess {
         Self::start_with_options_and_rate_limit(data_dir, 100, auth, Some(("0.001", burst)))
     }
 
+    fn start_with_tls(data_dir: &Path, certificate_dir: &Path) -> (Self, Vec<u8>) {
+        Self::start_with_tls_and_auth(data_dir, certificate_dir, None)
+    }
+
+    fn start_with_tls_and_auth(
+        data_dir: &Path,
+        certificate_dir: &Path,
+        auth: Option<(&str, &str)>,
+    ) -> (Self, Vec<u8>) {
+        let generated = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_path = certificate_dir.join("server-cert.pem");
+        let key_path = certificate_dir.join("server-key.pem");
+        fs::write(&certificate_path, generated.cert.pem()).unwrap();
+        fs::write(&key_path, generated.key_pair.serialize_pem()).unwrap();
+        let certificate_der = generated.cert.der().to_vec();
+        let server = Self::start_with_options_and_rate_limit_and_tls(
+            data_dir,
+            100,
+            auth,
+            None,
+            Some((&certificate_path, &key_path)),
+        );
+        (server, certificate_der)
+    }
+
     fn start_with_options_and_rate_limit(
         data_dir: &Path,
         max_connections: usize,
         auth: Option<(&str, &str)>,
         rate_limit: Option<(&str, usize)>,
+    ) -> Self {
+        Self::start_with_options_and_rate_limit_and_tls(
+            data_dir,
+            max_connections,
+            auth,
+            rate_limit,
+            None,
+        )
+    }
+
+    fn start_with_options_and_rate_limit_and_tls(
+        data_dir: &Path,
+        max_connections: usize,
+        auth: Option<(&str, &str)>,
+        rate_limit: Option<(&str, usize)>,
+        tls: Option<(&Path, &Path)>,
     ) -> Self {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = reservation.local_addr().unwrap().port();
@@ -128,6 +172,13 @@ impl ServerProcess {
                 .arg(rps)
                 .arg("--rate-limit-burst")
                 .arg(burst.to_string());
+        }
+        if let Some((certificate_path, key_path)) = tls {
+            command
+                .arg("--tls-cert-path")
+                .arg(certificate_path)
+                .arg("--tls-key-path")
+                .arg(key_path);
         }
         let child = command
             .stdout(Stdio::null())
@@ -296,6 +347,92 @@ impl ServerProcess {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
     }
+}
+
+type TlsClientStream = StreamOwned<ClientConnection, TcpStream>;
+
+fn tls_client_stream(port: u16, certificate_der: &[u8]) -> TlsClientStream {
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(certificate_der.to_vec()))
+        .unwrap();
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let server_name = ServerName::try_from("localhost".to_owned()).unwrap();
+    let connection = ClientConnection::new(Arc::new(config), server_name).unwrap();
+    let socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    socket
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut stream = StreamOwned::new(connection, socket);
+    stream.conn.complete_io(&mut stream.sock).unwrap();
+    stream
+}
+
+fn tls_rpc_request(port: u16, certificate_der: &[u8], request: Value) -> Value {
+    let mut stream = tls_client_stream(port, certificate_der);
+    writeln!(stream, "{request}").unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+fn tls_http_request(
+    port: u16,
+    certificate_der: &[u8],
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    origin: Option<&str>,
+) -> (String, String, Value) {
+    let mut stream = tls_client_stream(port, certificate_der);
+    let body = body.map(|value| value.to_string()).unwrap_or_default();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\n"
+    )
+    .unwrap();
+    if let Some(origin) = origin {
+        write!(stream, "Origin: {origin}\r\n").unwrap();
+    }
+    write!(stream, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    stream.flush().unwrap();
+    let mut encoded_bytes = Vec::new();
+    match stream.read_to_end(&mut encoded_bytes) {
+        Ok(_) => {}
+        // The server closes the TLS socket without sending close_notify after
+        // one-shot HTTP responses. The response bytes are still complete.
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+        Err(error) => panic!("could not read TLS HTTP response: {error}"),
+    }
+    let encoded = String::from_utf8(encoded_bytes).unwrap();
+    let (headers, body) = encoded.split_once("\r\n\r\n").unwrap();
+    let status = headers.lines().next().unwrap().to_owned();
+    let parsed = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(body).unwrap()
+    };
+    (status, headers.to_owned(), parsed)
+}
+
+fn plaintext_probe_tls_port(port: u16) -> Vec<u8> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .write_all(
+            b"POST /jsonrpc HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .unwrap();
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    response
 }
 
 struct HttpFixture {
@@ -1670,5 +1807,195 @@ fn max_connections_rejects_excess_connections_and_releases_after_close() {
         released,
         "connection slot was not released after the first client closed"
     );
+    server.stop();
+}
+
+#[test]
+fn tls_transport_rejects_plaintext_and_serves_https_jsonrpc_with_cors() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let (mut server, certificate_der) = ServerProcess::start_with_tls(dir.path(), &dir.root);
+
+    // A TLS listener must not accept an HTTP request as a plaintext fallback.
+    let plaintext_response = plaintext_probe_tls_port(server.port);
+    assert!(!plaintext_response.starts_with(b"HTTP/1.1"));
+    assert!(!plaintext_response.starts_with(b"{\"jsonrpc\""));
+
+    let (status, headers, body) = tls_http_request(
+        server.port,
+        &certificate_der,
+        "OPTIONS",
+        "/jsonrpc",
+        None,
+        Some("chrome-extension://test-id"),
+    );
+    assert_eq!(status, "HTTP/1.1 204 No Content");
+    assert!(headers.contains("Access-Control-Allow-Origin: chrome-extension://test-id"));
+    assert_eq!(body, Value::Null);
+
+    let (status, headers, body) = tls_http_request(
+        server.port,
+        &certificate_der,
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 1, "method": "server.version"})),
+        Some("chrome-extension://test-id"),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(headers.contains("Access-Control-Allow-Origin: chrome-extension://test-id"));
+    assert_eq!(body["result"], "1");
+
+    let (status, headers, body) = tls_http_request(
+        server.port,
+        &certificate_der,
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc": "2.0", "id": 2, "method": "server.version"})),
+        Some("https://evil.example"),
+    );
+    assert_eq!(status, "HTTP/1.1 403 Forbidden");
+    assert!(!headers.contains("Access-Control-Allow-Origin"));
+    assert_eq!(body["error"], "cross-origin request is not allowed");
+
+    let response = tls_rpc_request(
+        server.port,
+        &certificate_der,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "server.version"}),
+    );
+    assert_eq!(response["result"], "1");
+    server.stop();
+}
+
+#[test]
+fn tls_transport_applies_authentication_to_tcp_and_https_requests() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let (mut server, certificate_der) = ServerProcess::start_with_tls_and_auth(
+        dir.path(),
+        &dir.root,
+        Some(("ApiKey", "tls-secret")),
+    );
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server.version"
+    });
+    let response = tls_rpc_request(server.port, &certificate_der, request.clone());
+    assert_unauthorized(&response);
+
+    let mut authenticated = request.clone();
+    authenticated["credential"] = json!({"ApiKey": {"key": "tls-secret"}});
+    let response = tls_rpc_request(server.port, &certificate_der, authenticated.clone());
+    assert_eq!(response["result"], "1");
+
+    let (status, headers, response) = tls_http_request(
+        server.port,
+        &certificate_der,
+        "POST",
+        "/jsonrpc",
+        Some(request),
+        Some("chrome-extension://test-id"),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(headers.contains("Access-Control-Allow-Origin: chrome-extension://test-id"));
+    assert_unauthorized(&response);
+
+    let (status, headers, response) = tls_http_request(
+        server.port,
+        &certificate_der,
+        "POST",
+        "/jsonrpc",
+        Some(authenticated),
+        Some("chrome-extension://test-id"),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(headers.contains("Access-Control-Allow-Origin: chrome-extension://test-id"));
+    assert_eq!(response["result"], "1");
+    server.stop();
+}
+
+#[test]
+fn tls_authenticated_event_subscription_receives_task_events() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let (mut server, certificate_der) = ServerProcess::start_with_tls_and_auth(
+        dir.path(),
+        &dir.root,
+        Some(("ApiKey", "tls-event-secret")),
+    );
+
+    let rejected = tls_rpc_request(
+        server.port,
+        &certificate_der,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "events.subscribe"}),
+    );
+    assert_unauthorized(&rejected);
+
+    let mut stream = tls_client_stream(server.port, &certificate_der);
+    writeln!(
+        stream,
+        "{}",
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "events.subscribe",
+            "credential": {"ApiKey": {"key": "tls-event-secret"}}
+        })
+    )
+    .unwrap();
+    let mut events = BufReader::new(stream);
+    let mut line = String::new();
+    events.read_line(&mut line).unwrap();
+    let subscribed: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(subscribed["result"]["subscribed"], true);
+
+    let created = tls_rpc_request(
+        server.port,
+        &certificate_der,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "task.create",
+            "params": {
+                "id": "tls-event-task",
+                "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                "destination": dir.output_path("tls-event-task").to_string_lossy(),
+            },
+            "credential": {"ApiKey": {"key": "tls-event-secret"}}
+        }),
+    );
+    assert_eq!(created["result"]["id"], "tls-event-task");
+
+    let mut observed_created = false;
+    for _ in 0..12 {
+        line.clear();
+        match events.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let message: Value = serde_json::from_str(&line).unwrap();
+                if message["method"] == "events.event"
+                    && message["params"]["event"] == "task.created"
+                {
+                    observed_created = true;
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                break;
+            }
+            Err(error) => panic!("could not read TLS event: {error}"),
+        }
+    }
+    assert!(observed_created, "TLS event stream missed task.created");
+    drop(events);
     server.stop();
 }
