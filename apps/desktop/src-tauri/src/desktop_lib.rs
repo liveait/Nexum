@@ -166,6 +166,17 @@ fn native_client_config() -> Result<StdArc<ClientConfig>, String> {
 }
 
 fn connect_transport(address: &str, timeout: Duration) -> Result<(ClientTransport, bool), String> {
+    connect_transport_with_tls_config(address, timeout, native_client_config)
+}
+
+fn connect_transport_with_tls_config<F>(
+    address: &str,
+    timeout: Duration,
+    tls_config: F,
+) -> Result<(ClientTransport, bool), String>
+where
+    F: FnOnce() -> Result<StdArc<ClientConfig>, String>,
+{
     let parsed = parse_transport_address(address)?;
     let (authority, server_name) = match parsed {
         TransportAddress::Plain { authority } => {
@@ -202,7 +213,7 @@ fn connect_transport(address: &str, timeout: Duration) -> Result<(ClientTranspor
         ServerName::try_from(server_name.clone())
             .map_err(|_| format!("invalid TLS server name: {server_name}"))?
     };
-    let connection = ClientConnection::new(native_client_config()?, server_name)
+    let connection = ClientConnection::new(tls_config()?, server_name)
         .map_err(|error| format!("cannot initialize TLS connection: {error}"))?;
     let mut transport = StreamOwned::new(connection, stream);
     transport
@@ -210,6 +221,27 @@ fn connect_transport(address: &str, timeout: Duration) -> Result<(ClientTranspor
         .complete_io(&mut transport.sock)
         .map_err(|error| format!("TLS handshake failed: {error}"))?;
     Ok((ClientTransport::Tls(Box::new(transport)), true))
+}
+
+fn connect_authenticated_transport<C, F>(
+    server: &str,
+    timeout: Duration,
+    connect: C,
+    load_credential: F,
+) -> Result<(ClientTransport, Option<Credential>), String>
+where
+    C: FnOnce(&str, Duration) -> Result<(ClientTransport, bool), String>,
+    F: FnOnce(&str) -> Result<Option<Credential>, String>,
+{
+    let (stream, credential_allowed) = connect(server, timeout)?;
+    let credential = load_credential(server)?;
+    if credential.is_some() && !credential_allowed {
+        return Err(
+            "credentials can only be sent to a loopback plaintext server or a verified TLS server"
+                .to_owned(),
+        );
+    }
+    Ok((stream, credential))
 }
 
 #[allow(dead_code)]
@@ -448,17 +480,29 @@ fn connect_event_stream(
     server: &str,
     stop: &AtomicBool,
 ) -> Result<BufReader<ClientTransport>, String> {
+    connect_event_stream_with(
+        server,
+        stop,
+        connect_transport,
+        credential_store::credential_for_request,
+    )
+}
+
+fn connect_event_stream_with<C, F>(
+    server: &str,
+    stop: &AtomicBool,
+    connect: C,
+    load_credential: F,
+) -> Result<BufReader<ClientTransport>, String>
+where
+    C: FnOnce(&str, Duration) -> Result<(ClientTransport, bool), String>,
+    F: FnOnce(&str) -> Result<Option<Credential>, String>,
+{
     if stop.load(Ordering::Acquire) {
         return Err("event subscription stopped".to_owned());
     }
-    let (mut stream, credential_allowed) = connect_transport(server, EVENT_READ_TIMEOUT)?;
-    let credential = credential_store::credential_for_request(server)?;
-    if credential.is_some() && !credential_allowed {
-        return Err(
-            "credentials can only be sent to a loopback plaintext server or a verified TLS server"
-                .to_owned(),
-        );
-    }
+    let (mut stream, credential) =
+        connect_authenticated_transport(server, EVENT_READ_TIMEOUT, connect, load_credential)?;
 
     let payload = encode_request("events.subscribe", None, credential)?;
     stream
@@ -612,21 +656,34 @@ impl RpcResult {
 
 /// Call a JSON-RPC method on the server.
 pub fn call_rpc(server: &str, method: &str, params: Option<Value>, timeout_ms: u64) -> RpcResult {
+    call_rpc_with(
+        server,
+        method,
+        params,
+        timeout_ms,
+        connect_transport,
+        credential_store::credential_for_request,
+    )
+}
+
+fn call_rpc_with<C, F>(
+    server: &str,
+    method: &str,
+    params: Option<Value>,
+    timeout_ms: u64,
+    connect: C,
+    load_credential: F,
+) -> RpcResult
+where
+    C: FnOnce(&str, Duration) -> Result<(ClientTransport, bool), String>,
+    F: FnOnce(&str) -> Result<Option<Credential>, String>,
+{
     let timeout = std::time::Duration::from_millis(timeout_ms);
-    let (mut stream, credential_allowed) = match connect_transport(server, timeout) {
-        Ok(stream) => stream,
-        Err(error) => return RpcResult::err(error),
-    };
-    let credential = match credential_store::credential_for_request(server) {
-        Ok(credential) => credential,
-        Err(error) => return RpcResult::err(error),
-    };
-    if credential.is_some() && !credential_allowed {
-        return RpcResult::err(
-            "credentials can only be sent to a loopback plaintext server or a verified TLS server"
-                .to_owned(),
-        );
-    }
+    let (mut stream, credential) =
+        match connect_authenticated_transport(server, timeout, connect, load_credential) {
+            Ok(stream) => stream,
+            Err(error) => return RpcResult::err(error),
+        };
 
     let payload = match encode_request(method, params, credential) {
         Ok(p) => p,
@@ -755,6 +812,93 @@ fn expect_bool(result: RpcResult) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::generate_simple_self_signed;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection};
+    use std::cell::Cell;
+    use std::net::TcpListener;
+    use std::thread::{self, JoinHandle};
+
+    struct TestTlsServer {
+        address: String,
+        certificate: CertificateDer<'static>,
+        request: JoinHandle<Option<Value>>,
+    }
+
+    impl TestTlsServer {
+        fn start(certificate_name: &str, response: Option<Value>) -> Self {
+            let generated = generate_simple_self_signed(vec![certificate_name.to_owned()]).unwrap();
+            let certificate = generated.cert.der().clone();
+            let key =
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()));
+            let config = StdArc::new(
+                ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(vec![certificate.clone()], key)
+                    .unwrap(),
+            );
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = format!("tls://localhost:{}", listener.local_addr().unwrap().port());
+            let request = thread::spawn(move || {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let connection = ServerConnection::new(config).unwrap();
+                let mut reader = BufReader::new(StreamOwned::new(connection, socket));
+                let mut line = String::new();
+                if reader.read_line(&mut line).ok()? == 0 {
+                    return None;
+                }
+                if let Some(response) = response {
+                    writeln!(reader.get_mut(), "{response}").unwrap();
+                    reader.get_mut().flush().unwrap();
+                }
+                Some(serde_json::from_str(&line).unwrap())
+            });
+            Self {
+                address,
+                certificate,
+                request,
+            }
+        }
+
+        fn finish(self) -> Option<Value> {
+            self.request.join().unwrap()
+        }
+    }
+
+    fn client_config_with_root(
+        certificate: Option<CertificateDer<'static>>,
+    ) -> StdArc<ClientConfig> {
+        let mut roots = RootCertStore::empty();
+        if let Some(certificate) = certificate {
+            roots.add(certificate).unwrap();
+        }
+        StdArc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }
+
+    fn start_plain_server() -> (String, JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let received = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            socket.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        (address, received)
+    }
 
     #[test]
     fn rpc_result_ok_serializes() {
@@ -861,6 +1005,147 @@ mod tests {
         let anonymous: Value =
             serde_json::from_str(&encode_request("server.version", None, None).unwrap()).unwrap();
         assert!(anonymous["credential"].is_null());
+    }
+
+    #[test]
+    fn trusted_tls_allows_rpc_and_event_credentials() {
+        let rpc_server = TestTlsServer::start(
+            "localhost",
+            Some(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"ok":true}})),
+        );
+        let rpc_config = client_config_with_root(Some(rpc_server.certificate.clone()));
+        let rpc = call_rpc_with(
+            &rpc_server.address,
+            "server.version",
+            None,
+            2000,
+            |address, timeout| {
+                connect_transport_with_tls_config(address, timeout, || Ok(rpc_config))
+            },
+            |_| {
+                Ok(Some(Credential::Bearer {
+                    token: "rpc-secret".to_owned(),
+                }))
+            },
+        );
+        assert!(rpc.success, "{:?}", rpc.error);
+        assert_eq!(rpc.result.unwrap()["ok"], true);
+        let request = rpc_server.finish().unwrap();
+        assert_eq!(request["method"], "server.version");
+        assert_eq!(request["credential"]["Bearer"]["token"], "rpc-secret");
+
+        let event_server = TestTlsServer::start(
+            "localhost",
+            Some(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"subscribed":true}})),
+        );
+        let event_config = client_config_with_root(Some(event_server.certificate.clone()));
+        let stopped = AtomicBool::new(false);
+        let reader = connect_event_stream_with(
+            &event_server.address,
+            &stopped,
+            |address, timeout| {
+                connect_transport_with_tls_config(address, timeout, || Ok(event_config))
+            },
+            |_| {
+                Ok(Some(Credential::ApiKey {
+                    key: "event-secret".to_owned(),
+                }))
+            },
+        );
+        assert!(reader.is_ok(), "{:?}", reader.err());
+        let request = event_server.finish().unwrap();
+        assert_eq!(request["method"], "events.subscribe");
+        assert_eq!(request["credential"]["ApiKey"]["key"], "event-secret");
+    }
+
+    #[test]
+    fn untrusted_tls_fails_before_loading_rpc_credential() {
+        let server = TestTlsServer::start("localhost", None);
+        let config = client_config_with_root(None);
+        let credential_loaded = Cell::new(false);
+        let result = call_rpc_with(
+            &server.address,
+            "server.version",
+            None,
+            2000,
+            |address, timeout| connect_transport_with_tls_config(address, timeout, || Ok(config)),
+            |_| {
+                credential_loaded.set(true);
+                Ok(Some(Credential::Bearer {
+                    token: "must-not-send".to_owned(),
+                }))
+            },
+        );
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("TLS handshake failed"));
+        assert!(!credential_loaded.get());
+        assert!(server.finish().is_none());
+    }
+
+    #[test]
+    fn wrong_tls_hostname_fails_before_loading_event_credential() {
+        let server = TestTlsServer::start("elsewhere.example", None);
+        let config = client_config_with_root(Some(server.certificate.clone()));
+        let credential_loaded = Cell::new(false);
+        let stopped = AtomicBool::new(false);
+        let result = connect_event_stream_with(
+            &server.address,
+            &stopped,
+            |address, timeout| connect_transport_with_tls_config(address, timeout, || Ok(config)),
+            |_| {
+                credential_loaded.set(true);
+                Ok(Some(Credential::ApiKey {
+                    key: "must-not-send".to_owned(),
+                }))
+            },
+        );
+        assert!(result.err().unwrap().contains("TLS handshake failed"));
+        assert!(!credential_loaded.get());
+        assert!(server.finish().is_none());
+    }
+
+    #[test]
+    fn credential_gate_rejects_rpc_and_event_requests_before_writing() {
+        let (rpc_address, rpc_received) = start_plain_server();
+        let rpc = call_rpc_with(
+            &rpc_address,
+            "server.version",
+            None,
+            2000,
+            |address, timeout| {
+                connect_transport(address, timeout).map(|(stream, _)| (stream, false))
+            },
+            |_| {
+                Ok(Some(Credential::Bearer {
+                    token: "must-not-send".to_owned(),
+                }))
+            },
+        );
+        assert!(!rpc.success);
+        assert!(rpc.error.unwrap().contains("credentials can only be sent"));
+        assert!(rpc_received.join().unwrap().is_empty());
+
+        let (event_address, event_received) = start_plain_server();
+        let stopped = AtomicBool::new(false);
+        let result = connect_event_stream_with(
+            &event_address,
+            &stopped,
+            |address, timeout| {
+                connect_transport(address, timeout).map(|(stream, _)| (stream, false))
+            },
+            |_| {
+                Ok(Some(Credential::ApiKey {
+                    key: "must-not-send".to_owned(),
+                }))
+            },
+        );
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .contains("credentials can only be sent")
+        );
+        assert!(event_received.join().unwrap().is_empty());
     }
 
     #[test]

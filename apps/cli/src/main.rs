@@ -272,6 +272,13 @@ pub struct JsonRpcClient {
 
 impl JsonRpcClient {
     pub fn connect(address: &str) -> Result<Self, String> {
+        Self::connect_with_tls_config(address, None)
+    }
+
+    fn connect_with_tls_config(
+        address: &str,
+        tls_config: Option<Arc<ClientConfig>>,
+    ) -> Result<Self, String> {
         let parsed = parse_transport_address(address)?;
         let (stream, credential_allowed) = match parsed {
             TransportAddress::Plain { authority } => {
@@ -295,7 +302,11 @@ impl JsonRpcClient {
                     ServerName::try_from(server_name.clone())
                         .map_err(|_| format!("invalid TLS server name: {server_name}"))?
                 };
-                let connection = ClientConnection::new(native_client_config()?, server_name)
+                let config = match tls_config {
+                    Some(config) => config,
+                    None => native_client_config()?,
+                };
+                let connection = ClientConnection::new(config, server_name)
                     .map_err(|error| format!("cannot initialize TLS connection: {error}"))?;
                 let mut stream = StreamOwned::new(connection, stream);
                 stream
@@ -538,6 +549,101 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::generate_simple_self_signed;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection};
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    struct TestTlsServer {
+        port: u16,
+        certificate_der: Vec<u8>,
+        worker: JoinHandle<Option<Value>>,
+    }
+
+    impl TestTlsServer {
+        fn start() -> Self {
+            let generated = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+            let certificate_der = generated.cert.der().to_vec();
+            let private_key =
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(generated.key_pair.serialize_der()));
+            let config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(certificate_der.clone())],
+                    private_key,
+                )
+                .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let worker = thread::spawn(move || {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let connection = ServerConnection::new(Arc::new(config)).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                stream.conn.complete_io(&mut stream.sock).ok()?;
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).ok()?;
+                if line.is_empty() {
+                    return None;
+                }
+                let request = serde_json::from_str(&line).ok()?;
+                writeln!(
+                    reader.get_mut(),
+                    "{}",
+                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "1"})
+                )
+                .ok()?;
+                Some(request)
+            });
+            Self {
+                port,
+                certificate_der,
+                worker,
+            }
+        }
+
+        fn address(&self, host: &str) -> String {
+            format!("tls://{host}:{}", self.port)
+        }
+    }
+
+    fn test_client_config(certificate_der: Option<&[u8]>) -> Arc<ClientConfig> {
+        let mut roots = RootCertStore::empty();
+        if let Some(certificate_der) = certificate_der {
+            roots
+                .add(CertificateDer::from(certificate_der.to_vec()))
+                .unwrap();
+        }
+        Arc::new(
+            ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }
+
+    fn call_with_test_credential(
+        address: &str,
+        tls_config: Arc<ClientConfig>,
+    ) -> Result<Value, String> {
+        let mut client = JsonRpcClient::connect_with_tls_config(address, Some(tls_config))?;
+        client.call_with_credential(
+            1,
+            "server.version",
+            None,
+            Some(Credential::ApiKey {
+                key: "test-secret".to_owned(),
+            }),
+        )
+    }
 
     fn test_config() -> (Config, PathBuf) {
         let stamp = std::time::SystemTime::now()
@@ -674,5 +780,62 @@ mod tests {
     #[test]
     fn cli_help_is_documented() {
         assert_eq!("task.list", "task.list");
+    }
+
+    #[test]
+    fn tls_client_sends_credential_after_a_verified_handshake() {
+        let server = TestTlsServer::start();
+        let config = test_client_config(Some(&server.certificate_der));
+        let result = call_with_test_credential(&server.address("localhost"), config).unwrap();
+        assert_eq!(result, "1");
+        let request = server.worker.join().unwrap().unwrap();
+        assert_eq!(request["method"], "server.version");
+        assert_eq!(request["credential"]["ApiKey"]["key"], "test-secret");
+    }
+
+    #[test]
+    fn tls_client_does_not_send_credential_to_an_untrusted_server() {
+        let server = TestTlsServer::start();
+        let error =
+            call_with_test_credential(&server.address("localhost"), test_client_config(None))
+                .unwrap_err();
+        assert!(error.contains("TLS handshake failed"), "{error}");
+        assert!(server.worker.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn tls_client_does_not_send_credential_when_the_server_name_mismatches() {
+        let server = TestTlsServer::start();
+        let config = test_client_config(Some(&server.certificate_der));
+        let error = call_with_test_credential(&server.address("127.0.0.1"), config).unwrap_err();
+        assert!(error.contains("TLS handshake failed"), "{error}");
+        assert!(server.worker.join().unwrap().is_none());
+    }
+
+    #[test]
+    fn tls_client_does_not_retry_a_plaintext_listener_without_tls() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("tls://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let worker = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut received = [0_u8; 1024];
+            let size = socket.read(&mut received).unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            received[..size].to_vec()
+        });
+        let error = call_with_test_credential(&address, test_client_config(None)).unwrap_err();
+        assert!(error.contains("TLS handshake failed"), "{error}");
+        let received = worker.join().unwrap();
+        assert_eq!(received.first(), Some(&0x16));
+        assert!(
+            !received
+                .windows(b"test-secret".len())
+                .any(|bytes| bytes == b"test-secret")
+        );
     }
 }

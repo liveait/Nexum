@@ -24,3 +24,6 @@ path = "src/desktop_lib.rs"
 
 [build-dependencies]
 tauri-build = { version = "=2.6.3", features = [] }
+
+[dev-dependencies]
+rcgen = "0.13"

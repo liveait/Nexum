@@ -352,6 +352,14 @@ impl ServerProcess {
 type TlsClientStream = StreamOwned<ClientConnection, TcpStream>;
 
 fn tls_client_stream(port: u16, certificate_der: &[u8]) -> TlsClientStream {
+    try_tls_client_stream(port, certificate_der, "localhost").unwrap()
+}
+
+fn try_tls_client_stream(
+    port: u16,
+    certificate_der: &[u8],
+    server_name: &str,
+) -> std::io::Result<TlsClientStream> {
     let mut roots = RootCertStore::empty();
     roots
         .add(CertificateDer::from(certificate_der.to_vec()))
@@ -359,7 +367,7 @@ fn tls_client_stream(port: u16, certificate_der: &[u8]) -> TlsClientStream {
     let config = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let server_name = ServerName::try_from("localhost".to_owned()).unwrap();
+    let server_name = ServerName::try_from(server_name.to_owned()).unwrap();
     let connection = ClientConnection::new(Arc::new(config), server_name).unwrap();
     let socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket
@@ -369,8 +377,8 @@ fn tls_client_stream(port: u16, certificate_der: &[u8]) -> TlsClientStream {
         .set_write_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     let mut stream = StreamOwned::new(connection, socket);
-    stream.conn.complete_io(&mut stream.sock).unwrap();
-    stream
+    stream.conn.complete_io(&mut stream.sock)?;
+    Ok(stream)
 }
 
 fn tls_rpc_request(port: u16, certificate_der: &[u8], request: Value) -> Value {
@@ -1158,6 +1166,131 @@ fn server_output_with_args(data_dir: &Path, port: Option<u16>, extra_args: &[&st
     panic!("server did not exit within five seconds");
 }
 
+fn assert_tls_startup_fails(
+    data_dir: &Path,
+    certificate_path: Option<&Path>,
+    key_path: Option<&Path>,
+    expected_error: &str,
+) {
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+
+    let mut args = Vec::new();
+    if let Some(path) = certificate_path {
+        args.extend(["--tls-cert-path", path.to_str().unwrap()]);
+    }
+    if let Some(path) = key_path {
+        args.extend(["--tls-key-path", path.to_str().unwrap()]);
+    }
+    let output = server_output_with_args(data_dir, Some(port), &args);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "server started with invalid TLS configuration: {stderr}"
+    );
+    assert!(
+        stderr.contains(expected_error),
+        "expected {expected_error:?}, got: {stderr}"
+    );
+}
+
+#[test]
+fn tls_startup_rejects_incomplete_or_missing_certificate_material() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let generated = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let certificate_path = dir.root.join("server-cert.pem");
+    let key_path = dir.root.join("server-key.pem");
+    fs::write(&certificate_path, generated.cert.pem()).unwrap();
+    fs::write(&key_path, generated.key_pair.serialize_pem()).unwrap();
+    let missing_path = dir.root.join("missing.pem");
+
+    assert_tls_startup_fails(
+        dir.path(),
+        Some(&certificate_path),
+        None,
+        "tls_cert_path and tls_key_path must be configured together",
+    );
+    assert_tls_startup_fails(
+        dir.path(),
+        None,
+        Some(&key_path),
+        "tls_cert_path and tls_key_path must be configured together",
+    );
+    assert_tls_startup_fails(
+        dir.path(),
+        Some(&missing_path),
+        Some(&key_path),
+        "cannot read TLS file",
+    );
+    assert_tls_startup_fails(
+        dir.path(),
+        Some(&certificate_path),
+        Some(&missing_path),
+        "cannot read TLS file",
+    );
+}
+
+#[test]
+fn tls_startup_rejects_invalid_pem_and_mismatched_private_key() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let generated = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let unrelated = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let certificate_path = dir.root.join("server-cert.pem");
+    let key_path = dir.root.join("server-key.pem");
+    let empty_path = dir.root.join("empty.pem");
+    let invalid_certificate_path = dir.root.join("invalid-cert.pem");
+    let invalid_key_path = dir.root.join("invalid-key.pem");
+    let unrelated_key_path = dir.root.join("unrelated-key.pem");
+    fs::write(&certificate_path, generated.cert.pem()).unwrap();
+    fs::write(&key_path, generated.key_pair.serialize_pem()).unwrap();
+    fs::write(&empty_path, b"").unwrap();
+    fs::write(
+        &invalid_certificate_path,
+        b"-----BEGIN CERTIFICATE-----\n%%%\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    fs::write(
+        &invalid_key_path,
+        b"-----BEGIN PRIVATE KEY-----\n%%%\n-----END PRIVATE KEY-----\n",
+    )
+    .unwrap();
+    fs::write(&unrelated_key_path, unrelated.key_pair.serialize_pem()).unwrap();
+
+    assert_tls_startup_fails(
+        dir.path(),
+        Some(&empty_path),
+        Some(&key_path),
+        "contains no certificates",
+    );
+    assert_tls_startup_fails(
+        dir.path(),
+        Some(&invalid_certificate_path),
+        Some(&key_path),
+        "invalid TLS certificate PEM",
+    );
+    assert_tls_startup_fails(
+        dir.path(),
+        Some(&certificate_path),
+        Some(&empty_path),
+        "contains no private key",
+    );
+    assert_tls_startup_fails(
+        dir.path(),
+        Some(&certificate_path),
+        Some(&invalid_key_path),
+        "invalid TLS private key PEM",
+    );
+    assert_tls_startup_fails(
+        dir.path(),
+        Some(&certificate_path),
+        Some(&unrelated_key_path),
+        "cannot build TLS server configuration",
+    );
+}
+
 #[test]
 fn second_server_cannot_recover_a_live_servers_tasks() {
     let _test_guard = server_test_guard();
@@ -1807,6 +1940,52 @@ fn max_connections_rejects_excess_connections_and_releases_after_close() {
         released,
         "connection slot was not released after the first client closed"
     );
+    server.stop();
+}
+
+#[test]
+fn tls_handshake_rejects_untrusted_and_wrong_hostname_certificates() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let (mut server, certificate_der) = ServerProcess::start_with_tls(dir.path(), &dir.root);
+    let unrelated = generate_simple_self_signed(vec!["unrelated.example".to_owned()]).unwrap();
+
+    let untrusted = try_tls_client_stream(server.port, unrelated.cert.der().as_ref(), "localhost")
+        .expect_err("an unrelated root must not trust the Server certificate");
+    assert!(
+        matches!(
+            untrusted
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<rustls::Error>()),
+            Some(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer | rustls::CertificateError::BadSignature
+            ))
+        ),
+        "unexpected trust error: {untrusted}"
+    );
+
+    let wrong_hostname = try_tls_client_stream(server.port, &certificate_der, "wrong.example")
+        .expect_err("a trusted certificate must not match an unrelated hostname");
+    assert!(
+        matches!(
+            wrong_hostname
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<rustls::Error>()),
+            Some(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::NotValidForName
+                    | rustls::CertificateError::NotValidForNameContext { .. }
+            ))
+        ),
+        "unexpected hostname error: {wrong_hostname}"
+    );
+
+    // A failed handshake must not switch the listener to plaintext or stop it.
+    let response = tls_rpc_request(
+        server.port,
+        &certificate_der,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "server.version"}),
+    );
+    assert_eq!(response["result"], "1");
     server.stop();
 }
 

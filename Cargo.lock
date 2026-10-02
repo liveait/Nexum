@@ -2058,6 +2058,7 @@ name = "nexum-cli"
 version = "0.1.0"
 dependencies = [
  "nexum-protocol",
+ "rcgen",
  "rustls",
  "rustls-native-certs",
  "serde_json",
@@ -2081,6 +2082,7 @@ name = "nexum-desktop"
 version = "0.1.0"
 dependencies = [
  "nexum-protocol",
+ "rcgen",
  "rustls",
  "rustls-native-certs",
  "security-framework",
