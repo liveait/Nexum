@@ -77,7 +77,7 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    /// Returns true if all required paths are provided.
+    /// Returns true when the server certificate and private key paths are both provided.
     pub fn is_complete(&self) -> bool {
         self.cert_path.is_some() && self.key_path.is_some()
     }
@@ -299,49 +299,76 @@ mod tests {
         );
     }
 
-    #[ignore] // pre-existing flaky test: `is_complete()` semantics may have changed
     #[test]
-    fn tls_config_requires_all_paths() {
+    fn tls_config_requires_a_certificate_and_key() {
         let tls = TlsConfig::default();
         assert!(!tls.is_complete());
+        let certificate_only = TlsConfig {
+            cert_path: Some(PathBuf::from("/cert.pem")),
+            key_path: None,
+            ca_path: None,
+        };
+        assert!(!certificate_only.is_complete());
+        let key_only = TlsConfig {
+            cert_path: None,
+            key_path: Some(PathBuf::from("/key.pem")),
+            ca_path: None,
+        };
+        assert!(!key_only.is_complete());
         let complete = TlsConfig {
             cert_path: Some(PathBuf::from("/cert.pem")),
             key_path: Some(PathBuf::from("/key.pem")),
             ca_path: None,
         };
-        assert!(!complete.is_complete());
-        let full = TlsConfig {
+        assert!(complete.is_complete());
+        let unsupported_client_auth = TlsConfig {
             cert_path: Some(PathBuf::from("/cert.pem")),
             key_path: Some(PathBuf::from("/key.pem")),
             ca_path: Some(PathBuf::from("/ca.pem")),
         };
-        assert!(full.is_complete());
+        assert!(unsupported_client_auth.is_complete());
     }
 
     #[test]
     fn tls_loader_rejects_an_incomplete_pair() {
-        let config = TlsConfig {
-            cert_path: Some(PathBuf::from("cert.pem")),
-            key_path: None,
-            ca_path: None,
-        };
-        assert!(matches!(
-            config.load_server_config(),
-            Err(TlsConfigError::IncompletePair)
-        ));
+        for config in [
+            TlsConfig {
+                cert_path: Some(PathBuf::from("cert.pem")),
+                key_path: None,
+                ca_path: None,
+            },
+            TlsConfig {
+                cert_path: None,
+                key_path: Some(PathBuf::from("key.pem")),
+                ca_path: None,
+            },
+        ] {
+            assert!(matches!(
+                config.load_server_config(),
+                Err(TlsConfigError::IncompletePair)
+            ));
+        }
     }
 
     #[test]
     fn tls_loader_rejects_client_auth_material_until_supported() {
-        let config = TlsConfig {
-            cert_path: None,
-            key_path: None,
-            ca_path: Some(PathBuf::from("ca.pem")),
-        };
-        assert!(matches!(
-            config.load_server_config(),
-            Err(TlsConfigError::ClientAuthenticationUnsupported)
-        ));
+        for config in [
+            TlsConfig {
+                cert_path: None,
+                key_path: None,
+                ca_path: Some(PathBuf::from("ca.pem")),
+            },
+            TlsConfig {
+                cert_path: Some(PathBuf::from("cert.pem")),
+                key_path: Some(PathBuf::from("key.pem")),
+                ca_path: Some(PathBuf::from("ca.pem")),
+            },
+        ] {
+            assert!(matches!(
+                config.load_server_config(),
+                Err(TlsConfigError::ClientAuthenticationUnsupported)
+            ));
+        }
     }
 
     #[test]
