@@ -2,7 +2,7 @@
 
 状态：已实现 macOS Desktop UI 基线；剩余项目已标注为计划项。
 
-本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、带 macOS Keychain 凭据操作的 Settings 卡片、带原生目标选择器的 Add Download Sheet、状态栏、事件驱动刷新、键盘交互、可访问性标签、焦点管理、减少动效行为和计划能力占位。系统外观和本地化仍属于后续切片。
+本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、带 macOS Keychain 凭据操作的 Settings 卡片、带原生目标选择器的 Add Download Sheet、状态栏、事件驱动刷新、键盘交互、可访问性标签、焦点管理、减少动效行为、跟随系统的明暗配色、中英文 UI 文案和计划能力占位。
 
 英文版见 [DESKTOP_UI_DESIGN.md](DESKTOP_UI_DESIGN.md)。
 
@@ -40,7 +40,13 @@
 - 最小窗口：960×640；推荐窗口：1120×720。
 - 侧边栏宽度 208–240 px，可折叠。
 - 主区域以任务列表为主。窗口宽度超过 1100 px 时，选中任务在右侧打开 Inspector；较窄时使用 Sheet 或上下堆叠详情面板。
-- 使用系统字体、系统强调色、系统明暗外观和原生焦点环。
+- 使用系统字体、Nexum 紫色强调色、系统明暗外观和清晰的键盘焦点环。跟随系统强调色的选项仍待实现。
+
+### 2.1.1 外观和语言实施决定
+
+- Desktop 壳层通过 `prefers-color-scheme` 跟随 macOS 明暗外观，提供两套可读配色，并保留已有的减少动效行为。手动主题或强调色选择仍待实现。
+- 语言默认选择**跟随系统**：中文系统语言使用简体中文，其他语言使用英文。设置中可改为 **English** 或 **简体中文**；选择与 Server 地址和刷新策略一起持久化，旧设置默认按**跟随系统**处理。
+- 集中的类型化文案目录覆盖可见文字、提示、可访问名称、任务状态、校验与客户端生成的状态消息。语言选择只影响显示，不改变协议值或 Server 请求。Server 或操作系统返回的原始诊断信息保持原文，以免丢失技术细节。
 
 ### 2.2 侧边栏分组
 
@@ -126,11 +132,11 @@ Sheet 只承担一条清晰流程：
 - **Server：** 地址（默认 `127.0.0.1:39100`）、连接/测试按钮、最近连接结果和协议版本。
 - **认证：** 在通用设置中针对当前已保存的 Server 显示 `Bearer`/`ApiKey` scheme 选择器、只写 secret 输入框、已配置 scheme 状态，以及保存/清除操作。将 scheme 和 secret 一起按 Server 地址保存在 macOS Keychain，不能把 secret 回读到 React。保存、清除或切换当前 Server 后重启事件订阅并刷新 Task 快照。允许为回环明文地址和显式 `tls://` 地址保存凭据。明文凭据仍只允许回环地址；TLS 客户端会先校验 Server 名称和系统根证书链，再发送凭据。
 - **更新：** 自动策略使用事件刷新；事件流断开时回退到空闲每五秒、下载中每秒的轮询。手动策略会禁用该轮询回退。
-- **外观：** 跟随系统外观，以及提供语言或强调色选择，均仍待实现。
+- **外观：** 壳层跟随系统明暗外观；跟随系统/英文/简体中文语言选择即时保存，并与 Server 地址、刷新策略一起持久化。手动主题和强调色选择仍待实现。
 - **通知：** 在本次 Desktop 会话的 Activity Center 显示任务完成、失败和重试事件；通知偏好与静音控制留待后续切片。
 - 第一版 Server 是独立进程的说明。
 
-通过 Tauri 命令将地址和刷新策略保存到 macOS Application Support 目录。凭据只保存在 macOS Keychain。Tauri 后端会为普通 RPC 和独立的 `events.subscribe` 请求附加凭据，Keychain 失败时显示不含 secret 的错误。其他平台的 Desktop 可以无认证连接，但不支持保存或清除凭据。
+通过 Tauri 命令将地址、刷新策略和语言偏好保存到 macOS Application Support 目录。凭据只保存在 macOS Keychain。Tauri 后端会为普通 RPC 和独立的 `events.subscribe` 请求附加凭据，Keychain 失败时显示不含 secret 的错误。其他平台的 Desktop 可以无认证连接，但不支持保存或清除凭据。
 
 ## 6. 状态模型与数据新鲜度
 
@@ -167,8 +173,8 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 - 任务选择控件是按钮：Enter 或 Space 选中任务，上/下方向键在可见任务之间移动，Home/End 移到首个或最后一个可见任务。任务操作使用独立按钮。
 - Add Sheet 首先聚焦 Source URL，Tab 和 Shift+Tab 保持在弹窗内，关闭后将焦点还给打开弹窗的控件。原生目标选择器关闭后焦点回到 Choose 按钮。
 - 导航使用 `aria-current`；任务选择控件读出状态与进度，Inspector 进度有进度条语义，任务操作有可访问名称。错误和操作消息使用 alert/status 语义，不播报每次进度变化。
-- CSS 针对 `prefers-reduced-motion` 关闭过渡、悬停位移和不确定进度动画。跟随系统明暗模式仍待实现。
-- 任务原生上下文菜单、明确的删除确认文案，以及通过类型化 Message Catalog 提供中英文文案仍待实现。
+- CSS 针对 `prefers-reduced-motion` 关闭过渡、悬停位移和不确定进度动画，并通过 `prefers-color-scheme` 跟随系统明暗外观。
+- 类型化中英文文案目录覆盖 Desktop 自有的可见及无障碍文案。任务原生上下文菜单和明确的删除确认文案仍待实现。
 
 ## 8. 实现切片
 
@@ -200,7 +206,7 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 
 ### Slice D — macOS 发布打磨
 
-- 跟随系统明暗外观，并增加中英文 UI 文案。[ ]
+- 跟随系统明暗外观，并增加中英文 UI 文案。[x]
 - 增加明暗模式截图和视觉回归检查。
 - 在 macOS 上构建前端和 Tauri 应用。
 - 具备发布签名与身份后生成签名/公证的 `.app`/`.dmg`。
@@ -216,4 +222,4 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 - 只有合法状态显示暂停、恢复和删除操作，并报告执行结果。
 - 重启应用后保留 Server 地址和刷新策略。
 - 传输 Engine 尚未实现前，UI 不宣称支持 Magnet/本地文件。
-- 核心流程已在深色 Motrix 风格壳层中可用，并支持键盘导航、可访问控件、焦点管理和减少动效。系统外观和本地化仍属于后续发布打磨。
+- 核心流程具备跟随系统的明暗配色、中英文 UI 文案、键盘导航、可访问控件、焦点管理和减少动效。原生 macOS 视觉和 VoiceOver 发布检查仍待执行。
