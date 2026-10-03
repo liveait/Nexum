@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -84,7 +84,7 @@ const SETTINGS_CARDS: Array<{
   available: boolean;
 }> = [
   { id: "general", label: "General", description: "Startup, Server and system integration", icon: "general", available: true },
-  { id: "appearance", label: "Appearance", description: "Theme, language and sidebar", icon: "appearance", available: true },
+  { id: "appearance", label: "Appearance", description: "Theme and language preferences", icon: "appearance", available: false },
   { id: "downloads", label: "Downloads", description: "Refresh, destination and task behavior", icon: "downloads", available: true },
   { id: "bittorrent", label: "BitTorrent", description: "DHT, trackers and peer settings", icon: "bittorrent", available: false },
   { id: "integration", label: "Integration", description: "Browser extension and CLI", icon: "integration", available: false },
@@ -116,6 +116,12 @@ function formatBytes(bytes: number): string {
 
 function formatBytesMaybe(bytes: number | null): string {
   return bytes === null ? "Unknown size" : formatBytes(bytes);
+}
+
+function taskProgress(task: TaskItem): number | null {
+  if (task.total_bytes === null) return null;
+  if (task.total_bytes === 0) return task.state === "Completed" ? 100 : 0;
+  return Math.max(0, Math.min(100, (task.downloaded_bytes / task.total_bytes) * 100));
 }
 
 function formatUpdatedAt(value: number | null): string {
@@ -213,6 +219,14 @@ export default function App() {
   const [addLoading, setAddLoading] = useState(false);
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
+  const addDialogRef = useRef<HTMLElement>(null);
+  const addSourceRef = useRef<HTMLInputElement>(null);
+  const destinationButtonRef = useRef<HTMLButtonElement>(null);
+  const addReturnFocus = useRef<HTMLElement | null>(null);
+  const sidebarAddRef = useRef<HTMLButtonElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchToggleRef = useRef<HTMLButtonElement>(null);
+  const searchReturnFocus = useRef<HTMLElement | null>(null);
   const eventRefreshTimer = useRef<number | null>(null);
   const streamTransition = useRef<Promise<void>>(Promise.resolve());
   const snapshotContext = useRef({ server, credentialRevision });
@@ -400,7 +414,77 @@ export default function App() {
     const query = searchQuery.trim().toLowerCase();
     return !query || [task.id, task.source, task.destination, task.state].some((value) => value.toLowerCase().includes(query));
   }), [tasks, filter, searchQuery]);
-  const selectedTask = tasks.find((task) => task.id === selectedId) ?? null;
+  const selectedTask = visibleTasks.find((task) => task.id === selectedId) ?? visibleTasks[0] ?? null;
+
+  const openAdd = (trigger?: HTMLElement) => {
+    addReturnFocus.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setAddError("");
+    setShowAdd(true);
+  };
+
+  const closeAdd = () => {
+    if (!addLoading && !destinationPicking) setShowAdd(false);
+  };
+
+  const openSearch = (trigger?: HTMLElement) => {
+    if (searchOpen) {
+      searchInputRef.current?.focus();
+      return;
+    }
+    searchReturnFocus.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    setSearchOpen(true);
+  };
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchQuery("");
+    const previous = searchReturnFocus.current;
+    window.requestAnimationFrame(() => {
+      (previous?.isConnected ? previous : searchToggleRef.current)?.focus();
+    });
+  };
+
+  useEffect(() => {
+    if (!showAdd) return undefined;
+    addSourceRef.current?.focus();
+    return () => {
+      const previous = addReturnFocus.current;
+      window.requestAnimationFrame(() => {
+        (previous?.isConnected ? previous : sidebarAddRef.current)?.focus();
+      });
+    };
+  }, [showAdd]);
+
+  useEffect(() => {
+    if (section === "downloads" && searchOpen) searchInputRef.current?.focus();
+  }, [section, searchOpen]);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || showAdd) return;
+      if (event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey && !event.repeat) {
+        if (event.key.toLowerCase() === "n") {
+          event.preventDefault();
+          openAdd();
+          return;
+        }
+        if (event.key.toLowerCase() === "f") {
+          event.preventDefault();
+          if (section !== "downloads") selectSection("downloads");
+          openSearch();
+          return;
+        }
+      }
+      if (event.key === "Escape" && section === "downloads" && searchOpen) {
+        event.preventDefault();
+        closeSearch();
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+    // Shortcuts use the currently visible workspace and modal state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [section, searchOpen, showAdd]);
 
   const selectSection = (next: Section) => {
     setSection(next);
@@ -465,6 +549,7 @@ export default function App() {
       setAddError(errorMessage(caught));
     } finally {
       setDestinationPicking(false);
+      window.requestAnimationFrame(() => destinationButtonRef.current?.focus());
     }
   };
 
@@ -493,33 +578,59 @@ export default function App() {
     }
   };
 
+  const handleAddDialogKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeAdd();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(addDialogRef.current?.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    ) ?? []);
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !addDialogRef.current?.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !addDialogRef.current?.contains(document.activeElement))) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
     <main className="app-shell">
-      <aside className="sidebar" aria-label="Nexum navigation">
+      <aside className="sidebar" aria-label="Nexum navigation" inert={showAdd}>
         <div className="sidebar-topbar">
           <span className="sidebar-brand">NEXUM</span>
           <div className="sidebar-top-actions">
-            <button className="sidebar-icon-button" onClick={() => setShowInspector((current) => !current)} title="Toggle inspector"><Icon name="list" size={18} /></button>
-            <button className="sidebar-icon-button add-sidebar-button" onClick={() => { setShowAdd(true); setAddError(""); }} title="Add download">＋</button>
+            <button className="sidebar-icon-button" onClick={() => setShowInspector((current) => !current)} title="Toggle inspector" aria-label={showInspector ? "Hide task details" : "Show task details"} aria-pressed={showInspector}><Icon name="list" size={18} /></button>
+            <button ref={sidebarAddRef} className="sidebar-icon-button add-sidebar-button" onClick={(event) => openAdd(event.currentTarget)} title="Add download" aria-label="Add download">＋</button>
           </div>
         </div>
         <nav className="primary-nav">
           {NAV_ITEMS.map((item) => (
-            <button className={`nav-item ${section === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectSection(item.id)}>
+            <button className={`nav-item ${section === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectSection(item.id)} aria-current={section === item.id ? "page" : undefined}>
               <Icon name={item.icon} size={20} /><span>{item.label}</span>
               {item.id === "downloads" && counts.active > 0 && <span className="nav-count">{counts.active}</span>}
             </button>
           ))}
         </nav>
         <div className="sidebar-spacer" />
-        <button className={`nav-item ${section === "notifications" ? "selected" : ""}`} onClick={() => selectSection("notifications")}>
+        <button className={`nav-item ${section === "notifications" ? "selected" : ""}`} onClick={() => selectSection("notifications")} aria-current={section === "notifications" ? "page" : undefined}>
           <Icon name="notifications" size={20} /><span>Notifications</span>{notifications.length > 0 && <span className="nav-count">{notifications.length}</span>}
         </button>
         <div className="sidebar-divider" />
-        <button className={`nav-item ${section === "settings" ? "selected" : ""}`} onClick={() => selectSection("settings")}><Icon name="settings" size={20} /><span>Settings</span></button>
+        <button className={`nav-item ${section === "settings" ? "selected" : ""}`} onClick={() => selectSection("settings")} aria-current={section === "settings" ? "page" : undefined}><Icon name="settings" size={20} /><span>Settings</span></button>
       </aside>
 
-      <section className="workspace">
+      <section className="workspace" inert={showAdd}>
         {section === "downloads" && (
           <DownloadsView
             tasks={tasks}
@@ -538,13 +649,15 @@ export default function App() {
             showInspector={showInspector}
             searchOpen={searchOpen}
             searchQuery={searchQuery}
+            searchInputRef={searchInputRef}
+            searchToggleRef={searchToggleRef}
             onFilterChange={setFilter}
             onSelect={setSelectedId}
-            onSearchOpen={() => setSearchOpen((current) => !current)}
+            onSearchOpen={(trigger) => { if (searchOpen) closeSearch(); else openSearch(trigger); }}
             onSearchQuery={setSearchQuery}
             onToggleInspector={() => setShowInspector((current) => !current)}
             onRefresh={() => void refreshTasks()}
-            onAdd={() => { setShowAdd(true); setAddError(""); }}
+            onAdd={openAdd}
             onPause={(id) => void runTaskCommand(id, "task_pause", "Download paused")}
             onResume={(id) => void runTaskCommand(id, "task_resume", "Download resumed")}
             onRemove={(id) => void runTaskCommand(id, "task_remove", "Task removed")}
@@ -552,23 +665,26 @@ export default function App() {
             onStart={(id) => void startNextTask(id)}
           />
         )}
-        {section === "dashboard" && <DashboardView tasks={tasks} connection={connection} onAdd={() => setShowAdd(true)} onDownloads={() => selectSection("downloads")} />}
+        {section === "dashboard" && <DashboardView tasks={tasks} connection={connection} onAdd={openAdd} onDownloads={() => selectSection("downloads")} />}
         {section === "trackers" && <UnavailableView icon="trackers" title="Trackers" description="Tracker discovery and health checks will appear here when the BitTorrent engine is connected." />}
         {section === "plugins" && <UnavailableView icon="plugins" title="Plugins" description="The plugin manager is currently a runtime foundation. Executable providers and a plugin catalog are planned." />}
         {section === "notifications" && <NotificationsView notifications={notifications} onDownloads={() => selectSection("downloads")} />}
         {section === "settings" && <SettingsView category={settingsCategory} server={server} serverDraft={serverDraft} settingsReady={settingsReady} connection={connection} refreshSeconds={refreshSeconds} onCategory={setSettingsCategory} onServerChange={setServerDraft} onRefreshSecondsChange={setRefreshSeconds} onApply={() => void applyServer()} onCredentialChanged={() => setCredentialRevision((current) => current + 1)} />}
       </section>
 
+      <div className="sr-only" role="alert">{error}</div>
+      <div className="sr-only" role="status">{notice}</div>
+
       {showAdd && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => !addLoading && !destinationPicking && setShowAdd(false)}>
-          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-download-title" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-header"><div><span className="eyebrow">New task</span><h2 id="add-download-title">Add Download</h2></div><button className="close-button" onClick={() => setShowAdd(false)} disabled={addLoading || destinationPicking} aria-label="Close">×</button></div>
+        <div className="modal-backdrop" role="presentation" onMouseDown={closeAdd}>
+          <section ref={addDialogRef} className="modal" role="dialog" aria-modal="true" aria-labelledby="add-download-title" onKeyDown={handleAddDialogKeyDown} onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header"><div><span className="eyebrow">New task</span><h2 id="add-download-title">Add Download</h2></div><button className="close-button" onClick={closeAdd} disabled={addLoading || destinationPicking} aria-label="Close Add Download">×</button></div>
             <form onSubmit={createAndQueue}>
-              <label>Source URL<input value={newSource} onChange={(event) => setNewSource(event.target.value)} placeholder="https://example.com/file.zip" autoFocus required /></label>
-              <label>Destination<div className="input-with-action"><input value={newDest} onChange={(event) => setNewDest(event.target.value)} placeholder="/Users/you/Downloads/file.zip" required /><button type="button" className="button chooser-button" onClick={() => void chooseDestination()} disabled={addLoading || destinationPicking}>{destinationPicking ? "Choosing…" : "Choose…"}</button></div></label>
+              <label>Source URL<input ref={addSourceRef} value={newSource} onChange={(event) => setNewSource(event.target.value)} placeholder="https://example.com/file.zip" required /></label>
+              <label htmlFor="add-destination">Destination</label><div className="input-with-action"><input id="add-destination" value={newDest} onChange={(event) => setNewDest(event.target.value)} placeholder="/Users/you/Downloads/file.zip" required /><button ref={destinationButtonRef} type="button" className="button chooser-button" onClick={() => void chooseDestination()} disabled={addLoading || destinationPicking}>{destinationPicking ? "Choosing…" : "Choose…"}</button></div>
               <label>Task ID<input value={newId} onChange={(event) => setNewId(event.target.value)} placeholder="file-download" required /></label>
               {addError && <p className="form-error" role="alert">{addError}</p>}
-              <div className="modal-actions"><button type="button" className="button" onClick={() => setShowAdd(false)} disabled={addLoading || destinationPicking}>Cancel</button><button type="submit" className="button primary" disabled={addLoading || destinationPicking || !newId.trim() || !newSource.trim() || !newDest.trim()}>{addLoading ? "Adding…" : "Add and Queue"}</button></div>
+              <div className="modal-actions"><button type="button" className="button" onClick={closeAdd} disabled={addLoading || destinationPicking}>Cancel</button><button type="submit" className="button primary" disabled={addLoading || destinationPicking || !newId.trim() || !newSource.trim() || !newDest.trim()}>{addLoading ? "Adding…" : "Add and Queue"}</button></div>
             </form>
           </section>
         </div>
@@ -579,7 +695,7 @@ export default function App() {
 
 function DownloadsView({
   tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, eventStreamConnected, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
-  onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onAdd, onPause, onResume, onRemove, onQueue, onStart,
+  searchInputRef, searchToggleRef, onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onAdd, onPause, onResume, onRemove, onQueue, onStart,
 }: {
   tasks: TaskItem[];
   visibleTasks: TaskItem[];
@@ -597,13 +713,15 @@ function DownloadsView({
   showInspector: boolean;
   searchOpen: boolean;
   searchQuery: string;
+  searchInputRef: RefObject<HTMLInputElement | null>;
+  searchToggleRef: RefObject<HTMLButtonElement | null>;
   onFilterChange: (filter: TaskFilter) => void;
   onSelect: (id: string) => void;
-  onSearchOpen: () => void;
+  onSearchOpen: (trigger?: HTMLElement) => void;
   onSearchQuery: (query: string) => void;
   onToggleInspector: () => void;
   onRefresh: () => void;
-  onAdd: () => void;
+  onAdd: (trigger?: HTMLElement) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRemove: (id: string) => void;
@@ -615,43 +733,55 @@ function DownloadsView({
     <>
       <header className="content-header">
         <div className="content-title"><select value={filter} onChange={(event) => onFilterChange(event.target.value as TaskFilter)} aria-label="Download filter">{DOWNLOAD_FILTERS.map((item) => <option value={item.id} key={item.id}>{item.label}</option>)}</select><span className="count-pill">{counts[filter]}/{tasks.length}</span></div>
-        <div className="header-tools"><button className="round-tool" title="More actions"><Icon name="more" /></button><button className={`round-tool ${!showInspector ? "muted" : ""}`} onClick={onToggleInspector} title="Toggle inspector"><Icon name="list" /></button><button className={`round-tool ${showInspector ? "active" : ""}`} onClick={onToggleInspector} title="Task details"><Icon name="info" /></button><button className="round-tool" onClick={onSearchOpen} title="Search"><Icon name="search" /></button></div>
+        <div className="header-tools"><button className="round-tool" title="More actions (planned)" aria-label="More actions (planned)" disabled><Icon name="more" /></button><button className={`round-tool ${showInspector ? "active" : "muted"}`} onClick={onToggleInspector} title="Toggle task details" aria-label={showInspector ? "Hide task details" : "Show task details"} aria-pressed={showInspector}><Icon name="info" /></button><button ref={searchToggleRef} className="round-tool" onClick={(event) => onSearchOpen(event.currentTarget)} title="Search downloads" aria-label="Search downloads" aria-expanded={searchOpen} aria-controls={searchOpen ? "download-search" : undefined}><Icon name="search" /></button></div>
       </header>
-      {searchOpen && <div className="search-row"><Icon name="search" size={16} /><input value={searchQuery} onChange={(event) => onSearchQuery(event.target.value)} placeholder="Search downloads" autoFocus /></div>}
-      {(error || notice) && <div className={`message-banner ${error ? "error" : "success"}`} role={error ? "alert" : "status"}><span>{error || notice}</span>{error && <button onClick={onRefresh}>Retry</button>}</div>}
+      {searchOpen && <div id="download-search" className="search-row"><Icon name="search" size={16} /><input ref={searchInputRef} value={searchQuery} onChange={(event) => onSearchQuery(event.target.value)} placeholder="Search downloads" aria-label="Search downloads" /></div>}
+      {(error || notice) && <div className={`message-banner ${error ? "error" : "success"}`}><span>{error || notice}</span>{error && <button onClick={onRefresh}>Retry</button>}</div>}
       <div className="download-content">
         {visibleTasks.length === 0 ? <EmptyDownloads onAdd={onAdd} hasFilter={filter !== "all" || Boolean(searchQuery)} /> : <div className="download-layout"><section className="task-list" aria-label="Downloads">{visibleTasks.map((task) => <TaskRow key={task.id} task={task} selected={selectedTask?.id === task.id} action={actionByTask[task.id]} onSelect={() => onSelect(task.id)} onPause={() => onPause(task.id)} onResume={() => onResume(task.id)} onRemove={() => onRemove(task.id)} onQueue={() => onQueue(task.id)} onStart={() => onStart(task.id)} />)}</section>{showInspector && <TaskInspector task={selectedTask} server={server} />}</div>}
       </div>
       <footer className="status-bar"><span className="status-mode">HTTP/HTTPS</span><span className="status-transfer"><span>↓ —</span><span>↑ —</span></span><span className="status-spacer" /><span className="status-item"><span className={`status-light ${connection}`} />{connection === "connected" ? "Server connected" : "Server unavailable"}</span><span className="status-item"><span className={`status-light ${eventStreamConnected ? "ready" : "connecting"}`} />{eventStreamConnected ? "Live updates" : "Polling fallback"}</span><span className="status-item"><span className="status-light ready" />{loading ? "Syncing" : formatUpdatedAt(lastUpdatedAt)}</span></footer>
-      <button className="floating-add" onClick={onAdd} title="Add download">＋</button>
+      <button className="floating-add" onClick={(event) => onAdd(event.currentTarget)} title="Add download" aria-label="Add download">＋</button>
       <span className="sr-only">{title}</span>
     </>
   );
 }
 
 function TaskRow({ task, selected, action, onSelect, onPause, onResume, onRemove, onQueue, onStart }: { task: TaskItem; selected: boolean; action?: TaskCommand | "start"; onSelect: () => void; onPause: () => void; onResume: () => void; onRemove: () => void; onQueue: () => void; onStart: () => void }) {
-  const progress = task.total_bytes && task.total_bytes > 0 ? Math.min(100, (task.downloaded_bytes / task.total_bytes) * 100) : null;
-  return <article className={`task-row ${selected ? "selected" : ""}`} onClick={onSelect}>
-    <div className="task-row-main"><div className="task-row-heading"><strong>{task.id}</strong><span className={`state-badge state-${task.state.toLowerCase()}`}>{task.state}</span></div><div className="task-source" title={task.source}>{task.source}</div><div className="progress-track"><span className={progress === null ? "indeterminate" : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><div className="task-row-meta"><span>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes)}</span><span className="task-destination" title={task.destination}>{task.destination}</span></div>{task.error && <div className="task-error">{task.error}</div>}</div>
-    <div className="task-row-actions" onClick={(event) => event.stopPropagation()}>{task.state === "Downloading" && <button className="row-action" disabled={Boolean(action)} onClick={onPause}>{action === "task_pause" ? "Pausing…" : "Pause"}</button>}{task.state === "Paused" && <button className="row-action" disabled={Boolean(action)} onClick={onResume}>{action === "task_resume" ? "Resuming…" : "Resume"}</button>}{task.state === "Queued" && <button className="row-action" disabled={Boolean(action)} onClick={onStart}>{action === "start" ? "Starting…" : "Start"}</button>}{task.state === "Created" && <button className="row-action" disabled={Boolean(action)} onClick={onQueue}>{action === "task_queue" ? "Queueing…" : "Queue"}</button>}<button className="row-action danger-text" disabled={Boolean(action)} onClick={onRemove}>{action === "task_remove" ? "Removing…" : "Remove"}</button></div>
+  const progress = taskProgress(task);
+  const handleSelectionKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const buttons = Array.from(event.currentTarget.closest(".task-list")?.querySelectorAll<HTMLButtonElement>(".task-row-main") ?? []);
+    const index = buttons.indexOf(event.currentTarget);
+    if (index < 0) return;
+    event.preventDefault();
+    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+    buttons[nextIndex].focus();
+    buttons[nextIndex].click();
+  };
+  return <article className={`task-row ${selected ? "selected" : ""}`}>
+    <button type="button" className="task-row-main" onClick={onSelect} onKeyDown={handleSelectionKeyDown} aria-pressed={selected} aria-label={`Select ${task.id}, ${task.state}, ${progress === null ? "progress unknown" : `${Math.round(progress)} percent complete`}${task.error ? `, error: ${task.error}` : ""}`}>
+      <span className="task-row-heading"><strong>{task.id}</strong><span className={`state-badge state-${task.state.toLowerCase()}`}>{task.state}</span></span><span className="task-source" title={task.source}>{task.source}</span><span className="progress-track" aria-hidden="true"><span className={progress === null ? "indeterminate" : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></span><span className="task-row-meta"><span>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes)}</span><span className="task-destination" title={task.destination}>{task.destination}</span></span>{task.error && <span className="task-error">{task.error}</span>}
+    </button>
+    <div className="task-row-actions">{task.state === "Downloading" && <button className="row-action" disabled={Boolean(action)} onClick={onPause} aria-label={`Pause ${task.id}`}>{action === "task_pause" ? "Pausing…" : "Pause"}</button>}{task.state === "Paused" && <button className="row-action" disabled={Boolean(action)} onClick={onResume} aria-label={`Resume ${task.id}`}>{action === "task_resume" ? "Resuming…" : "Resume"}</button>}{task.state === "Queued" && <button className="row-action" disabled={Boolean(action)} onClick={onStart} aria-label={`Start next queued task`}>{action === "start" ? "Starting…" : "Start"}</button>}{task.state === "Created" && <button className="row-action" disabled={Boolean(action)} onClick={onQueue} aria-label={`Queue ${task.id}`}>{action === "task_queue" ? "Queueing…" : "Queue"}</button>}<button className="row-action danger-text" disabled={Boolean(action)} onClick={onRemove} aria-label={`Remove ${task.id}`}>{action === "task_remove" ? "Removing…" : "Remove"}</button></div>
   </article>;
 }
 
 function TaskInspector({ task, server }: { task: TaskItem | null; server: string }) {
   if (!task) return <aside className="inspector inspector-empty"><span className="inspector-icon"><Icon name="info" size={24} /></span><p>Select a download to inspect it.</p></aside>;
-  const progress = task.total_bytes === null ? null : Math.min(100, (task.downloaded_bytes / Math.max(task.total_bytes, 1)) * 100);
-  return <aside className="inspector" aria-label="Task details"><span className="eyebrow">Task details</span><h2>{task.id}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{task.state}</span><div className="inspector-progress"><div className="progress-track"><span className={progress === null ? "indeterminate" : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes)}</strong></div><dl className="detail-list"><div><dt>Source</dt><dd title={task.source}>{task.source}</dd></div><div><dt>Destination</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>Server</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>Latest error</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>Copy error</button></div>}</aside>;
+  const progress = taskProgress(task);
+  return <aside className="inspector" aria-label="Task details"><span className="eyebrow">Task details</span><h2>{task.id}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{task.state}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={`${task.id} download progress`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={progress === null ? `${formatBytes(task.downloaded_bytes)} downloaded; total size unknown` : undefined}><span className={progress === null ? "indeterminate" : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes)}</strong></div><dl className="detail-list"><div><dt>Source</dt><dd title={task.source}>{task.source}</dd></div><div><dt>Destination</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>Server</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>Latest error</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>Copy error</button></div>}</aside>;
 }
 
-function EmptyDownloads({ onAdd, hasFilter }: { onAdd: () => void; hasFilter: boolean }) {
-  return <div className="empty-state"><div className="empty-art" aria-hidden="true"><div className="art-block art-one" /><div className="art-block art-two" /><div className="art-block art-three" /><div className="art-block art-four" /></div><h2>{hasFilter ? "No matching downloads" : "No downloads yet"}</h2><p>{hasFilter ? "Try another filter or search term." : "Press + to add one"}</p>{hasFilter && <button className="button" onClick={onAdd}>Add Download</button>}</div>;
+function EmptyDownloads({ onAdd, hasFilter }: { onAdd: (trigger?: HTMLElement) => void; hasFilter: boolean }) {
+  return <div className="empty-state"><div className="empty-art" aria-hidden="true"><div className="art-block art-one" /><div className="art-block art-two" /><div className="art-block art-three" /><div className="art-block art-four" /></div><h2>{hasFilter ? "No matching downloads" : "No downloads yet"}</h2><p>{hasFilter ? "Try another filter or search term." : "Press + to add one"}</p>{hasFilter && <button className="button" onClick={(event) => onAdd(event.currentTarget)}>Add Download</button>}</div>;
 }
 
-function DashboardView({ tasks, connection, onAdd, onDownloads }: { tasks: TaskItem[]; connection: ConnectionState; onAdd: () => void; onDownloads: () => void }) {
+function DashboardView({ tasks, connection, onAdd, onDownloads }: { tasks: TaskItem[]; connection: ConnectionState; onAdd: (trigger?: HTMLElement) => void; onDownloads: () => void }) {
   const active = tasks.filter((task) => task.state === "Downloading").length;
   const queued = tasks.filter((task) => task.state === "Queued" || task.state === "Retrying").length;
   const completed = tasks.filter((task) => task.state === "Completed").length;
-  return <div className="dashboard-page"><div className="page-heading"><div><span className="eyebrow">Overview</span><h1>Dashboard</h1><p>Current activity from your Nexum Server.</p></div><button className="button primary" onClick={onAdd}>＋ Add Download</button></div><div className="metric-grid"><MetricCard label="All downloads" value={tasks.length} icon="downloads" /><MetricCard label="Active" value={active} icon="trackers" /><MetricCard label="Queued" value={queued} icon="list" /><MetricCard label="Completed" value={completed} icon="general" /></div><section className="dashboard-card"><div className="dashboard-card-heading"><div><span className="eyebrow">Recent activity</span><h2>{tasks.length ? "Latest downloads" : "Nothing here yet"}</h2></div><button className="text-button" onClick={onDownloads}>View downloads</button></div>{tasks.length ? tasks.slice(0, 5).map((task) => <div className="activity-row" key={task.id}><span className={`status-light ${task.state === "Completed" ? "ready" : "connected"}`} /><strong>{task.id}</strong><span>{task.state}</span></div>) : <p className="dashboard-empty">Add an HTTP or HTTPS URL to see it here.</p>}</section><div className="dashboard-connection"><span className={`status-light ${connection}`} />{connection === "connected" ? "Server connected" : "Start nexum-server to connect"}</div></div>;
+  return <div className="dashboard-page"><div className="page-heading"><div><span className="eyebrow">Overview</span><h1>Dashboard</h1><p>Current activity from your Nexum Server.</p></div><button className="button primary" onClick={(event) => onAdd(event.currentTarget)}>＋ Add Download</button></div><div className="metric-grid"><MetricCard label="All downloads" value={tasks.length} icon="downloads" /><MetricCard label="Active" value={active} icon="trackers" /><MetricCard label="Queued" value={queued} icon="list" /><MetricCard label="Completed" value={completed} icon="general" /></div><section className="dashboard-card"><div className="dashboard-card-heading"><div><span className="eyebrow">Recent activity</span><h2>{tasks.length ? "Latest downloads" : "Nothing here yet"}</h2></div><button className="text-button" onClick={onDownloads}>View downloads</button></div>{tasks.length ? tasks.slice(0, 5).map((task) => <div className="activity-row" key={task.id}><span className={`status-light ${task.state === "Completed" ? "ready" : "connected"}`} /><strong>{task.id}</strong><span>{task.state}</span></div>) : <p className="dashboard-empty">Add an HTTP or HTTPS URL to see it here.</p>}</section><div className="dashboard-connection"><span className={`status-light ${connection}`} />{connection === "connected" ? "Server connected" : "Start nexum-server to connect"}</div></div>;
 }
 
 function MetricCard({ label, value, icon }: { label: string; value: number; icon: IconName }) {
@@ -673,8 +803,8 @@ function SettingsView({ category, server, serverDraft, settingsReady, connection
       <div className="settings-card"><div className="settings-card-heading"><div><span className="eyebrow">Connection</span><h2>Server</h2></div><span className={`status-pill ${connection}`}>{connection}</span></div><label>Server address<input value={serverDraft} onChange={(event) => onServerChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onApply(); }} placeholder={DEFAULT_SERVER} /></label><p className="field-help">The Server runs as a separate process. The saved address is kept in the Mac application support directory.</p><button className="button primary" onClick={onApply}>Save and test connection</button></div>
       <CredentialSettings key={server} server={server} serverDraft={serverDraft} settingsReady={settingsReady} onCredentialChanged={onCredentialChanged} />
     </SettingsDetail>;
-    if (category === "downloads") return <SettingsDetail title={card?.label ?? "Downloads"} icon="downloads" onBack={() => onCategory("home")}><div className="settings-card"><span className="eyebrow">Updates</span><h2>Refresh policy</h2><p className="field-help">Idle tasks refresh every five seconds. Active downloads refresh every second.</p><select value={refreshSeconds} onChange={(event) => onRefreshSecondsChange(Number(event.target.value))}><option value={0}>Manual</option><option value={5}>Automatic</option></select><button className="button primary settings-save" onClick={onApply}>Save settings</button></div></SettingsDetail>;
-    if (category === "appearance") return <SettingsDetail title={card?.label ?? "Appearance"} icon="appearance" onBack={() => onCategory("home")}><div className="settings-card"><span className="eyebrow">Theme</span><h2>Follow system appearance</h2><p className="field-help">Nexum follows the Mac light or dark appearance. Language choices will be added to the persisted settings model.</p></div></SettingsDetail>;
+    if (category === "downloads") return <SettingsDetail title={card?.label ?? "Downloads"} icon="downloads" onBack={() => onCategory("home")}><div className="settings-card"><span className="eyebrow">Updates</span><h2>Refresh policy</h2><p className="field-help">Idle tasks refresh every five seconds. Active downloads refresh every second.</p><select value={refreshSeconds} onChange={(event) => onRefreshSecondsChange(Number(event.target.value))} aria-label="Refresh policy"><option value={0}>Manual</option><option value={5}>Automatic</option></select><button className="button primary settings-save" onClick={onApply}>Save settings</button></div></SettingsDetail>;
+    if (category === "appearance") return <SettingsDetail title={card?.label ?? "Appearance"} icon="appearance" onBack={() => onCategory("home")}><div className="settings-card settings-planned"><span className="eyebrow">Appearance</span><h2>System appearance and language</h2><p>The current Desktop shell uses a dark appearance. Following the Mac appearance and choosing a UI language are planned.</p><span className="planned-badge">Coming later</span></div></SettingsDetail>;
     return <SettingsDetail title={card?.label ?? "Settings"} icon={card?.icon ?? "settings"} onBack={() => onCategory("home")}><div className="settings-card settings-planned"><span className="eyebrow">Planned capability</span><h2>{card?.label}</h2><p>{card?.description}. This page is reserved so the navigation can remain stable while the underlying engine and protocol are implemented.</p><span className="planned-badge">Coming later</span></div></SettingsDetail>;
   }
   return <div className="settings-page"><div className="page-heading"><div><span className="eyebrow">Client preferences</span><h1>Settings</h1><p>Configure Nexum without mixing connection options into the download list.</p></div></div><div className="settings-grid">{SETTINGS_CARDS.map((card) => <button className={`settings-card-tile ${card.available ? "" : "planned"}`} key={card.id} onClick={() => onCategory(card.id)}><span className={`settings-tile-icon icon-${card.id}`}><Icon name={card.icon} size={28} /></span><strong>{card.label}</strong><p>{card.description}</p>{!card.available && <span className="planned-badge">Planned</span>}</button>)}</div></div>;

@@ -311,7 +311,6 @@ select:focus-visible {
   width: 100%;
   min-width: 0;
   border: 0;
-  outline: 0;
   color: var(--text);
   background: transparent;
   font-size: 12px;
@@ -447,9 +446,25 @@ input::placeholder {
   transform: translateY(-1px);
 }
 
+.task-row:focus-within {
+  border-color: rgba(158, 128, 255, 0.7);
+}
+
+.task-row-main:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+
 .task-row-main {
   min-width: 0;
   flex: 1;
+  display: block;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
 }
 
 .task-row-heading {
@@ -533,6 +548,7 @@ input::placeholder {
 }
 
 .task-source {
+  display: block;
   margin-top: 8px;
 }
 
@@ -543,6 +559,10 @@ input::placeholder {
   overflow: hidden;
   border-radius: 4px;
   background: rgba(5, 7, 15, 0.5);
+}
+
+.task-row-main > .progress-track {
+  display: block;
 }
 
 .progress-track > span {
@@ -581,6 +601,7 @@ input::placeholder {
 }
 
 .task-error {
+  display: block;
   margin-top: 7px;
   overflow: hidden;
   color: #f4889a;
@@ -1160,6 +1181,10 @@ input::placeholder {
   gap: 8px;
 }
 
+.modal .input-with-action {
+  margin-top: 7px;
+}
+
 .input-with-action input {
   min-width: 0;
   flex: 1;
@@ -1180,7 +1205,6 @@ input::placeholder {
   padding: 8px 10px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
-  outline: 0;
   color: #eef0fb;
   background: rgba(9, 12, 20, 0.45);
   font-size: 12px;
@@ -1369,5 +1393,29 @@ input::placeholder {
 
   .task-row {
     min-height: 104px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-item,
+  .round-tool,
+  .button,
+  .task-row,
+  .progress-track > span,
+  .floating-add,
+  .settings-card-tile {
+    transition: none;
+  }
+
+  .progress-track > span.indeterminate {
+    animation: none;
+  }
+
+  .button:hover:not(:disabled),
+  .task-row:hover,
+  .task-row.selected,
+  .floating-add:hover,
+  .settings-card-tile:hover {
+    transform: none;
   }
 }
