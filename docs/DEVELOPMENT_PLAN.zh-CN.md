@@ -94,7 +94,8 @@
 - [x] 通过 Tauri 命令持久化 Server 地址和刷新策略
 - [x] 在不丢弃最近一次成功任务列表的情况下呈现连接/操作错误
 - [x] 为每个 Server 将 Bearer/ApiKey 凭据保存到 macOS Keychain，让普通 RPC 和事件订阅都携带凭据，并在 Desktop 设置中保存/清除；账户按传输身份隔离，已校验的 TLS 端点可以使用凭据，明文凭据仍只允许实际回环 peer
-- [ ] 增加键盘导航、可访问性标签、系统外观和中英文 UI 文案
+- [x] 增加键盘导航、可访问性标签、焦点管理和减少动效行为
+- [ ] 跟随系统外观并增加中英文 UI 文案
 
 ### Phase 9 - Browser 集成
 
@@ -148,10 +149,10 @@
 - [x] 补充无效或不完整 TLS 配置、信任/主机名握手失败测试。验证 CLI 和 Desktop 的 RPC/事件订阅凭据门控，并确认 CLI 在 TLS 失败后不会重试明文；私钥不得进入仓库。
 
 分阶段传输决策及其不包含项见 [ADR 0005](decisions/0005-tls-transport.zh-CN.md)。
-2. 完成 Desktop 发布层：键盘导航、可访问性标签、减少动效/系统外观行为，以及中英文文案。
+2. 完成 Desktop 发布层剩余的系统外观行为和中英文文案；键盘导航、可访问性标签、焦点管理和减少动效行为已接入。
 3. 接入 Plugin Provider 并执行其声明的权限。
 4. 用真实处理替换模拟的 Media 操作，再对外提供 Automation 与远程设备工作流。
 
 ## 3. 当前重点
 
-Phase 0-9 各自具有不同程度的脚手架和库级覆盖。运行中的 Server 使用 SQLite 持久化任务并在重启后恢复，在任务入队、启动恢复以及 Worker 完成或失败后自动派发符合条件的 HTTP/HTTPS 工作。`task.start` 仍是手动 kick 和兼容接口。Server 会节流持久化中间进度，通过任务视图返回最近一次传输错误，并在传输成功后写入最终进度与完成状态。活跃的 Server HTTP 传输支持协作式块边界暂停、同进程恢复和破坏性删除取消；阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时，`task.remove` 无法及时停止时会在等待 Worker 30 秒后返回错误。Server 现在会在进程重启后保留并校验 HTTP 部分响应。只有 sidecar 匹配且服务端返回 `206 Partial Content` 时才续传；无效或没有校验器的响应会被丢弃并从零下载。Task 与 Scheduler Events 现在由 Server Event Pump 从 Core 取出，并通过独立的 `events.subscribe` TCP 流发送；Desktop 对通知去抖后刷新完整 Task 快照，事件流不可用时按已配置的刷新策略回退到轮询。Server 还通过同一认证门提供单请求 CORS HTTP `/jsonrpc`，Browser Extension 可以通过 HTTP 或 HTTPS 桥接创建并排队任务。可选的进程级限流现在覆盖通过认证的 TCP 与 HTTP RPC 请求。Server 现在可通过成对配置的 PEM 证书和私钥启用 TLS，同一加密流承载 TCP、事件订阅和 HTTP 桥接；CLI 和 Desktop 使用经过校验的 `tls://host:port` 地址，Browser Extension 将该地址映射到浏览器 HTTPS 并使用浏览器信任库。运行时生成证书的测试现在覆盖 TLS TCP/HTTPS 成功请求、明文拒绝、Browser 扩展 CORS 允许/拒绝行为、TCP/HTTPS 上的配置鉴权、带鉴权的事件订阅、无效或不完整的 Server TLS 材料，以及信任/主机名握手失败。CLI 和 Desktop 测试覆盖连接失败后的凭据门控；CLI 测试还验证 TLS 失败后不会重试明文。Magnet 和本地文件传输仍不受支持。Plugin 与 Media crates 已包含数据类型之外的代码，但 Provider 回调和真实处理尚未接入产品路径。macOS Desktop 信息架构已记录在[Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)中；React 页面现在已有侧边栏/列表/Inspector 壳层、设置页、带原生目标选择器的 Add Download Sheet、明确的 RPC 错误展示、自适应事件刷新、持久化 Server 设置，以及针对已保存回环或 TLS Server 的 Keychain 凭据。键盘/可访问性打磨、本地化和 Desktop 显式 CA/固定证书控制仍待完成。
+Phase 0-9 各自具有不同程度的脚手架和库级覆盖。运行中的 Server 使用 SQLite 持久化任务并在重启后恢复，在任务入队、启动恢复以及 Worker 完成或失败后自动派发符合条件的 HTTP/HTTPS 工作。`task.start` 仍是手动 kick 和兼容接口。Server 会节流持久化中间进度，通过任务视图返回最近一次传输错误，并在传输成功后写入最终进度与完成状态。活跃的 Server HTTP 传输支持协作式块边界暂停、同进程恢复和破坏性删除取消；阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时，`task.remove` 无法及时停止时会在等待 Worker 30 秒后返回错误。Server 现在会在进程重启后保留并校验 HTTP 部分响应。只有 sidecar 匹配且服务端返回 `206 Partial Content` 时才续传；无效或没有校验器的响应会被丢弃并从零下载。Task 与 Scheduler Events 现在由 Server Event Pump 从 Core 取出，并通过独立的 `events.subscribe` TCP 流发送；Desktop 对通知去抖后刷新完整 Task 快照，事件流不可用时按已配置的刷新策略回退到轮询。Server 还通过同一认证门提供单请求 CORS HTTP `/jsonrpc`，Browser Extension 可以通过 HTTP 或 HTTPS 桥接创建并排队任务。可选的进程级限流现在覆盖通过认证的 TCP 与 HTTP RPC 请求。Server 现在可通过成对配置的 PEM 证书和私钥启用 TLS，同一加密流承载 TCP、事件订阅和 HTTP 桥接；CLI 和 Desktop 使用经过校验的 `tls://host:port` 地址，Browser Extension 将该地址映射到浏览器 HTTPS 并使用浏览器信任库。运行时生成证书的测试现在覆盖 TLS TCP/HTTPS 成功请求、明文拒绝、Browser 扩展 CORS 允许/拒绝行为、TCP/HTTPS 上的配置鉴权、带鉴权的事件订阅、无效或不完整的 Server TLS 材料，以及信任/主机名握手失败。CLI 和 Desktop 测试覆盖连接失败后的凭据门控；CLI 测试还验证 TLS 失败后不会重试明文。Magnet 和本地文件传输仍不受支持。Plugin 与 Media crates 已包含数据类型之外的代码，但 Provider 回调和真实处理尚未接入产品路径。macOS Desktop 信息架构已记录在[Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)中；React 页面现在已有侧边栏/列表/Inspector 壳层、设置页、带原生目标选择器的 Add Download Sheet、明确的 RPC 错误展示、自适应事件刷新、持久化 Server 设置，以及针对已保存回环或 TLS Server 的 Keychain 凭据。键盘导航、可访问性标签、焦点管理和减少动效行为已接入。系统外观、本地化和 Desktop 显式 CA/固定证书控制仍待完成。

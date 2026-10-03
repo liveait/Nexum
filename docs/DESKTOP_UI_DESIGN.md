@@ -2,7 +2,7 @@
 
 Status: implemented macOS Desktop UI baseline; remaining items are called out as planned.
 
-This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards with macOS Keychain credential controls, Add Download sheet with a native destination selector, status bar, event-driven refresh, and planned-capability placeholders described here. Keyboard shortcuts and localization remain later slices.
+This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards with macOS Keychain credential controls, Add Download sheet with a native destination selector, status bar, event-driven refresh, keyboard interaction, accessibility labels, focus management, reduced-motion behavior, and planned-capability placeholders described here. System appearance and localization remain later slices.
 
 For the Chinese version, see [DESKTOP_UI_DESIGN.zh-CN.md](DESKTOP_UI_DESIGN.zh-CN.md).
 
@@ -68,7 +68,7 @@ The Downloads header has a filter selector and compact controls:
 - Row actions pause, resume, queue, start, or remove a task when its state permits it.
 - The footer shows HTTP/HTTPS, connection state, and the latest refresh time.
 
-Actions are disabled per row while their request is in flight. Keyboard shortcuts and native context menus remain planned.
+Actions are disabled per row while their request is in flight. Keyboard shortcuts are available for common flows; native context menus remain planned.
 
 ## 3. Task list and inspector
 
@@ -115,7 +115,7 @@ The sheet has one focused flow:
 4. Advanced disclosure for future headers, priority, and bandwidth policy; hidden until those server features exist.
 5. Cancel and Add Download buttons.
 
-Submit creates the task and immediately queues it. The sheet closes only after both RPC calls succeed. If creation succeeds but queueing fails, keep the form open and identify the task so the user can retry queueing without creating a duplicate.
+Submit creates the task and immediately queues it. The sheet closes only after both RPC calls succeed. Retrying queueing without creating a duplicate after a partial failure remains planned.
 
 The current server requires an explicit task ID and destination, so the first implementation keeps those fields visible. A later protocol can make the ID optional without changing the layout.
 
@@ -126,7 +126,7 @@ Settings is a dedicated page with grouped sections. It is not a second task work
 - **Server:** address (default `127.0.0.1:39100`), Connect/Test, last connection result, and protocol version.
 - **Authentication:** in General settings for the active saved Server, show a `Bearer`/`ApiKey` scheme selector, write-only secret field, configured-scheme status, and Save/Clear actions. Save the scheme and secret together in macOS Keychain under that Server address; never read the secret back into React. Saving, clearing, or changing the active Server restarts the event subscription and refreshes the task snapshot. Enable credential storage for loopback plaintext addresses and explicit `tls://` addresses. Plaintext credentials remain loopback-only; the TLS client validates the server name and system root chain before sending a credential.
 - **Updates:** Automatic uses event refreshes and a five-second idle or one-second active polling fallback when the stream is disconnected; Manual disables that polling fallback.
-- **Appearance:** follow the system appearance; reserve language and accent choices for the client settings model.
+- **Appearance:** following the system appearance and offering language or accent choices remain planned.
 - **Notifications:** show task completion, failure, and retry events in the session Activity Center; reserve delivery preferences and mute controls for a later slice.
 - A note that the Server is a separate process in the first release.
 
@@ -163,13 +163,12 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 
 ## 7. macOS interaction and accessibility
 
-- Support keyboard navigation through the sidebar, task list, inspector, and sheets.
-- Provide accessible labels for state badges, progress, and destructive buttons.
-- Use `aria-live="polite"` for connection and operation results; do not announce every progress tick.
-- Respect reduced motion and system color scheme.
-- Use context menus for task actions in addition to toolbar buttons.
-- Keep destructive confirmation wording specific: identify the task and say that an existing destination is preserved by the server.
-- Add English and Simplified Chinese strings through a small typed message catalog before the final UI is shipped.
+- `⌘N` opens Add Download; `⌘F` opens and focuses Downloads search. Escape closes the open sheet or search field. Sidebar and action controls remain in the normal Tab order.
+- Task selection is a button: Enter or Space selects it, Up/Down moves between visible tasks, and Home/End moves to the first or last visible task. Row actions are separate buttons.
+- The Add sheet focuses Source URL, keeps Tab and Shift+Tab inside the dialog, and returns focus to the invoking control when closed. The native destination picker returns focus to Choose after it closes.
+- Navigation uses `aria-current`; task selection announces task state and progress, Inspector progress has progress-bar semantics, and task actions have accessible names. Error and operation messages use alert/status semantics without announcing every progress tick.
+- CSS respects `prefers-reduced-motion` for transitions, hover movement, and indeterminate progress animation. Following the system color scheme remains planned.
+- Native context menus for task actions, destructive confirmation wording, and English/Simplified Chinese strings through a typed message catalog remain planned.
 
 ## 8. Implementation slices
 
@@ -187,16 +186,21 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 - Add Tauri commands for loading and saving desktop settings. [x]
 - Add per-Server macOS Keychain credential Save/Clear controls and attach credentials to RPC and event subscriptions. [x]
 - Queue a newly created task as part of the Add flow. [x]
+- Retry queueing after a partial Add failure without creating a duplicate task. [ ]
 
 ### Slice C — live task surface (partially implemented)
 
 - Add adaptive polling and refresh timestamps. [x]
 - Add progress bars, state badges, and inspector details. [x]
 - Add the dedicated Server event subscription, Tauri event bridge, and debounced task refresh. [x]
-- Add stale-data indicators, keyboard shortcuts, accessibility labels, and context menus. [ ]
+- Add explicit stale-data indicators for retained snapshots after request errors. [ ]
+- Add keyboard navigation, shortcuts, focus management, and accessibility labels. [x]
+- Respect reduced-motion preferences for desktop transitions. [x]
+- Add native context menus for task actions. [ ]
 
 ### Slice D — macOS release polish
 
+- Follow the system light/dark appearance and add English/Simplified Chinese UI strings. [ ]
 - Add light/dark screenshots and visual regression checks.
 - Build the frontend and Tauri app on macOS.
 - Produce a signed/notarized `.app`/`.dmg` when release credentials and identity are available.
@@ -212,4 +216,4 @@ The current implementation satisfies these baseline behaviors:
 - Pause, resume, and remove actions are available only in valid states and report their result.
 - Restarting the app preserves the Server address and refresh policy.
 - The UI never claims Magnet/local-file support before the transfer engines exist.
-- The same flows render in the dark Motrix-style shell; keyboard navigation, system appearance, and localization remain release polish.
+- The same flows render in the dark Motrix-style shell with keyboard navigation, accessible controls, managed focus, and reduced-motion behavior. System appearance and localization remain release polish.
