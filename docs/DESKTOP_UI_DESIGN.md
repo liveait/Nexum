@@ -2,7 +2,7 @@
 
 Status: implemented macOS Desktop UI baseline; remaining items are called out as planned.
 
-This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards with macOS Keychain credential controls, Add Download sheet with a native destination selector, status bar, event-driven refresh, keyboard interaction, accessibility labels, focus management, reduced-motion behavior, and planned-capability placeholders described here. System appearance and localization remain later slices.
+This document defines the macOS-first information architecture and interaction model for the Tauri desktop client. The current `apps/desktop/src/App.tsx` and `App.css` implement the sidebar, Downloads surface, Inspector, Settings cards with macOS Keychain credential controls, Add Download sheet with a native destination selector, status bar, event-driven refresh, keyboard interaction, accessibility labels, focus management, reduced-motion behavior, system light/dark palettes, English/Simplified Chinese UI strings, and planned-capability placeholders described here.
 
 For the Chinese version, see [DESKTOP_UI_DESIGN.zh-CN.md](DESKTOP_UI_DESIGN.zh-CN.md).
 
@@ -40,7 +40,13 @@ Use a macOS-style sidebar and a single main task surface rather than tabs across
 - Minimum window: 960×640; preferred window: 1120×720.
 - Sidebar width: 208–240 px and collapsible.
 - Main content has a list-first layout. A selected task opens an inspector on the right at widths above 1100 px; below that width it opens as a sheet or stacked detail panel.
-- Use the system font stack, system accent color, light/dark system appearance, and native focus rings.
+- Use the system font stack, Nexum's purple accent, light/dark system appearance, and visible keyboard focus rings. A system accent-color option remains planned.
+
+### 2.1.1 Appearance and language implementation decision
+
+- The Desktop shell follows macOS light and dark appearance through `prefers-color-scheme`, with two readable palettes and the existing reduced-motion behavior. A manual theme or accent-color selector remains planned.
+- Language defaults to **System**, resolving a Chinese system language to Simplified Chinese and other languages to English. Settings can override it with **English** or **简体中文**; the choice is persisted alongside the Server address and refresh policy, with older settings defaulting to **System**.
+- A central typed message catalog supplies visible UI text, tooltips, accessible names, task-state labels, validation, and client-generated status messages. The language choice changes presentation only: protocol values and Server requests stay unchanged. Raw diagnostics returned by the Server or operating system remain verbatim so technical details are not lost.
 
 ### 2.2 Sidebar sections
 
@@ -126,11 +132,11 @@ Settings is a dedicated page with grouped sections. It is not a second task work
 - **Server:** address (default `127.0.0.1:39100`), Connect/Test, last connection result, and protocol version.
 - **Authentication:** in General settings for the active saved Server, show a `Bearer`/`ApiKey` scheme selector, write-only secret field, configured-scheme status, and Save/Clear actions. Save the scheme and secret together in macOS Keychain under that Server address; never read the secret back into React. Saving, clearing, or changing the active Server restarts the event subscription and refreshes the task snapshot. Enable credential storage for loopback plaintext addresses and explicit `tls://` addresses. Plaintext credentials remain loopback-only; the TLS client validates the server name and system root chain before sending a credential.
 - **Updates:** Automatic uses event refreshes and a five-second idle or one-second active polling fallback when the stream is disconnected; Manual disables that polling fallback.
-- **Appearance:** following the system appearance and offering language or accent choices remain planned.
+- **Appearance:** the shell follows the system light/dark appearance. A System/English/Simplified Chinese language selector saves immediately and persists with the Server address and refresh policy. Manual theme and accent-color choices remain planned.
 - **Notifications:** show task completion, failure, and retry events in the session Activity Center; reserve delivery preferences and mute controls for a later slice.
 - A note that the Server is a separate process in the first release.
 
-Persist the address and refresh policy in the macOS application support directory through a Tauri command. Keep credentials only in macOS Keychain. The Tauri backend attaches the credential to ordinary RPC calls and the dedicated `events.subscribe` request, and reports Keychain failures without revealing the secret. Desktop on other platforms can connect without authentication, but credential Save and Clear are unsupported.
+Persist the address, refresh policy, and language preference in the macOS application support directory through Tauri commands. Keep credentials only in macOS Keychain. The Tauri backend attaches the credential to ordinary RPC calls and the dedicated `events.subscribe` request, and reports Keychain failures without revealing the secret. Desktop on other platforms can connect without authentication, but credential Save and Clear are unsupported.
 
 ## 6. State model and data freshness
 
@@ -167,8 +173,8 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 - Task selection is a button: Enter or Space selects it, Up/Down moves between visible tasks, and Home/End moves to the first or last visible task. Row actions are separate buttons.
 - The Add sheet focuses Source URL, keeps Tab and Shift+Tab inside the dialog, and returns focus to the invoking control when closed. The native destination picker returns focus to Choose after it closes.
 - Navigation uses `aria-current`; task selection announces task state and progress, Inspector progress has progress-bar semantics, and task actions have accessible names. Error and operation messages use alert/status semantics without announcing every progress tick.
-- CSS respects `prefers-reduced-motion` for transitions, hover movement, and indeterminate progress animation. Following the system color scheme remains planned.
-- Native context menus for task actions, destructive confirmation wording, and English/Simplified Chinese strings through a typed message catalog remain planned.
+- CSS respects `prefers-reduced-motion` for transitions, hover movement, and indeterminate progress animation, and `prefers-color-scheme` for light/dark palettes.
+- A typed English/Simplified Chinese message catalog covers Desktop-owned visible and accessibility-facing strings. Native context menus for task actions and destructive confirmation wording remain planned.
 
 ## 8. Implementation slices
 
@@ -200,7 +206,7 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 
 ### Slice D — macOS release polish
 
-- Follow the system light/dark appearance and add English/Simplified Chinese UI strings. [ ]
+- Follow the system light/dark appearance and add English/Simplified Chinese UI strings. [x]
 - Add light/dark screenshots and visual regression checks.
 - Build the frontend and Tauri app on macOS.
 - Produce a signed/notarized `.app`/`.dmg` when release credentials and identity are available.
@@ -216,4 +222,4 @@ The current implementation satisfies these baseline behaviors:
 - Pause, resume, and remove actions are available only in valid states and report their result.
 - Restarting the app preserves the Server address and refresh policy.
 - The UI never claims Magnet/local-file support before the transfer engines exist.
-- The same flows render in the dark Motrix-style shell with keyboard navigation, accessible controls, managed focus, and reduced-motion behavior. System appearance and localization remain release polish.
+- The same flows render with system light/dark palettes, English/Simplified Chinese UI strings, keyboard navigation, accessible controls, managed focus, and reduced-motion behavior. Native macOS visual and VoiceOver release checks remain pending.

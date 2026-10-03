@@ -13,6 +13,19 @@ const SETTINGS_FILE: &str = "settings.json";
 struct DesktopSettings {
     server: String,
     refresh_interval_secs: u64,
+    #[serde(default)]
+    language: DesktopLanguage,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+enum DesktopLanguage {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh-CN")]
+    SimplifiedChinese,
 }
 
 impl Default for DesktopSettings {
@@ -20,7 +33,34 @@ impl Default for DesktopSettings {
         Self {
             server: "127.0.0.1:39100".to_owned(),
             refresh_interval_secs: 5,
+            language: DesktopLanguage::System,
         }
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::{DesktopLanguage, DesktopSettings};
+
+    #[test]
+    fn old_settings_without_language_follow_system() {
+        let settings: DesktopSettings =
+            serde_json::from_str(r#"{"server":"127.0.0.1:39100","refresh_interval_secs":5}"#)
+                .expect("existing settings should still load");
+        assert_eq!(settings.language, DesktopLanguage::System);
+    }
+
+    #[test]
+    fn language_setting_round_trips() {
+        let settings = DesktopSettings {
+            language: DesktopLanguage::SimplifiedChinese,
+            ..DesktopSettings::default()
+        };
+        let serialized = serde_json::to_string(&settings).expect("settings should serialize");
+        assert!(serialized.contains("\"language\":\"zh-CN\""));
+        let restored: DesktopSettings =
+            serde_json::from_str(&serialized).expect("settings should deserialize");
+        assert_eq!(restored.language, DesktopLanguage::SimplifiedChinese);
     }
 }
 

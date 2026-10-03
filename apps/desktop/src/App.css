@@ -1419,3 +1419,327 @@ input::placeholder {
     transform: none;
   }
 }
+
+/* WebKit follows the macOS appearance through this media query. The default
+   palette above remains the dark appearance. */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    color: #202943;
+    background: #edf1f8;
+    --app-bg: #edf1f8;
+    --workspace-bg: #f7f9fd;
+    --panel: #ffffff;
+    --panel-strong: #f3f5fb;
+    --panel-hover: #edf0fa;
+    --line: rgba(70, 82, 121, 0.16);
+    --line-strong: rgba(70, 82, 121, 0.28);
+    --text: #202943;
+    --text-soft: #47536d;
+    --muted: #5e6a83;
+    --accent: #6545cf;
+    --accent-strong: #5033b5;
+    --accent-soft: rgba(101, 69, 207, 0.1);
+    --green: #188151;
+    --yellow: #a06a0c;
+    --red: #bd3b54;
+    --blue: #276eae;
+  }
+
+  .sidebar {
+    border-right-color: rgba(92, 76, 157, 0.18);
+    color: var(--text);
+    background:
+      radial-gradient(circle at 18% 0%, rgba(183, 159, 255, 0.32), transparent 35%),
+      linear-gradient(165deg, #f4efff 0%, #edf0fc 50%, #e4effb 100%);
+    box-shadow: 12px 0 30px rgba(50, 53, 105, 0.07);
+  }
+
+  .sidebar-brand { color: #443477; }
+
+  .sidebar-icon-button:hover,
+  .sidebar-icon-button:focus-visible {
+    border-color: rgba(101, 69, 207, 0.2);
+    color: var(--accent-strong);
+    background: rgba(101, 69, 207, 0.1);
+  }
+
+  .sidebar-icon-button.add-sidebar-button {
+    color: #fff;
+    background: #6545cf;
+    box-shadow: 0 4px 12px rgba(80, 51, 181, 0.18);
+  }
+
+  .nav-item { color: #4a5572; }
+  .nav-item:hover {
+    color: #342767;
+    background: rgba(101, 69, 207, 0.08);
+  }
+
+  .nav-item.selected {
+    border-color: rgba(101, 69, 207, 0.22);
+    color: #342767;
+    background: linear-gradient(90deg, rgba(101, 69, 207, 0.17), rgba(86, 143, 220, 0.09));
+    box-shadow: inset 3px 0 0 var(--accent), 0 5px 16px rgba(68, 52, 119, 0.06);
+  }
+
+  .nav-count { background: var(--accent); }
+  .sidebar-divider { background: rgba(70, 82, 121, 0.16); }
+
+  .workspace {
+    background:
+      radial-gradient(circle at 86% -14%, rgba(148, 143, 221, 0.1), transparent 34%),
+      var(--workspace-bg);
+  }
+
+  .count-pill,
+  .round-tool,
+  .search-row {
+    background: rgba(255, 255, 255, 0.72);
+  }
+
+  .round-tool { color: #59657f; }
+  .round-tool:hover,
+  .round-tool.active {
+    border-color: rgba(101, 69, 207, 0.4);
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+  }
+
+  .round-tool.muted {
+    color: #59657f;
+    opacity: 1;
+  }
+
+  .search-row input::placeholder,
+  input::placeholder { color: #6c7690; }
+
+  .message-banner.error {
+    border-color: rgba(189, 59, 84, 0.27);
+    color: #8d243c;
+    background: #fcecf0;
+  }
+
+  .message-banner.success {
+    border-color: rgba(24, 129, 81, 0.24);
+    color: #12643f;
+    background: #e7f5ed;
+  }
+
+  .message-banner button,
+  .text-button,
+  .back-button { color: var(--accent-strong); }
+
+  .back-button:hover { color: #351f87; }
+
+  .button {
+    background: #fff;
+    box-shadow: 0 2px 7px rgba(43, 50, 82, 0.06);
+  }
+
+  .button:hover:not(:disabled) {
+    border-color: rgba(101, 69, 207, 0.35);
+    background: #f2efff;
+  }
+
+  .button.primary {
+    border-color: #6545cf;
+    color: #fff;
+    background: linear-gradient(135deg, #7050d6, #5267c2);
+    box-shadow: 0 7px 18px rgba(80, 51, 181, 0.2);
+  }
+
+  .button.primary:hover:not(:disabled) {
+    border-color: #4f31af;
+    background: linear-gradient(135deg, #6040c8, #465bb5);
+  }
+
+  .danger-text,
+  .task-error,
+  .inspector-error { color: #a72e48 !important; }
+
+  .eyebrow { color: #626d87; }
+
+  .task-row,
+  .inspector,
+  .metric-card,
+  .dashboard-card,
+  .settings-card-tile,
+  .settings-card {
+    background: linear-gradient(145deg, #fff, #f8faff);
+    box-shadow: 0 7px 20px rgba(43, 50, 82, 0.06);
+  }
+
+  .task-row:hover,
+  .task-row.selected {
+    border-color: rgba(101, 69, 207, 0.42);
+    background: linear-gradient(125deg, #fff, #f0efff);
+  }
+
+  .task-row:focus-within { border-color: var(--accent); }
+
+  .task-row-heading strong,
+  .inspector h2,
+  .settings-card h2,
+  .modal h2,
+  .empty-state h2,
+  .page-heading h1,
+  .settings-detail-heading h1,
+  .unavailable-page h1,
+  .metric-card > strong,
+  .dashboard-card h2,
+  .activity-row strong,
+  .notifications-empty h2,
+  .notification-row strong,
+  .settings-card-tile strong { color: var(--text); }
+
+  .state-created,
+  .state-queued,
+  .state-retrying,
+  .status-pill.connecting {
+    border-color: rgba(160, 106, 12, 0.25);
+    color: #795009;
+    background: #fff4d9;
+  }
+
+  .state-downloading,
+  .status-pill.connected {
+    border-color: rgba(39, 110, 174, 0.25);
+    color: #1d5a90;
+    background: #e5f2fc;
+  }
+
+  .state-paused {
+    border-color: rgba(101, 69, 207, 0.24);
+    color: #5033b5;
+    background: #eee9fc;
+  }
+
+  .state-completed {
+    border-color: rgba(24, 129, 81, 0.24);
+    color: #12643f;
+    background: #e5f4eb;
+  }
+
+  .state-failed,
+  .status-pill.error {
+    border-color: rgba(189, 59, 84, 0.25);
+    color: #9a2941;
+    background: #fceaf0;
+  }
+
+  .status-pill.disconnected { background: #edf0f7; }
+
+  .task-source,
+  .task-destination,
+  .task-row-meta,
+  .inspector-empty,
+  .detail-list dt,
+  .dashboard-empty,
+  .dashboard-connection,
+  .notifications-empty,
+  .notification-row span:last-child,
+  .field-help,
+  .settings-planned p { color: var(--muted); }
+
+  .progress-track { background: #dce2f1; }
+  .progress-track > span { box-shadow: none; }
+
+  .row-action { color: #4c5873; }
+  .row-action:hover:not(:disabled) {
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+  }
+
+  .inspector-icon,
+  .empty-icon,
+  .unavailable-icon,
+  .settings-tile-icon {
+    border-color: rgba(101, 69, 207, 0.22);
+    color: var(--accent-strong);
+    background: #f0ebff;
+  }
+
+  .metric-icon {
+    color: var(--accent-strong);
+    background: #f0ebff;
+  }
+
+  .icon-appearance { color: #225c9e; background: #e8f3fc; }
+  .icon-downloads { color: #18774d; background: #e6f5ec; }
+  .icon-bittorrent { color: #94600a; background: #fff2d9; }
+  .icon-integration { color: #793da9; background: #f5eafd; }
+  .icon-network { color: #3f60a5; background: #eaf0fc; }
+  .icon-advanced { color: #ad3357; background: #fbeaf0; }
+  .icon-about { color: #4b5977; background: #edf0f6; }
+
+  .inspector-progress strong,
+  .detail-list dd,
+  .activity-row,
+  .status-mode,
+  .credential-help strong { color: var(--text-soft); }
+
+  .empty-state p,
+  .page-heading p,
+  .unavailable-page p,
+  .metric-card > span,
+  .settings-card-tile p { color: var(--muted); }
+
+  .status-bar {
+    color: var(--muted);
+    background: #f0f3fa;
+  }
+
+  .activity-row { border-bottom-color: var(--line); }
+
+  .planned-badge {
+    border-color: rgba(101, 69, 207, 0.24);
+    color: var(--accent-strong);
+    background: #f0ebff;
+  }
+
+  .notifications-empty svg { color: var(--accent); }
+  .notification-row { background: #fff; }
+
+  .settings-card-tile:hover {
+    border-color: rgba(101, 69, 207, 0.42);
+    background: linear-gradient(145deg, #fff, #f0efff);
+  }
+
+  .settings-card-tile.planned { opacity: 1; }
+
+  .settings-card label,
+  .modal label { color: var(--text-soft); }
+
+  .settings-card input,
+  .settings-card select,
+  .modal input {
+    color: var(--text);
+    background: #fff;
+  }
+
+  .settings-card input:focus,
+  .settings-card select:focus,
+  .modal input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .credential-guidance { color: #795009; }
+  .credential-feedback.error,
+  .form-error { color: #9a2941; }
+  .credential-feedback.success { color: #12643f; }
+
+  .modal-backdrop { background: rgba(37, 42, 65, 0.34); }
+  .modal {
+    border-color: rgba(101, 69, 207, 0.26);
+    background: linear-gradient(145deg, #fff, #f7f8fe);
+    box-shadow: 0 24px 65px rgba(37, 42, 65, 0.22);
+  }
+
+  .close-button { color: var(--muted); }
+  .close-button:hover {
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+  }
+}
