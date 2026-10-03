@@ -1227,6 +1227,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::thread;
+    use std::time::Instant;
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -1350,6 +1351,38 @@ mod tests {
         (address, first_sent, release_tx, worker)
     }
 
+    fn pause_at_first_progress(
+        control: &HttpTransferControl,
+        progress: mpsc::Receiver<Progress>,
+        release_progress: mpsc::Sender<()>,
+    ) -> Progress {
+        let first_progress = progress.recv_timeout(Duration::from_secs(3)).unwrap();
+        let pause_control = control.clone();
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let requester = thread::spawn(move || {
+            paused_tx.send(pause_control.request_pause()).unwrap();
+        });
+
+        // Keep the worker in its progress callback until the pause request is
+        // registered, so it cannot enter the next blocking response read.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !control.is_pause_requested() {
+            assert!(
+                Instant::now() < deadline,
+                "pause request was not registered"
+            );
+            thread::yield_now();
+        }
+        release_progress.send(()).unwrap();
+        paused_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        requester.join().unwrap();
+        assert!(control.is_paused());
+        first_progress
+    }
+
     #[derive(Default)]
     struct FakeEngine;
 
@@ -1467,25 +1500,30 @@ mod tests {
         let (source, first_sent, release, server) = serve_in_chunks(first, second);
         let control = HttpTransferControl::new();
         let (progress_tx, progress_rx) = mpsc::channel();
+        let (release_progress_tx, release_progress_rx) = mpsc::channel();
         let source_for_worker = source.clone();
         let destination_for_worker = destination.to_str().unwrap().to_owned();
         let control_for_worker = control.clone();
         let worker = thread::spawn(move || {
+            let mut first_progress = Some(progress_tx);
             HttpEngine::new().download_to_with_control(
                 &source_for_worker,
                 &destination_for_worker,
                 &control_for_worker,
                 |progress| {
-                    progress_tx.send(progress.clone()).unwrap();
+                    if let Some(progress_tx) = first_progress.take() {
+                        progress_tx.send(progress).unwrap();
+                        release_progress_rx.recv().unwrap();
+                    }
                     Ok(())
                 },
             )
         });
 
         first_sent.recv().unwrap();
-        progress_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        control.request_pause().unwrap();
-        assert!(control.is_paused());
+        let first_progress = pause_at_first_progress(&control, progress_rx, release_progress_tx);
+        assert!(first_progress.downloaded_bytes > 0);
+        assert!(first_progress.downloaded_bytes < 64 * 1024);
         assert!(!destination.exists());
 
         control.resume().unwrap();
@@ -1507,20 +1545,29 @@ mod tests {
         let second = vec![b'b'; 32 * 1024];
         let (source, first_sent, release, server) = serve_in_chunks(first, second);
         let control = HttpTransferControl::new();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let (release_progress_tx, release_progress_rx) = mpsc::channel();
         let source_for_worker = source.clone();
         let destination_for_worker = destination.to_str().unwrap().to_owned();
         let control_for_worker = control.clone();
         let worker = thread::spawn(move || {
+            let mut first_progress = Some(progress_tx);
             HttpEngine::new().download_to_with_control(
                 &source_for_worker,
                 &destination_for_worker,
                 &control_for_worker,
-                |_| Ok(()),
+                |progress| {
+                    if let Some(progress_tx) = first_progress.take() {
+                        progress_tx.send(progress).unwrap();
+                        release_progress_rx.recv().unwrap();
+                    }
+                    Ok(())
+                },
             )
         });
 
         first_sent.recv().unwrap();
-        control.request_pause().unwrap();
+        pause_at_first_progress(&control, progress_rx, release_progress_tx);
         control.cancel();
         assert!(matches!(
             worker.join().unwrap(),
@@ -1773,20 +1820,29 @@ mod tests {
         let (cancel_url, first_sent, release, server) =
             serve_in_chunks(vec![b'a'; 32 * 1024], vec![b'b'; 32 * 1024]);
         let control = HttpTransferControl::new();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let (release_progress_tx, release_progress_rx) = mpsc::channel();
         let control_for_worker = control.clone();
         let destination_for_worker = cancel_destination.to_str().unwrap().to_owned();
         let partial_for_worker = cancel_partial.clone();
         let worker = thread::spawn(move || {
+            let mut first_progress = Some(progress_tx);
             HttpEngine::new().download_to_resumable_with_control(
                 &cancel_url,
                 &destination_for_worker,
                 &partial_for_worker,
                 &control_for_worker,
-                |_| Ok(()),
+                |progress| {
+                    if let Some(progress_tx) = first_progress.take() {
+                        progress_tx.send(progress).unwrap();
+                        release_progress_rx.recv().unwrap();
+                    }
+                    Ok(())
+                },
             )
         });
         first_sent.recv().unwrap();
-        control.request_pause().unwrap();
+        pause_at_first_progress(&control, progress_rx, release_progress_tx);
         control.cancel();
         assert!(matches!(
             worker.join().unwrap(),
