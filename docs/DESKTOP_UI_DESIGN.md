@@ -39,7 +39,7 @@ Use a macOS-style sidebar and a single main task surface rather than tabs across
 
 - Default native window: 1200×800, so the task list and Inspector can appear together when downloads are present. The window remains resizable; no native minimum size is configured.
 - The sidebar currently has a fixed width of 226 px (194 px at viewport widths of 980 px or less). A collapse control remains planned.
-- Main content has a list-first layout. Above the 980 px viewport breakpoint, the enabled Inspector appears beside the task list and shows the selected task. At 980 px or below, the current CSS hides the Inspector and shows a single-column list; a sheet or stacked detail panel for narrow windows remains planned.
+- Main content has a list-first layout. Above the 980 px viewport breakpoint, the enabled Inspector appears beside the task list. At 980 px or below, it appears directly after the selected task row so details remain close to that row even in a long list. Both detail controls show or hide it at either width; closing it also lets the list use the full width.
 - Use the system font stack, Nexum's purple accent, light/dark system appearance, and visible keyboard focus rings. A system accent-color option remains planned.
 
 ### 2.1.1 Appearance and language implementation decision
@@ -69,7 +69,7 @@ The Downloads header has a filter selector and compact controls:
 
 - **Add**: opens the Add Download sheet from the sidebar or floating action button.
 - **Filter**: selects All, Active, Queued, Completed, or Failed downloads.
-- **Inspector**: toggles the right-hand task details panel.
+- **Inspector**: toggles task details beside the list in wide windows or below the selected row in narrow windows.
 - **Search**: filters task ID, source, destination, and state locally.
 - Row actions pause, resume, queue, start, or remove a task when its state permits it.
 - The footer shows HTTP/HTTPS, connection state, and the latest refresh time.

@@ -413,9 +413,13 @@ input::placeholder {
 .download-layout {
   display: grid;
   min-height: 100%;
-  grid-template-columns: minmax(0, 1fr) 310px;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: start;
+}
+
+.download-layout.with-inspector {
+  grid-template-columns: minmax(0, 1fr) 310px;
 }
 
 .task-list {
@@ -641,6 +645,10 @@ input::placeholder {
   border-radius: 11px;
   background: linear-gradient(155deg, rgba(28, 34, 50, 0.9), rgba(20, 25, 39, 0.9));
   box-shadow: 0 7px 20px rgba(3, 5, 13, 0.14);
+}
+
+.narrow-inspector {
+  display: none;
 }
 
 .inspector-empty {
@@ -1342,7 +1350,7 @@ input::placeholder {
 }
 
 @media (max-width: 1180px) {
-  .download-layout {
+  .download-layout.with-inspector {
     grid-template-columns: minmax(0, 1fr) 270px;
   }
 
@@ -1366,12 +1374,16 @@ input::placeholder {
     flex-basis: 194px;
   }
 
-  .download-layout {
+  .download-layout.with-inspector {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .inspector {
+  .desktop-inspector {
     display: none;
+  }
+
+  .narrow-inspector {
+    display: block;
   }
 
   .settings-grid {

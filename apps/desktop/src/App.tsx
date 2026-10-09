@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -809,7 +809,21 @@ function DownloadsView({
       {searchOpen && <div id="download-search" className="search-row"><Icon name="search" size={16} /><input ref={searchInputRef} value={searchQuery} onChange={(event) => onSearchQuery(event.target.value)} placeholder={t("Search downloads")} aria-label={t("Search downloads")} /></div>}
       {(error || notice) && <div className={`message-banner ${error ? "error" : "success"}`}><span>{renderStatus(error || notice, t)}</span>{error && <button onClick={onRefresh}>{t("Retry")}</button>}</div>}
       <div className="download-content">
-        {visibleTasks.length === 0 ? <EmptyDownloads onAdd={onAdd} hasFilter={filter !== "all" || Boolean(searchQuery)} /> : <div className="download-layout"><section className="task-list" aria-label={t("Downloads")}>{visibleTasks.map((task) => <TaskRow key={task.id} task={task} selected={selectedTask?.id === task.id} action={actionByTask[task.id]} onSelect={() => onSelect(task.id)} onPause={() => onPause(task.id)} onResume={() => onResume(task.id)} onRemove={() => onRemove(task.id)} onQueue={() => onQueue(task.id)} onStart={() => onStart(task.id)} />)}</section>{showInspector && <TaskInspector task={selectedTask} server={server} />}</div>}
+        {visibleTasks.length === 0 ? (
+          <EmptyDownloads onAdd={onAdd} hasFilter={filter !== "all" || Boolean(searchQuery)} />
+        ) : (
+          <div className={`download-layout ${showInspector ? "with-inspector" : ""}`}>
+            <section className="task-list" aria-label={t("Downloads")}>
+              {visibleTasks.map((task) => (
+                <Fragment key={task.id}>
+                  <TaskRow task={task} selected={selectedTask?.id === task.id} action={actionByTask[task.id]} onSelect={() => onSelect(task.id)} onPause={() => onPause(task.id)} onResume={() => onResume(task.id)} onRemove={() => onRemove(task.id)} onQueue={() => onQueue(task.id)} onStart={() => onStart(task.id)} />
+                  {showInspector && selectedTask?.id === task.id && <TaskInspector task={task} server={server} className="narrow-inspector" />}
+                </Fragment>
+              ))}
+            </section>
+            {showInspector && <TaskInspector task={selectedTask} server={server} className="desktop-inspector" />}
+          </div>
+        )}
       </div>
       <footer className="status-bar"><span className="status-mode">HTTP/HTTPS</span><span className="status-transfer"><span>↓ —</span><span>↑ —</span></span><span className="status-spacer" /><span className="status-item"><span className={`status-light ${connection}`} />{connection === "connected" ? t("Server connected") : t("Server unavailable")}</span><span className="status-item"><span className={`status-light ${eventStreamConnected ? "ready" : "connecting"}`} />{eventStreamConnected ? t("Live updates") : t("Polling fallback")}</span><span className="status-item"><span className="status-light ready" />{loading ? t("Syncing") : formatUpdatedAt(lastUpdatedAt, t)}</span></footer>
       <button className="floating-add" onClick={(event) => onAdd(event.currentTarget)} title={t("Add download")} aria-label={t("Add download")}>＋</button>
@@ -843,11 +857,11 @@ function TaskRow({ task, selected, action, onSelect, onPause, onResume, onRemove
   </article>;
 }
 
-function TaskInspector({ task, server }: { task: TaskItem | null; server: string }) {
+function TaskInspector({ task, server, className = "" }: { task: TaskItem | null; server: string; className?: string }) {
   const t = useTranslation();
-  if (!task) return <aside className="inspector inspector-empty"><span className="inspector-icon"><Icon name="info" size={24} /></span><p>{t("Select a download to inspect it.")}</p></aside>;
+  if (!task) return <aside className={`inspector inspector-empty ${className}`}><span className="inspector-icon"><Icon name="info" size={24} /></span><p>{t("Select a download to inspect it.")}</p></aside>;
   const progress = taskProgress(task);
-  return <aside className="inspector" aria-label={t("Task details")}><span className="eyebrow">{t("Task details")}</span><h2>{task.id}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={t("{id} download progress", { id: task.id })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={progress === null ? t("{bytes} downloaded; total size unknown", { bytes: formatBytes(task.downloaded_bytes) }) : undefined}><span className={progress === null ? "indeterminate" : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</strong></div><dl className="detail-list"><div><dt>{t("Source")}</dt><dd title={task.source}>{task.source}</dd></div><div><dt>{t("Destination")}</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>{t("Server")}</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>{t("Latest error")}</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>{t("Copy error")}</button></div>}</aside>;
+  return <aside className={`inspector ${className}`} aria-label={t("Task details")}><span className="eyebrow">{t("Task details")}</span><h2>{task.id}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={t("{id} download progress", { id: task.id })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={progress === null ? t("{bytes} downloaded; total size unknown", { bytes: formatBytes(task.downloaded_bytes) }) : undefined}><span className={progress === null ? "indeterminate" : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</strong></div><dl className="detail-list"><div><dt>{t("Source")}</dt><dd title={task.source}>{task.source}</dd></div><div><dt>{t("Destination")}</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>{t("Server")}</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>{t("Latest error")}</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>{t("Copy error")}</button></div>}</aside>;
 }
 
 function EmptyDownloads({ onAdd, hasFilter }: { onAdd: (trigger?: HTMLElement) => void; hasFilter: boolean }) {
