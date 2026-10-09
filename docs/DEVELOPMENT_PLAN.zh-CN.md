@@ -97,7 +97,7 @@
 - [x] 增加键盘导航、可访问性标签、焦点管理和减少动效行为
 - [x] Desktop 跟随 macOS 明暗外观，并为两种外观提供可读配色
 - [x] 增加持久化的跟随系统/英文/简体中文语言选择，并本地化 Desktop 可见及无障碍文案
-- [ ] 固定 Desktop 的 pnpm 与 Tauri CLI 版本、提交依赖锁文件，并在 CI 中使用冻结依赖构建未签名的 macOS App；Browser 扩展另行处理
+- [x] 固定 Desktop 的 pnpm 与 Tauri CLI 版本、提交依赖锁文件，并在 CI 中使用冻结依赖构建未签名的 macOS App；Browser 扩展另行处理
 - [ ] 增加明暗模式截图，并完成原生 macOS 视觉、双语与 VoiceOver 发布检查
   - [x] 已用原生 debug App 拍摄下载列表、设置及添加下载的明暗模式截图；见[发布流程](RELEASE.zh-CN.md#macos-原生界面截图留证)。
   - [x] 已在原生 debug App 中验证应用内中英文即时切换、辅助功能名称和重启后保留英文选项。

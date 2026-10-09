@@ -97,7 +97,7 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Add keyboard navigation, accessible labels, focus management, and reduced-motion behavior
 - [x] Follow the macOS light/dark appearance with readable Desktop palettes
 - [x] Add a persisted System/English/Simplified Chinese language choice and localized visible and accessibility-facing Desktop strings
-- [ ] Pin the Desktop pnpm and Tauri CLI versions, commit its dependency lockfile, and build an unsigned macOS app in CI from frozen dependencies; handle the Browser extension separately
+- [x] Pin the Desktop pnpm and Tauri CLI versions, commit its dependency lockfile, and build an unsigned macOS app in CI from frozen dependencies; handle the Browser extension separately
 - [ ] Capture light/dark screenshots and complete native macOS visual, bilingual, and VoiceOver release checks
   - [x] Capture native debug-app Downloads, Settings, and Add Download states in both appearances; see [Release Process](RELEASE.md#native-macos-visual-evidence).
   - [x] Verify immediate in-app English/Simplified Chinese switching, accessible names, and English persistence after restart in the native debug app.
