@@ -1,168 +1,78 @@
 # Nexum Development Plan
 
-This plan distinguishes code-level foundations from an end-to-end feature available through the current server and clients. Checked items are present in the repository; unchecked items still need implementation or wiring. Planned work describes direction, not a fixed release schedule. See [Architecture](ARCHITECTURE.md) for current call paths and [Contributing](../CONTRIBUTING.md) for engineering and submission guidance.
+This plan starts from the code as of October 9, 2026, and orders work around a standalone macOS downloader first, followed by download capabilities and ecosystem integration. The comparison uses the [official Motrix feature list](https://github.com/agalwood/Motrix/blob/main/README.zh-CN.md) and its [v2.0.0-beta.46 release](https://github.com/agalwood/Motrix/releases/tag/v2.0.0-beta.46). It is a feature-gap reference, not a claim that we tested every Motrix feature or a commitment to copy every implementation or release on a fixed date.
 
-## 1. Milestones
+“Present” means a code path is wired, “needs validation” means an implementation lacks a check of the stated artifact, and “planned” means there is no usable end-to-end implementation. A capability is delivered only after its milestone acceptance criteria pass. See [Architecture](ARCHITECTURE.md) for current call paths, [Release Process](RELEASE.md) for build, screenshot, and release steps, and [ADR 0005](decisions/0005-tls-transport.md) for the completed TLS decision.
 
-### Phase 0 - Project Foundation
+## 1. Current baseline and Motrix gaps
 
-- [x] Repository structure, MIT license, and contribution/governance documents
-- [x] English and Simplified Chinese documentation
-- [x] Rust workspace with server, CLI, desktop Tauri crate, and core crates
-- [x] GitHub CI workflow configured for formatting, workspace check/test, and Clippy
+| Area | Nexum today | Remaining gap |
+| --- | --- | --- |
+| Tasks and HTTP/HTTPS | The server stores and recovers tasks in SQLite. Queueing, concurrency slots, retries, progress, pause, and removal are wired. Single-connection HTTP downloads use staged files and cross-restart resume validated by ETag/Last-Modified. | Real speed and ETA, limits applied to transfers, prompt pause and worker cancellation on removal during a blocked read, and safe multi-connection downloads of one file. Responses without validators restart from byte zero. |
+| macOS Desktop | The native Tauri app has a task list, Add Download, Settings, Keychain credentials, light/dark appearance, and English/Chinese UI; debug-app screenshots exist. | The server must still be started separately. The release app built with the pinned Tauri CLI still needs its own launch, final screenshots, actual VoiceOver speech, and Reduce Motion checks. |
+| Security and protocol | TCP/HTTP JSON-RPC, event subscriptions, optional authentication, RPC rate limiting, and verified TLS are wired. | Durable event replay, explicit CA/certificate pinning, and stricter protocol compatibility checks can follow concrete needs; completed TLS wiring is no longer a near-term workstream. |
+| FTP and BT/magnet | The magnet resolver only checks for the presence of an `xt=urn:btih:` parameter; local-file sources are only validated; the server dispatches only HTTP/HTTPS workers. FTP has no transfer path. | Real FTP, torrent, and magnet downloads with control, recovery, and integrity checks. The synchronous general Engine Adapter cannot directly provide the long-running control already implemented in the server HTTP worker. |
+| Browser and system integration | The extension can submit links through HTTP/HTTPS `/jsonrpc`. | The extension has no credential setting and writes destinations to `/tmp/nexum-*`. It lacks locked release dependencies, browser validation, and desktop integration such as menu bar, notifications, and URL handling. |
+| Distribution and extensibility | CI checks Rust and builds an unsigned macOS app. Plugin, Media, and Automation have foundation models. | No distribution signing, notarization, install/upgrade validation, or automated release. Windows/Linux installers are unvalidated. Plugin providers, real media processing, and automation are not wired into the product path. |
 
-### Phase 1 - Domain and Task Core
+## 2. Delivery milestones
 
-- [x] Domain value types and download task model
-- [x] Validated task state machine
-- [x] In-memory task service and task events
-- [x] Unit tests for task lifecycle and transitions
+The order expresses dependencies and priority, not dates. M0–M3 form the first releasable macOS HTTP downloader path; M4–M7 close the core Motrix capability gaps; M8–M9 follow once those paths are stable. HTTP engine work and distribution preparation may overlap, but M3 release validation must use the final actual artifact.
 
-### Phase 2 - Scheduler
+### M0 — Validate the existing release app natively
 
-- [x] Priority queue and concurrent-task limit
-- [x] Retry policy and pause/resume operations
-- [x] Bandwidth-policy interface and limit calculation
-- [x] Scheduler events and controlled unit tests
-- [ ] Apply calculated bandwidth limits to transfers
-- [x] Server-side dispatcher automatically fills available HTTP worker slots for queued work and retries; Scheduler remains transport-agnostic
+- **Work:** Launch the release app built with the pinned Tauri CLI on its own. Capture light, dark, and narrow-window evidence using the [Release Process](RELEASE.md#native-macos-visual-evidence). Check English/Chinese, keyboard focus, actual VoiceOver speech, and indeterminate progress under Reduce Motion in the real app.
+- **Acceptance:** The same candidate app connects to a local server, completes a known HTTP file, and shows the right state; the native checks have recorded results. Debug-app screenshots do not stand in for release-artifact evidence. Fix and repeat any failing check.
 
-### Phase 3 - Storage
+### M1 — A double-click-ready macOS HTTP app
 
-- [x] `TaskRepository` and in-memory implementation
-- [x] SQLite task metadata/progress repository with schema version and migration
-- [x] `Core::recover` to rebuild queued work and persist normalized recovery states
-- [x] Open SQLite and call recovery in the server startup path
-- [x] Verify task continuity across a real server restart
+- **Design first:** Document how the Desktop bundles, starts, probes, reuses, and stops a local server; how it distinguishes an app-managed instance from a user-configured external server; and the stable data directory, default download directory, old-data migration, port-conflict, and local-authentication policies. Preserve external server connections under Settings.
+- **Implementation slices:** Bundle the server with the app and manage its lifecycle. Put the task database in a stable application data directory while preserving destination-side partial files and atomic completion. Derive a safe filename from the URL/trusted response metadata, generate task IDs, handle name collisions, and let users override the destination. Provide a controlled default download directory, protect the managed local connection, and show actionable failure/recovery states.
+- **Acceptance:** In a clean macOS user environment, double-clicking the app and pasting a URL downloads to the default directory without a separate terminal or manually entering a task ID/destination path. Tasks and files survive quit, relaunch, abnormal interruption, and upgrade. A busy port or failed server startup is diagnosable; the app neither connects to nor stops an unknown process. External server mode still works.
 
-### Phase 4 - Resolver
+### M2 — HTTP quality needed for the first release
 
-- [x] Resolver request/result/error model and registry
-- [x] HTTP/HTTPS validation, magnet `xt=urn:btih:` parameter presence check, and existing-local-path validation
-- [x] Resolver tests and Core task-creation validation
-- [x] Route eligible queued HTTP/HTTPS tasks through the server dispatcher after `task.queue`, startup recovery, or worker completion/failure
-- [ ] Route magnet and local-file sources to compatible transfer engines
-- [ ] Add actual magnet and local-source transfer paths
+- **Work:** Compute speed from actual transferred bytes; show ETA only when the length is trustworthy. Define global/per-task limit settings and pass Scheduler-calculated limits to workers. Make `task.pause` and `task.remove` (which cancels the worker internally) respond promptly during blocked reads while preserving the existing destination and recoverable partial files.
+- **Acceptance:** Controlled local servers cover slow responses, disconnects, changed validators, invalid `Content-Range`, competing tasks, retries, and destination conflicts. Measured throughput over a sustained window respects configured limits; pause and removal each finish within 5 seconds against a local stalled-response fixture. Successful files have the correct hashes; interruption, failure, and removal do not overwrite an existing good destination.
 
-### Phase 5 - Engine Adapter
+### M3 — Installable and trusted macOS distribution
 
-- [x] Adapter capabilities, task mapping, and engine registry
-- [x] Simulated in-memory engine and blocking HTTP GET engine with redirect following
-- [x] Controlled engine tests
-- [x] Run the HTTP engine from the server dispatcher; CLI and Desktop use the same RPC and may still call `task.start` as a manual kick
-- [x] Stage HTTP downloads in a `.part` file and rename only a complete response to the destination
-- [x] Add incremental progress reporting and persistence for real transfers
-- [x] Add cooperative cancellation and same-process pause/resume behavior for server HTTP transfers
-- [x] Add cross-restart HTTP resume with a stable destination-side partial file, atomic sidecar metadata, ETag/Last-Modified validation, and `Range`/`If-Range` requests; restart from zero when the validator or response range does not match
+- **Work:** Pin build inputs and versions, produce an installer for each claimed architecture, and complete Developer ID signing, notarization, stapling, Gatekeeper, install/upgrade/uninstall, and clean-machine smoke checks. Release workflow and update policy must match the actual support scope.
+- **Acceptance:** A user installs the release artifact and launches it by double-clicking, without development tools or a terminal, then completes M1–M2 HTTP downloads. System signing and notarization checks pass; upgrade preserves task data. Release notes state version, hashes, supported macOS/CPU architectures, and unfinished FTP/BT/extension capabilities. Keep procedures and evidence in the [Release Process](RELEASE.md).
 
-### Phase 6 - Nexum Protocol and Security
+### M4 — Multi-connection HTTP downloads of one file
 
-- [x] JSON-RPC 2.0 request/response and error objects
-- [x] Task create/get/list/queue/start/pause/resume/remove and server inspection methods
-- [x] V1 version type, request field, and `server.version` method
-- [x] Task/scheduler event envelopes and buffering
-- [x] Credential, TLS, and rate-limit types with protocol/security unit tests
-- [ ] Enforce protocol compatibility beyond envelope validation
-- [x] Publish events through a dedicated TCP subscription and expose them to clients; reconnects begin with a full task snapshot because the stream has no replay buffer
-- [x] Validate and enforce configured Bearer/ApiKey credentials for RPC requests and event subscriptions
-- [x] Enforce optional configured RPC rate limiting for TCP and HTTP `/jsonrpc`
-- [x] Enforce configured TLS on the Server listener, CLI transport, Desktop RPC/event stream, and Browser HTTPS bridge
+- **Work:** Once the single-connection path is stable, add fallback-capable `Range` segments, persistent segment-level state, and atomic completion. Keep concurrency, pause, retry, and cross-restart resume coverage.
+- **Acceptance:** Controlled servers serve valid `Range`, reject `Range`, change validators, and return abnormal segment lengths. Single- and multi-connection results have identical hashes. Unsupported segments or failed validation fall back safely without overwriting an existing good destination.
 
-### Phase 7 - Server and CLI
+### M5 — General transfer runtime contract and FTP
 
-- [x] Loopback TCP server using line-delimited JSON-RPC
-- [x] CLI TCP client with task-control, address configuration, and server inspection commands
-- [x] CLI TLS client with explicit `tls://host:port` addresses, system-root hostname verification, and credential gating
-- [x] Server CLI flags and key-value configuration parsing
-- [x] Enforce `max_connections` at TCP admission; excess connections close before request processing
-- [x] Apply `require_auth` with `auth_scheme` and `auth_token` before RPC dispatch and event subscription
-- [x] Use `data_dir` for SQLite persistence and restart recovery
-- [x] Make normal `task.start` launch a real HTTP/HTTPS download for supported sources
-- [x] Persist transfer errors and expose them through task views instead of only server logs
-- [x] Automatically dispatch queued retries and newly queued HTTP/HTTPS work when a scheduler slot is available
+- **Design first:** Define capability declarations, asynchronous start/progress, pause/cancel, retry, recovery metadata, errors, and server dispatch for long-running engines. The current `EngineAdapter::start` returns synchronously while real HTTP control lives in a separate server worker. Move HTTP through the new contract without regressing M2–M4 before adding another protocol. Decide the FTP/FTPS and credential support scope explicitly.
+- **Acceptance:** A real FTP source can be created, queued, downloaded, paused, resumed, canceled, and recovered after restart from CLI and Desktop; restart safely from byte zero when the server does not support resume. Authentication failures, disconnects, and destination conflicts have visible errors; completed files can be verified. HTTP regression tests remain green.
 
-### Phase 8 - Desktop
+### M6 — Torrent and magnet downloads
 
-- [x] Tauri 2 + React application and TCP JSON-RPC command bridge
-- [x] Task list, add, queue/start, pause/resume, and remove UI
-- [x] Editable server address and refresh after actions/address changes
-- [x] Document the macOS-first sidebar, task list, inspector, add sheet, and settings flows ([Desktop UI Design](DESKTOP_UI_DESIGN.md))
-- [x] Replace the prototype tabs with the documented sidebar/list/inspector shell
-- [x] Add an Add Download sheet that creates and queues a task
-- [x] Add a native destination chooser to the Add Download sheet through the Tauri dialog plugin
-- [x] Add a Tauri event subscription with debounced task refreshes and retain periodic polling as a disconnected-stream fallback
-- [x] Persist server address and refresh policy through Tauri commands
-- [x] Surface connection/action failures without discarding the last successful task list
-- [x] Store per-server Bearer/ApiKey credentials in macOS Keychain, attach them to RPC and event subscriptions, and allow saving/clearing them in Desktop Settings; scope accounts by transport identity, allow verified TLS endpoints, and restrict plaintext credentials to loopback peers
-- [x] Add keyboard navigation, accessible labels, focus management, and reduced-motion behavior
-- [x] Follow the macOS light/dark appearance with readable Desktop palettes
-- [x] Add a persisted System/English/Simplified Chinese language choice and localized visible and accessibility-facing Desktop strings
-- [x] Pin the Desktop pnpm and Tauri CLI versions, commit its dependency lockfile, and build an unsigned macOS app in CI from frozen dependencies; handle the Browser extension separately
-- [ ] Capture light/dark screenshots and complete native macOS visual, bilingual, and VoiceOver release checks
-  - [x] Capture native debug-app Downloads, Settings, and Add Download states in both appearances; see [Release Process](RELEASE.md#native-macos-visual-evidence).
-  - [x] Verify immediate in-app English/Simplified Chinese switching, accessible names, and English persistence after restart in the native debug app.
-  - [x] Launch the main-checkout release bundle with the local Server; verify macOS per-app English override and restoration to system Simplified Chinese without changing Desktop settings.
-  - [ ] Confirm stopped transitions and indeterminate progress animation with macOS Reduce Motion enabled in the release bundle.
-  - [ ] Confirm actual VoiceOver reading of task actions, state, and Inspector progress in the release bundle.
-  - [ ] Separately launch the pinned-CLI release bundle and capture its light/dark visual evidence.
-- [ ] Add manual theme and accent-color options
+- **Work:** Build on M5 with torrent metadata, magnet metadata retrieval, file selection, Tracker/Peer management, piece verification, task persistence, and recovery. Decide seeding, ratio, and network-permission policies.
+- **Acceptance:** Controlled torrent and magnet fixtures download selected files through CLI and Desktop. Piece verification and final hashes remain correct after pause, restart, and failure retry. Tracker state and errors are visible; unimplemented seeding must not be advertised as supported.
 
-### Phase 9 - Browser Integration
+### M7 — Browser and macOS system integration
 
-- [x] Manifest V3 extension shell, link context menu, and downloadable-link badge heuristic
-- [x] Popup field for storing one server address
-- [x] Connect send-to-Nexum to the loopback HTTP `/jsonrpc` bridge; the bridge accepts CORS POST requests and applies the RPC authentication gate
-- [x] Use the saved `server` address in the background script and queue created tasks
-- [x] Handle the content script's send message, resolve absolute links, and cover the bridge with an end-to-end task-creation test
-- [x] Map an explicit `tls://host:port` address to the browser's HTTPS `/jsonrpc` bridge; keep bare `host:port` on the HTTP compatibility path and rely on browser trust without downgrade
-- [ ] Add device selection if multi-device delivery is still a product requirement
+- **Dependency:** Build on M1's controlled default download directory and protected local connection, then design browser pairing in this milestone. The extension must not construct arbitrary server-side file paths.
+- **Work:** Add trusted pairing, credential storage, destination selection or a server-managed default directory to the extension. Commit a lockfile, include the extension in CI, and package/test each browser that is claimed as supported. Add macOS menu-bar controls, notifications, open file/folder actions, download URL handling, and defined quit behavior. Handle `magnet:` and `.torrent` system associations after M6 is complete.
+- **Acceptance:** From an installed app with authentication enabled, a browser submits a link to the expected directory and shows its task result; unauthorized origins cannot create tasks. Each claimed browser and system entry point has its own end-to-end evidence.
 
-### Phase 10 - Extensibility
+### M8 — Windows/Linux delivery
 
-- [x] Plugin manifest, permission, and capability data models
-- [x] `PluginManager` state transitions and tests
-- [x] `EngineProvider` and `ResolverProvider` traits
-- [ ] Invoke plugin lifecycle implementations and load executable plugin entries
-- [ ] Register plugin-provided engines/resolvers with Core; current initialization only changes manager state
-- [ ] Enforce permissions and define a stable SDK/runtime contract
+- **Dependency:** Port M1's local server lifecycle and M3's release flow, and provide platform equivalents for M7's system integration; macOS Keychain assumptions cannot carry over unchanged.
+- **Acceptance:** Each claimed platform separately passes native checks for credential storage, paths, installers, upgrades, system integration, and HTTP/FTP/BT downloads. An unvalidated platform remains a development target.
 
-### Phase 11 - Media and Automation
+### M9 — Executable plugin ecosystem (later product decision)
 
-- [x] Foundational media, job, workflow, and MCP request types
-- [x] Workflow dependency ordering and simulated in-memory job API
-- [ ] Probe real media and parse manifests
-- [ ] Implement track selection, segment scheduling, muxing, and post-processing
-- [ ] Execute and persist real jobs/workflows instead of fabricating completed results
-- [ ] Expose an external automation endpoint and integrate AI/MCP where required
-- [ ] Implement remote device management
+- **Work:** Once built-in transfer paths are stable, decide the plugin SDK, loading/unloading, version compatibility, permission isolation, and failure boundaries. Wire the existing providers instead of only changing PluginManager state. A plugin marketplace is a separate product decision.
+- **Acceptance:** At least one real Engine or Resolver plugin passes end-to-end installation, invocation, permission denial, fault isolation, and removal before plugin support is claimed.
 
-## 2. Delivery Order From Current Code
+## 3. Scope and immediate next step
 
-1. Complete the remaining server/client contracts: durable event-delivery semantics and configured TLS.
-   - [x] Define v1 reconnect and dropped-event behavior: the Desktop ignores duplicate/stale sequences, treats a forward gap or disconnect as stale, reconnects, and refreshes a full snapshot; the server still has no replay buffer.
-   - [ ] Add a durable replay buffer and an explicit after-sequence subscription when reliable event delivery is required.
-   - [x] Add optional process-wide RPC rate limiting with one shared token bucket for TCP and HTTP `/jsonrpc`. Count parsed, authenticated requests, including event subscriptions; exclude heartbeats and HTTP preflight. Return JSON-RPC `-32002` for excess calls with an `id` and drop excess notifications without a response. Keep limiting disabled by default and reject invalid or incomplete configuration at startup.
-   - [x] Add per-server Desktop credential settings backed by macOS Keychain; apply credentials to RPC and event subscriptions, and restart the stream after credential changes.
-   - [ ] Add Browser credential settings after defining an appropriate storage and pairing flow.
+Motrix features such as automatic Tracker lists, UPnP/NAT-PMP, upload limits, launch at login, a statistics Dashboard, and remote/headless control need separate scope decisions; this plan does not count them as committed M0–M7 deliverables. Media/Automation, AI/MCP, remote devices, and manual themes/accent colors are also outside the first macOS downloader release gate. Whether local-file sources need an import/transfer path is a separate product decision. Durable event replay, explicit CA/certificate pinning, and stricter protocol compatibility checks should be scheduled for concrete multi-client or remote-connection needs. Clients currently recover from a disconnected event stream by refreshing a full task snapshot; [ADR 0005](decisions/0005-tls-transport.md) records the implemented TLS boundary. Existing data models or page placeholders alone do not make these features usable.
 
-### TLS implementation plan (transport slices and failure-path coverage in place)
-
-- [x] Define one explicit transport syntax: bare `host:port` stays plaintext for compatibility, while `tls://host:port` selects TLS; never fall back from a certificate or handshake failure to anonymous plaintext.
-- [x] Add all-or-nothing Server `tls_cert_path`/`tls_key_path` validation and load PEM material before listening; use the secured stream for TCP JSON-RPC, `events.subscribe`, and the HTTP `/jsonrpc` bridge.
-- [x] Add CLI and Desktop client trust handling with platform system roots and hostname verification; reject chain or trust failures without sending credentials.
-- [ ] Add an explicit CA bundle or certificate pin option without introducing an insecure bypass.
-- [x] Wire the CLI TLS RPC client with system-root and hostname verification, preserving the existing plaintext loopback path while TLS is disabled.
-- [x] Wire Desktop RPC/event stream with system-root TLS verification, preserving the existing plaintext loopback path while TLS is disabled.
-- [x] Wire the Browser HTTPS bridge in a separate slice: map `tls://host:port` to browser HTTPS, preserve the existing plaintext loopback path, and do not retry TLS failures over HTTP.
-- [x] Include transport identity in Desktop credential scoping; permit credentials on verified TLS endpoints and keep plaintext credentials restricted to actual loopback peers.
-- [x] Add generated-certificate integration coverage for a successful TLS handshake, plaintext rejection, TCP RPC, HTTPS `/jsonrpc` `OPTIONS`/`POST`, validated browser-extension CORS, web-page Origin rejection, configured authentication over TCP/HTTPS, and authenticated `events.subscribe`; generate certificates and private keys at test runtime.
-- [x] Extend generated-certificate coverage to invalid or incomplete TLS configuration and trust/hostname handshake failures. Test CLI and Desktop credential gating for RPC and event subscriptions, and verify that the CLI does not retry plaintext after a TLS failure; keep private keys out of the repository.
-
-The staged transport decision and its non-goals are recorded in [ADR 0005](decisions/0005-tls-transport.md).
-2. The Desktop's system light/dark palettes and in-app English/Simplified Chinese switching have native debug-app evidence. The main-checkout release bundle passed per-app English/system Chinese and local HTTP task checks. The pinned-CLI bundle still needs a separate native launch and final screenshots, plus actual VoiceOver speech and indeterminate-animation checks under Reduce Motion. Keyboard navigation, accessible labels, focus management, and reduced-motion behavior are implemented but still need the full native release check.
-3. Connect plugin providers and enforce their declared permissions.
-4. Replace simulated media operations with real processing, then expose automation and remote-device workflows.
-
-## 3. Current Focus
-
-Phases 0-9 have varying levels of scaffolding and library coverage. The running server persists tasks in SQLite, recovers them, and automatically dispatches eligible HTTP/HTTPS work after queueing, startup recovery, and worker completion or failure. `task.start` remains a manual kick and compatibility method. The server persists throttled intermediate progress, exposes the latest transfer error through task views, and records final progress and completion after a successful transfer. Active server HTTP transfers support cooperative chunk-boundary pause, same-process resume, and destructive remove cancellation; a blocking response read can delay `task.pause` until the 30-minute HTTP timeout, while `task.remove` returns after a 30-second worker wait if it cannot stop sooner. The server now preserves validated partial HTTP responses across process restarts. It resumes only a matching sidecar and `206 Partial Content`; invalid or unvalidated responses are discarded and downloaded from byte zero. Task and Scheduler events now leave Core through the server event pump and a dedicated `events.subscribe` TCP stream; Desktop refreshes a full task snapshot after debounced notifications and falls back to its configured polling policy when the stream is unavailable. The server also accepts one-request CORS HTTP `/jsonrpc` calls through the Browser bridge, which creates and queues tasks through the same dispatcher and authentication gate. Optional process-wide rate limiting now covers authenticated TCP and HTTP RPC calls. Server TLS can now be enabled with paired PEM certificate and private-key paths, with the same secured stream serving TCP, event subscriptions, and the HTTP bridge; the CLI and Desktop use verified `tls://host:port` connections, while the Browser extension maps `tls://host:port` to browser HTTPS and uses the browser trust store. Generated-certificate tests now cover successful TLS TCP/HTTPS requests, plaintext rejection, browser-extension CORS allow/reject behavior, configured authentication over TCP/HTTPS, authenticated event subscriptions, invalid or incomplete Server TLS material, and trust/hostname handshake failures. CLI and Desktop tests cover credential gating after failed connections; CLI tests also verify that a TLS failure does not retry plaintext. Magnet and local-file transfers remain unsupported. Plugin and media crates contain more than data types, but their provider callbacks and real processing are not integrated into the product path. The macOS Desktop information architecture is documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md); the React surface now has the sidebar/list/inspector shell, Settings page, Add Download sheet with a native destination chooser, explicit RPC errors, adaptive event-driven refresh, persisted Server settings, and Keychain-backed credentials for a saved loopback or TLS Server. Keyboard navigation, accessible labels, focus management, reduced-motion behavior, system light/dark palettes, and a persisted System/English/Simplified Chinese language choice are in place. Native macOS visual and bilingual release checks, manual theme/accent options, and explicit Desktop CA/pinning controls remain outstanding.
+**Next work package:** Close M0's native check of the release app built with the pinned Tauri CLI while writing M1's architecture decision for server ownership, data storage, and local security. Then implement and test the first app-managed server end-to-end slice. On milestone completion, update both plan languages, the README current-status section, and actual evidence in the [Release Process](RELEASE.md).
