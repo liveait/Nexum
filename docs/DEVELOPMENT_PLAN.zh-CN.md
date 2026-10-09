@@ -1,168 +1,78 @@
 # Nexum 开发计划
 
-本计划区分“代码中已有基础能力”和“当前 Server/客户端可端到端使用的功能”。勾选表示仓库中已有对应实现；未勾选表示仍需实现或接线。计划项目仅说明方向，不承诺固定的发布时间。当前调用路径见[架构设计](ARCHITECTURE.zh-CN.md)，工程和提交规范见[贡献指南](../CONTRIBUTING.zh-CN.md)。
+本计划以 2026 年 10 月 9 日的代码为起点，按“先交付可独立使用的 macOS 下载器，再补齐下载能力和生态集成”排序。对标范围参考 [Motrix 官方功能清单](https://github.com/agalwood/Motrix/blob/main/README.zh-CN.md)及其 [v2.0.0-beta.46 发布页](https://github.com/agalwood/Motrix/releases/tag/v2.0.0-beta.46)；这是功能差距清单，不代表已逐项实测 Motrix，也不承诺 Nexum 会逐项复制其实现或发布时间。
 
-## 1. 开发阶段
+“已有”表示代码路径已接通，“待验收”表示实现存在但尚缺指定产物的实际检查，“计划”表示还没有可用的端到端实现。只有通过相应里程碑的验收条件，才把能力写成已交付。当前调用路径见[架构设计](ARCHITECTURE.zh-CN.md)，构建、截图与发布操作见[发布流程](RELEASE.zh-CN.md)，TLS 的已完成决策见 [ADR 0005](decisions/0005-tls-transport.zh-CN.md)。
 
-### Phase 0 - 项目基础
+## 1. 当前起点与 Motrix 差距
 
-- [x] 仓库结构、MIT License、贡献与治理文档
-- [x] 英文和简体中文文档
-- [x] 包含 Server、CLI、Desktop Tauri crate 和 Core crates 的 Rust workspace
-- [x] GitHub CI 工作流已配置格式检查、workspace check/test 和 Clippy
+| 领域 | Nexum 当前状态 | 尚需补齐 |
+| --- | --- | --- |
+| 任务与 HTTP/HTTPS | Server 使用 SQLite 保存并恢复任务；排队、并发槽位、重试、进度、暂停和删除已接通。单连接 HTTP 下载有暂存文件及经 ETag/Last-Modified 校验的跨重启续传。 | 真实速率与预计时间、实际传输限速、阻塞读取期间及时暂停及删除时及时中断 Worker，以及安全的单文件多连接下载。没有校验器时会从零重下。 |
+| macOS Desktop | 原生 Tauri App 有任务列表、添加下载、设置、Keychain 凭据、明暗外观和中英文界面；已有 debug App 截图。 | 仍需单独启动 Server。由固定版本 Tauri CLI 构建的 release App 尚缺单独启动、最终截图、VoiceOver 实际朗读和“减弱动态效果”验收。 |
+| 安全与协议 | TCP/HTTP JSON-RPC、事件订阅、可选认证、RPC 限流和经校验的 TLS 已接通。 | 可靠事件回放、显式 CA/证书固定及更严格的协议兼容性检查按实际需求补充；已完成的 TLS 接线不再列为近期主线。 |
+| FTP 与 BT/磁力 | Magnet Resolver 只校验 `xt=urn:btih:` 参数存在；本地文件来源只完成校验；Server 目前只派发 HTTP/HTTPS Worker；FTP 未形成传输路径。 | FTP、BT 种子和磁力链接的真实下载、控制、恢复与完整性验证。通用 Engine Adapter 的同步接口还不能直接承载现有 Server Worker 的长期运行控制。 |
+| Browser 与系统集成 | 扩展可通过 HTTP/HTTPS `/jsonrpc` 投递链接。 | 扩展没有凭据设置，目标路径仍写到 `/tmp/nexum-*`；缺可发布的依赖锁定、浏览器验收、菜单栏/通知/链接接管等桌面集成。 |
+| 分发与扩展性 | CI 检查 Rust 并构建未签名 macOS App；Plugin、Media、Automation 有基础模型。 | 没有正式签名、公证、安装升级验收或自动发布；Windows/Linux 安装包未验收。Plugin Provider、真实媒体处理和自动化尚未接入产品路径。 |
 
-### Phase 1 - Domain 与 Task Core
+## 2. 按交付物推进的里程碑
 
-- [x] Domain 值类型和下载任务模型
-- [x] 带校验的任务状态机
-- [x] 内存任务服务与 Task Events
-- [x] 任务生命周期和状态转换单元测试
+顺序表示依赖和优先级，不是时间表。M0–M3 是第一条可发布的 macOS HTTP 下载器路径；M4–M7 缩小与 Motrix 的核心功能差距；M8–M9 在前述能力稳定后推进。HTTP 引擎工作与分发准备可以并行，但 M3 的发布验收必须使用最终实际产物。
 
-### Phase 2 - Scheduler
+### M0 — 完成现有 release App 的原生验收
 
-- [x] 优先级队列与任务并发上限
-- [x] 重试策略和暂停/恢复操作
-- [x] 带宽策略接口与限速值计算
-- [x] Scheduler Events 与受控单元测试
-- [ ] 将计算出的带宽限制应用到传输
-- [x] Server 派发器在有可用槽位时自动填充排队任务和重试；Scheduler 仍不负责传输
+- **工作**：单独启动使用固定 Tauri CLI 构建的 release App；按[发布流程](RELEASE.zh-CN.md#macos-原生界面截图留证)保存明暗和窄窗口证据；在真实 App 中检查中英文、键盘焦点、VoiceOver 实际朗读，以及“减弱动态效果”下的不确定进度。
+- **验收**：同一候选 App 能连接本地 Server、完成已知 HTTP 文件并显示正确状态；上述原生检查有记录。debug App 截图不能替代 release 产物证据。发现的问题先修复并复验。
 
-### Phase 3 - Storage
+### M1 — 双击即用的 macOS HTTP App
 
-- [x] `TaskRepository` 与内存实现
-- [x] 带 Schema Version 和 Migration 的 SQLite 任务元数据/进度 Repository
-- [x] 重建排队任务并持久化恢复状态的 `Core::recover`
-- [x] 在 Server 启动路径打开 SQLite 并执行恢复
-- [x] 验证真实 Server 重启后任务连续性
+- **先决设计**：记录 Desktop 如何内置、启动、探活、复用和停止本机 Server，如何区分 App 托管实例与用户配置的外部 Server，以及稳定数据目录、默认下载目录、旧数据迁移、端口冲突和本地鉴权策略。保留“设置”里的外部 Server 连接能力。
+- **实现切片**：将 Server 随 App 打包并管理其生命周期；把任务数据库放入稳定的应用数据目录，保留目标文件旁的部分文件及原子完成语义；从 URL/可信响应信息安全生成文件名、自动生成任务 ID 并处理重名，允许用户改选目标；提供受控默认下载目录、受保护的本地通信和明确的故障/恢复提示。
+- **验收**：在干净 macOS 用户环境中，双击 App、粘贴 URL 即可下载到默认目录，无需另开终端或手动填写任务 ID/目标路径；退出、重开、异常中断和升级后任务及文件仍可恢复。端口被占用或 Server 启动失败时可诊断，不会误连或误停未知进程；外部 Server 模式仍可用。
 
-### Phase 4 - Resolver
+### M2 — 首发所需的 HTTP 下载质量
 
-- [x] Resolver 请求/结果/错误模型与 Registry
-- [x] HTTP/HTTPS 校验、Magnet `xt=urn:btih:` 参数存在性检查、已有本地路径校验
-- [x] Resolver 测试与 Core 创建任务时的来源校验
-- [x] 在 `task.queue`、启动恢复或 Worker 完成/失败后，通过 Server 派发器将符合条件的 HTTP/HTTPS 任务路由到 Worker
-- [ ] 为 Magnet 和本地文件来源接入兼容的传输 Engine
-- [ ] 增加真实 Magnet 与本地来源传输路径
+- **工作**：从真实传输字节计算速率；只在长度可信时显示预计时间；定义全局/单任务限速设置并将 Scheduler 算出的上限传到 Worker；让阻塞读取中的 `task.pause` 和 `task.remove`（内部取消 Worker）及时响应，同时保持原目标文件和可恢复的部分文件安全。
+- **验收**：受控本地服务覆盖慢响应、断线、校验器变化、错误 `Content-Range`、多任务竞争、重试及目标冲突。长时间窗口内实测速率符合配置上限；本地停顿响应 fixture 下，暂停和删除各自在 5 秒内完成。成功文件哈希正确；中断、失败和删除不覆盖已有的正确目标文件。
 
-### Phase 5 - Engine Adapter
+### M3 — 可安装、可信任的 macOS 发布
 
-- [x] Adapter Capability、Task Mapping 与 Engine Registry
-- [x] 模拟 InMemory Engine 和支持重定向的阻塞式 HTTP GET Engine
-- [x] 受控 Engine 测试
-- [x] 由 Server 派发器运行 HTTP Engine；CLI 与 Desktop 使用同一个 RPC，并仍可用 `task.start` 手动 kick
-- [x] 将 HTTP 下载暂存到 `.part` 文件，仅在响应完整后重命名到目标路径
-- [x] 为真实传输增加增量进度报告与持久化
-- [x] 为 Server HTTP 传输增加协作式取消和同进程暂停/恢复
-- [x] 增加跨重启 HTTP 续传：目标旁稳定的部分文件、原子 sidecar 元数据、ETag/Last-Modified 校验和 `Range`/`If-Range` 请求；校验器或响应范围不匹配时从零重试
+- **工作**：固定构建输入和版本，产出适合声明架构的安装包；完成 Developer ID 签名、公证、Staple、Gatekeeper、安装/升级/卸载与干净机器冒烟。发布工作流和更新策略须与实际支持范围一致。
+- **验收**：用户从发布产物安装并双击启动，无需开发工具或终端，即可完成 M1–M2 的 HTTP 下载；系统验证签名和公证通过，升级保留任务数据。将版本、哈希、支持的 macOS/CPU 架构和未完成的 FTP/BT/扩展能力写入发布说明。操作步骤与证据留在[发布流程](RELEASE.zh-CN.md)。
 
-### Phase 6 - Nexum Protocol 与 Security
+### M4 — 单文件多连接 HTTP 下载
 
-- [x] JSON-RPC 2.0 请求/响应与错误对象
-- [x] Task 创建/查询/列表/排队/启动/暂停/恢复/删除，以及 Server 信息查询方法
-- [x] V1 版本类型、请求字段和 `server.version` 方法
-- [x] Task/Scheduler 事件信封与缓存
-- [x] Credential、TLS、限流类型及 Protocol/Security 单元测试
-- [ ] 在信封校验之外执行 Protocol 兼容性检查
-- [x] 通过独立 TCP 订阅发布事件并让客户端接收；事件流没有回放缓冲，重连时先获取完整 Task 快照
-- [x] 按配置校验并执行 Bearer/ApiKey Credential，覆盖 RPC 请求和事件订阅
-- [x] 按配置对 TCP 和 HTTP `/jsonrpc` 执行可选的 RPC 限流
-- [x] 在 Server 监听器、CLI 传输、Desktop RPC/事件流和 Browser HTTPS 桥接上按配置执行 TLS
+- **工作**：在单连接路径稳定后增加可回退的 `Range` 分段下载、段级持久状态与原子完成；继续覆盖并发、暂停、重试和跨重启续传。
+- **验收**：受控服务分别提供正常 `Range`、拒绝 `Range`、校验器变化和段长度异常。单连接与多连接结果的文件哈希一致；服务端不支持分段或校验失败时安全回退，不覆盖已有的正确目标文件。
 
-### Phase 7 - Server 与 CLI
+### M5 — 通用传输运行契约与 FTP
 
-- [x] 使用按行 JSON-RPC 的本地回环 TCP Server
-- [x] 支持任务控制、地址配置和 Server 信息查询的 CLI TCP 客户端
-- [x] CLI TLS 客户端：使用显式 `tls://host:port`、系统根证书校验主机名，并按连接状态限制凭据发送
-- [x] Server 命令行选项与 key-value 配置解析
-- [x] 在 TCP 接入时执行 `max_connections`；超出上限的连接在处理请求前关闭
-- [x] 在 RPC 分发和事件订阅前执行 `require_auth`、`auth_scheme` 与 `auth_token` 校验
-- [x] 利用 `data_dir` 实现 SQLite 持久化与重启恢复
-- [x] 让普通 `task.start` 对支持的 HTTP/HTTPS 来源启动真实下载
-- [x] 持久化传输错误并通过任务视图返回，而不只写入 Server 日志
-- [x] 在有可用 Scheduler 槽位时自动派发排队重试和新排队的 HTTP/HTTPS 任务
+- **先决设计**：为长期运行的 Engine 定义能力声明、异步启动/进度、暂停/取消、重试、恢复元数据、错误和 Server 派发契约。现有 `EngineAdapter::start` 同步返回，而实际 HTTP 控制位于 Server Worker；先让 HTTP 通过新契约并保持 M2–M4 行为，再增加新协议。明确 FTP/FTPS 与凭据的支持范围。
+- **验收**：真实 FTP 来源可通过 CLI 和 Desktop 创建、排队、下载、暂停、恢复、取消及重启恢复；服务端不支持续传时安全地从零开始。认证失败、网络断开和目标冲突有可见错误，完成文件可校验。HTTP 回归测试保持通过。
 
-### Phase 8 - Desktop
+### M6 — BT 种子与磁力下载
 
-- [x] Tauri 2 + React 应用与 TCP JSON-RPC 命令桥接
-- [x] Task 列表、添加、排队/启动、暂停/恢复与删除 UI
-- [x] 可编辑 Server 地址，操作或地址变更后刷新
-- [x] 记录 macOS 优先的侧边栏、任务列表、Inspector、Add Sheet 与设置流程（[Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)）
-- [x] 用文档中的侧边栏/列表/Inspector 壳层替换原型 Tab 布局
-- [x] 增加创建并排队任务的 Add Download Sheet
-- [x] 通过 Tauri dialog plugin 为 Add Download Sheet 增加原生目标选择器
-- [x] 增加 Tauri 事件订阅和去抖任务刷新；事件流断开时保留定时轮询作为回退
-- [x] 通过 Tauri 命令持久化 Server 地址和刷新策略
-- [x] 在不丢弃最近一次成功任务列表的情况下呈现连接/操作错误
-- [x] 为每个 Server 将 Bearer/ApiKey 凭据保存到 macOS Keychain，让普通 RPC 和事件订阅都携带凭据，并在 Desktop 设置中保存/清除；账户按传输身份隔离，已校验的 TLS 端点可以使用凭据，明文凭据仍只允许实际回环 peer
-- [x] 增加键盘导航、可访问性标签、焦点管理和减少动效行为
-- [x] Desktop 跟随 macOS 明暗外观，并为两种外观提供可读配色
-- [x] 增加持久化的跟随系统/英文/简体中文语言选择，并本地化 Desktop 可见及无障碍文案
-- [x] 固定 Desktop 的 pnpm 与 Tauri CLI 版本、提交依赖锁文件，并在 CI 中使用冻结依赖构建未签名的 macOS App；Browser 扩展另行处理
-- [ ] 增加明暗模式截图，并完成原生 macOS 视觉、双语与 VoiceOver 发布检查
-  - [x] 已用原生 debug App 拍摄下载列表、设置及添加下载的明暗模式截图；见[发布流程](RELEASE.zh-CN.md#macos-原生界面截图留证)。
-  - [x] 已在原生 debug App 中验证应用内中英文即时切换、辅助功能名称和重启后保留英文选项。
-  - [x] 使用本地 Server 启动主检出目录的 release App；验证 macOS 应用专属 English 覆盖及恢复系统简体中文，且 Desktop 设置不变。
-  - [ ] 在 release App 中确认 macOS“减弱动态效果”会停止过渡及不确定进度动画。
-  - [ ] 在 release App 中确认 VoiceOver 对任务操作、状态和详情进度的实际朗读。
-  - [ ] 单独启动固定 CLI 构建的 release App，并补充其明暗模式视觉截图。
-- [ ] 增加手动主题和强调色选项
+- **工作**：在 M5 契约上实现种子元数据、Magnet 元数据获取、文件选择、Tracker/Peer 管理、分片校验、任务持久化和恢复；明确做种、分享率和网络权限策略。
+- **验收**：受控种子与 Magnet fixture 能从 CLI 和 Desktop 下载选定文件；暂停、重启和失败重试后分片校验及最终文件哈希正确。Tracker 状态和错误可见；未实现的做种能力不得标成已支持。
 
-### Phase 9 - Browser 集成
+### M7 — Browser 与 macOS 系统集成
 
-- [x] Manifest V3 扩展骨架、链接右键菜单和可下载链接标记启发式逻辑
-- [x] 保存单个 Server 地址的 Popup 字段
-- [x] 使用回环 HTTP `/jsonrpc` 桥接完成 Send-to-Nexum；桥接接受 CORS POST，并执行 RPC 认证门
-- [x] 在后台脚本使用已保存的 `server` 地址，并将创建的任务排队
-- [x] 处理 Content Script 的发送消息、解析绝对链接，并覆盖端到端任务创建桥接测试
-- [x] 将显式 `tls://host:port` 地址映射到浏览器 HTTPS `/jsonrpc` 桥接；不带 scheme 的 `host:port` 保持 HTTP 兼容路径，并依赖浏览器信任且不降级
-- [ ] 若多设备投递仍是产品需求，增加设备选择
+- **依赖**：基于 M1 的受控默认下载目录和受保护的本地连接，在本阶段设计浏览器配对；扩展不能自行拼接任意 Server 文件路径。
+- **工作**：为扩展增加可信配对、凭据存储、目标目录选择或 Server 管理的默认目录；提交锁文件并纳入 CI，按实际支持的浏览器分别打包验收。补齐 macOS 菜单栏、通知、打开文件/文件夹、下载链接接管和退出行为；在 M6 完成后处理 `magnet:` 与 `.torrent` 系统关联。
+- **验收**：在启用鉴权的已安装 App 中，浏览器可投递链接到预期目录并看到任务结果；无权限的来源不能写入任务。宣称支持的浏览器及系统入口分别有端到端记录。
 
-### Phase 10 - 可扩展性
+### M8 — Windows/Linux 交付
 
-- [x] Plugin Manifest、Permission 和 Capability 数据模型
-- [x] `PluginManager` 状态转换与测试
-- [x] `EngineProvider` 和 `ResolverProvider` Trait
-- [ ] 调用插件生命周期实现并加载可执行插件入口
-- [ ] 向 Core 注册插件提供的 Engine/Resolver；当前初始化只改变 Manager 状态
-- [ ] 执行 Permission 约束，并定义稳定的 SDK/Runtime 合约
+- **依赖**：移植 M1 的本机服务生命周期和 M3 的发布流程，为 M7 的系统集成提供平台对应实现；不得沿用 macOS Keychain 假设。
+- **验收**：每个宣称支持的平台分别通过凭据存储、路径、安装包、升级、系统集成和 HTTP/FTP/BT 下载的原生检查。未完成验收的平台只列为开发目标。
 
-### Phase 11 - Media 与 Automation
+### M9 — 可执行插件生态（后续产品决策）
 
-- [x] Media、Job、Workflow 与 MCP Request 基础类型
-- [x] Workflow 依赖排序和模拟的内存 Job API
-- [ ] 探测真实媒体并解析 Manifest
-- [ ] 实现 Track Selection、Segment Scheduling、Mux 与后处理
-- [ ] 执行并持久化真实 Job/Workflow，而不是构造模拟完成结果
-- [ ] 对外提供 Automation 端点，并按需集成 AI/MCP
-- [ ] 实现远程设备管理
+- **工作**：内建传输路径稳定后，确定插件 SDK、装载/卸载、版本兼容、权限隔离和故障边界；接通现有 Provider，而非仅改变 PluginManager 状态。是否提供插件市场另作产品决策。
+- **验收**：至少一个真实 Engine 或 Resolver 插件完成安装、调用、权限拒绝、故障隔离和卸载的端到端验证，才称为插件支持。
 
-## 2. 基于当前代码的实施顺序
+## 3. 范围与下一步
 
-1. 补齐剩余的 Server/客户端合约：有界事件流的可靠交付语义，以及按配置启用的 TLS。
-   - [x] 明确 v1 断线重连和事件丢弃行为：Desktop 忽略重复/过期 sequence，将前进方向的缺口或断线视为状态过期，重连并刷新完整快照；Server 仍没有回放缓冲。
-   - [ ] 在需要可靠事件投递时增加持久回放缓冲和显式 after-sequence 订阅。
-   - [x] 增加可选的进程级 RPC 限流，让 TCP 和 HTTP `/jsonrpc` 共用令牌桶。计入已解析且通过认证的请求（含事件订阅），不计入 heartbeat 和 HTTP 预检；带 `id` 的超额调用返回 JSON-RPC `-32002`，无 `id` 的超额通知不响应。默认关闭，配置无效或不完整时拒绝启动。
-   - [x] 增加基于 macOS Keychain 的逐 Server Desktop 凭据设置；普通 RPC 和事件订阅都携带凭据，凭据变化时重启事件流。
-   - [ ] 在确定合适的存储和配对流程后增加 Browser 凭据设置。
+Motrix 清单中的自动 Tracker 列表、UPnP/NAT-PMP、上传限速、登录时启动、统计 Dashboard 和远程/headless 控制仍需单独决定范围；本计划不把它们算作 M0–M7 的已承诺交付。Media/Automation、AI/MCP、远程设备、手动主题与强调色也不在首个 macOS 下载器发布门槛中。本地文件来源是否需要导入/传输路径另作产品决策。可靠事件回放、显式 CA/证书固定和更严格的协议兼容性检查按多客户端或远程连接的实际需求立项；当前事件断线后通过完整任务快照恢复，[ADR 0005](decisions/0005-tls-transport.zh-CN.md)记录已实现的 TLS 边界。以上项目不会借由已有数据模型或页面占位被标成可用功能。
 
-### TLS 实施计划（传输切片与关键失败路径测试已完成）
-
-- [x] 定义唯一且显式的传输语法：不带 scheme 的 `host:port` 为兼容保留的明文连接，`tls://host:port` 选择 TLS；证书或握手失败时绝不回退到匿名明文。
-- [x] 增加 Server `tls_cert_path`/`tls_key_path` 成对校验，并在监听前加载 PEM 材料；TCP JSON-RPC、`events.subscribe` 和 HTTP `/jsonrpc` 桥接共用加密流。
-- [x] 为 CLI 和 Desktop 增加客户端信任处理，使用平台系统根证书并校验主机名；证书链或信任失败时不得发送凭据。
-- [ ] 增加显式 CA bundle 或证书固定选项，不引入不安全绕过。
-- [x] 接入 CLI TLS RPC 客户端，使用系统根证书和主机名校验；TLS 关闭时保留现有明文回环路径。
-- [x] 接入 Desktop RPC/事件流，使用系统根证书和主机名校验；TLS 关闭时保持现有明文回环路径。
-- [x] 单独接入 Browser HTTPS 桥接：将 `tls://host:port` 映射到浏览器 HTTPS，保持现有明文回环路径，并且 TLS 失败时不重试 HTTP。
-- [x] 将传输身份纳入 Desktop 凭据作用域；已校验的 TLS 端点可以使用凭据，明文凭据仍只允许发给实际回环 peer。
-- [x] 使用运行时生成的证书覆盖 TLS 握手成功、明文拒绝、TCP RPC、HTTPS `/jsonrpc` `OPTIONS`/`POST`、已校验扩展 Origin 的 CORS、网页 Origin 拒绝、TCP/HTTPS 上的配置鉴权，以及带鉴权的 `events.subscribe`；证书和私钥只在测试运行时生成。
-- [x] 补充无效或不完整 TLS 配置、信任/主机名握手失败测试。验证 CLI 和 Desktop 的 RPC/事件订阅凭据门控，并确认 CLI 在 TLS 失败后不会重试明文；私钥不得进入仓库。
-
-分阶段传输决策及其不包含项见 [ADR 0005](decisions/0005-tls-transport.zh-CN.md)。
-2. Desktop 系统明暗配色和应用内中英文切换已有原生 debug App 证据。主检出目录的 release App 已完成应用专属 English／系统简体中文及本地 HTTP 任务检查。固定 CLI 构建的 App 仍需单独启动并补充最终截图，也需确认 VoiceOver 实际朗读和“减弱动态效果”下不确定进度动画停止。键盘导航、可访问性标签、焦点管理和减少动效行为已实现，但完整原生发布验收尚未完成。
-3. 接入 Plugin Provider 并执行其声明的权限。
-4. 用真实处理替换模拟的 Media 操作，再对外提供 Automation 与远程设备工作流。
-
-## 3. 当前重点
-
-Phase 0-9 各自具有不同程度的脚手架和库级覆盖。运行中的 Server 使用 SQLite 持久化任务并在重启后恢复，在任务入队、启动恢复以及 Worker 完成或失败后自动派发符合条件的 HTTP/HTTPS 工作。`task.start` 仍是手动 kick 和兼容接口。Server 会节流持久化中间进度，通过任务视图返回最近一次传输错误，并在传输成功后写入最终进度与完成状态。活跃的 Server HTTP 传输支持协作式块边界暂停、同进程恢复和破坏性删除取消；阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时，`task.remove` 无法及时停止时会在等待 Worker 30 秒后返回错误。Server 现在会在进程重启后保留并校验 HTTP 部分响应。只有 sidecar 匹配且服务端返回 `206 Partial Content` 时才续传；无效或没有校验器的响应会被丢弃并从零下载。Task 与 Scheduler Events 现在由 Server Event Pump 从 Core 取出，并通过独立的 `events.subscribe` TCP 流发送；Desktop 对通知去抖后刷新完整 Task 快照，事件流不可用时按已配置的刷新策略回退到轮询。Server 还通过同一认证门提供单请求 CORS HTTP `/jsonrpc`，Browser Extension 可以通过 HTTP 或 HTTPS 桥接创建并排队任务。可选的进程级限流现在覆盖通过认证的 TCP 与 HTTP RPC 请求。Server 现在可通过成对配置的 PEM 证书和私钥启用 TLS，同一加密流承载 TCP、事件订阅和 HTTP 桥接；CLI 和 Desktop 使用经过校验的 `tls://host:port` 地址，Browser Extension 将该地址映射到浏览器 HTTPS 并使用浏览器信任库。运行时生成证书的测试现在覆盖 TLS TCP/HTTPS 成功请求、明文拒绝、Browser 扩展 CORS 允许/拒绝行为、TCP/HTTPS 上的配置鉴权、带鉴权的事件订阅、无效或不完整的 Server TLS 材料，以及信任/主机名握手失败。CLI 和 Desktop 测试覆盖连接失败后的凭据门控；CLI 测试还验证 TLS 失败后不会重试明文。Magnet 和本地文件传输仍不受支持。Plugin 与 Media crates 已包含数据类型之外的代码，但 Provider 回调和真实处理尚未接入产品路径。macOS Desktop 信息架构已记录在[Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)中；React 页面现在已有侧边栏/列表/Inspector 壳层、设置页、带原生目标选择器的 Add Download Sheet、明确的 RPC 错误展示、自适应事件刷新、持久化 Server 设置，以及针对已保存回环或 TLS Server 的 Keychain 凭据。键盘导航、可访问性标签、焦点管理、减少动效行为、系统明暗配色和持久化的跟随系统/英文/简体中文语言选择均已接入。原生 macOS 视觉与双语发布检查、手动主题/强调色选项，以及 Desktop 显式 CA/固定证书控制仍待完成。
+**下一工作包**：先关闭 M0 的固定版本 Tauri CLI release App 原生验收；同时为 M1 写清 Server 所有权、数据目录与本地安全的架构决策，再实现并测试 App 托管 Server 的首个端到端切片。每个里程碑完成时同步更新中英文计划、README 的当前状态和[发布流程](RELEASE.zh-CN.md)中的实际证据。
