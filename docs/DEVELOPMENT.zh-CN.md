@@ -5,8 +5,8 @@
 Nexum 是使用 Rust 2024 edition 的工作区，桌面客户端采用 Tauri 2。桌面前端使用 TypeScript 和 React；浏览器扩展使用 TypeScript。
 
 - Rust stable（1.85 或更新版本）、Cargo、`rustfmt` 和 Clippy
-- Node.js LTS 和 pnpm，用于两个前端包
-- 运行或打包原生桌面应用时所需的 Tauri 2 系统依赖及 Tauri CLI
+- Node.js（macOS Desktop CI job 使用 Node.js 22）和 pnpm；Desktop 固定 pnpm 11.25.0，并有独立的冻结依赖锁文件
+- 运行或打包原生桌面应用时所需的 Tauri 2 系统依赖；Desktop 包会安装项目内固定版本的 Tauri CLI
 
 Ubuntu CI 在检查 Rust 工作区前安装 `libgtk-3-dev` 和 `libwebkit2gtk-4.1-dev`。本地构建还需满足对应平台的 Tauri 依赖要求。
 
@@ -40,7 +40,7 @@ cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-仓库会提交 `Cargo.lock`，因为此工作区包含 Server、CLI 和 Desktop 可执行程序；修改 Rust 依赖时应同步更新它。CI 在 Ubuntu 上执行这些 Rust 检查。目前未构建或检查 TypeScript 包，也不生成发布产物。
+仓库会提交 `Cargo.lock`，因为此工作区包含 Server、CLI 和 Desktop 可执行程序；修改 Rust 依赖时应同步更新它。CI 在 Ubuntu 上执行这些 Rust 检查。另有 macOS job 使用 `--frozen-lockfile` 和 `apps/desktop/pnpm-lock.yaml` 安装 Desktop 依赖，构建其 TypeScript 前端和 `.app`，并检查 App 内的语言声明。它不构建 Browser 扩展，也不生成完成分发签名和公证的发布产物。
 
 ## Server 与 CLI
 
@@ -119,11 +119,20 @@ cargo run -p nexum-server -- --rate-limit-rps 10 --rate-limit-burst 20
 
 ```bash
 cd apps/desktop
-pnpm install
+pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Vite 使用 `1420` 端口。前端调用 Tauri 命令、macOS 上基于 Keychain 的凭据命令和 Tauri dialog plugin，因此测试完整应用还需要运行中的 Nexum Server 和原生 Tauri 窗口。安装 Tauri 2 CLI 后，保持 Vite 运行，并在另一个终端从 `apps/desktop` 执行 `cargo tauri dev`。`pnpm build` 会执行 TypeScript 编译和 Vite 构建；这是 Rust CI 之外的检查。在 `apps/desktop` 执行 `pnpm dlx @tauri-apps/cli@2 build --debug --bundles app` 可打包本地 macOS 开发版，产物位于仓库根目录的 `target/debug/bundle/macos/Nexum.app`。打包后可在 `apps/desktop` 执行 `codesign --force --deep --sign - ../../target/debug/bundle/macos/Nexum.app` 为本机开发版添加临时签名。对外分发所需的签名与公证仍属于后续发布工作。更新依赖时应让 Tauri 的 JavaScript 与 Rust 包保持相同次版本。
+Vite 使用 `1420` 端口。前端调用 Tauri 命令、macOS 上基于 Keychain 的凭据命令和 Tauri dialog plugin，因此测试完整应用还需要运行中的 Nexum Server 和原生 Tauri 窗口。保持 Vite 运行，并在另一个终端从 `apps/desktop` 执行 `pnpm exec tauri dev`。Desktop 包固定 pnpm 11.25.0 和 `@tauri-apps/cli` 2.11.5；应通过 `pnpm exec` 使用项目内 CLI，避免全局或浮动版本。`pnpm build` 会执行 TypeScript 编译和 Vite 构建。在 `apps/desktop` 执行 `pnpm exec tauri build --debug --bundles app` 可打包本地 macOS debug App，产物位于仓库根目录的 `target/debug/bundle/macos/Nexum.app`。执行 `pnpm exec tauri build --bundles app` 可生成 `target/release/bundle/macos/Nexum.app`。更新依赖时应让 Tauri 的 JavaScript 与 Rust 包保持相同次版本。
+
+本机构建 release App 后，如需验证完整包，可在 `apps/desktop` 显式添加并检查临时签名：
+
+```bash
+codesign --force --deep --sign - ../../target/release/bundle/macos/Nexum.app
+codesign --verify --deep --strict ../../target/release/bundle/macos/Nexum.app
+```
+
+这个本地签名不能代替分发签名、公证、Gatekeeper 放行或原生界面验收。
 
 macOS 优先的信息架构、任务状态、添加流程、设置、事件订阅、轮询回退和实现切片见 [Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)。
 

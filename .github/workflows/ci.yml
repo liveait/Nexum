@@ -36,3 +36,46 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  desktop-macos:
+    name: Desktop macOS
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Desktop dependencies
+        working-directory: apps/desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Desktop frontend
+        working-directory: apps/desktop
+        run: pnpm build
+
+      - name: Build macOS app bundle
+        working-directory: apps/desktop
+        run: pnpm exec tauri build --bundles app
+
+      - name: Verify macOS app bundle
+        run: |
+          app_path=target/release/bundle/macos/Nexum.app
+          plist_path="$app_path/Contents/Info.plist"
+          test -d "$app_path"
+          test -f "$plist_path"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleLocalizations:0' "$plist_path")" = en
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleLocalizations:1' "$plist_path")" = zh-Hans

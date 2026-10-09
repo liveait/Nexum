@@ -5,8 +5,8 @@
 Nexum is a Rust 2024-edition workspace with a Tauri 2 desktop client. The desktop frontend uses TypeScript and React; the browser extension is written in TypeScript.
 
 - Rust stable (1.85 or newer), Cargo, `rustfmt`, and Clippy
-- Node.js LTS and pnpm for the two frontend packages
-- Tauri 2 system dependencies and the Tauri CLI when running or bundling the native desktop app
+- Node.js (the macOS Desktop CI job uses Node.js 22) and pnpm; Desktop pins pnpm 11.25.0 and has its own frozen dependency lockfile
+- Tauri 2 system dependencies when running or bundling the native desktop app; the Desktop package installs its pinned Tauri CLI locally
 
 The Ubuntu CI job installs `libgtk-3-dev` and `libwebkit2gtk-4.1-dev` before checking the Rust workspace. Platform-specific Tauri prerequisites also apply to local builds.
 
@@ -40,7 +40,7 @@ cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-`Cargo.lock` is committed because this workspace ships Server, CLI, and Desktop binaries; keep it updated when changing Rust dependencies. CI runs these Rust checks on Ubuntu. It does not currently build or check the TypeScript packages or produce release artifacts.
+`Cargo.lock` is committed because this workspace ships Server, CLI, and Desktop binaries; keep it updated when changing Rust dependencies. CI runs these Rust checks on Ubuntu. A separate macOS job installs the Desktop package from `apps/desktop/pnpm-lock.yaml` with `--frozen-lockfile`, builds its TypeScript frontend and `.app` bundle, and checks the bundled language declarations. It does not build the Browser extension or produce signed and notarized release artifacts.
 
 ## Server and CLI
 
@@ -119,11 +119,20 @@ Start the Vite frontend from `apps/desktop`:
 
 ```bash
 cd apps/desktop
-pnpm install
+pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Vite uses port `1420`. The frontend calls Tauri commands, Keychain-backed credential commands on macOS, and the Tauri dialog plugin, so testing the full application requires a running Nexum server and a native Tauri window. With the Tauri 2 CLI installed, keep Vite running and start `cargo tauri dev` from `apps/desktop` in another terminal. `pnpm build` runs the TypeScript compiler and Vite build; this is a separate check from Rust CI. To create a local macOS development app from `apps/desktop`, run `pnpm dlx @tauri-apps/cli@2 build --debug --bundles app`; the bundle is written to `target/debug/bundle/macos/Nexum.app` at the repository root. For a local ad-hoc signature, run `codesign --force --deep --sign - ../../target/debug/bundle/macos/Nexum.app` from `apps/desktop` after bundling. Distribution signing and notarization are still separate release work. Keep the Tauri JavaScript and Rust package minor versions aligned when updating dependencies.
+Vite uses port `1420`. The frontend calls Tauri commands, Keychain-backed credential commands on macOS, and the Tauri dialog plugin, so testing the full application requires a running Nexum server and a native Tauri window. Keep Vite running and start `pnpm exec tauri dev` from `apps/desktop` in another terminal. The Desktop package pins pnpm 11.25.0 and `@tauri-apps/cli` 2.11.5; use `pnpm exec` rather than a globally installed or floating CLI. `pnpm build` runs the TypeScript compiler and Vite build. To create a local macOS debug app, run `pnpm exec tauri build --debug --bundles app` from `apps/desktop`; the bundle is written to `target/debug/bundle/macos/Nexum.app` at the repository root. For the release app, run `pnpm exec tauri build --bundles app` to produce `target/release/bundle/macos/Nexum.app`. Keep the Tauri JavaScript and Rust package minor versions aligned when updating dependencies.
+
+For local bundle validation after a release build, explicitly apply and verify an ad-hoc signature from `apps/desktop`:
+
+```bash
+codesign --force --deep --sign - ../../target/release/bundle/macos/Nexum.app
+codesign --verify --deep --strict ../../target/release/bundle/macos/Nexum.app
+```
+
+This local signature does not replace distribution signing, notarization, Gatekeeper acceptance, or native UI validation.
 
 The macOS-first information architecture, task states, add flow, settings, event subscription, polling fallback, and implementation slices are documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md).
 
