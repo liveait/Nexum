@@ -25,7 +25,7 @@
 
 2026 年 10 月 9 日，本机 macOS release 构建生成了 `target/release/bundle/macos/Nexum.app`、`target/release/nexum-server` 和 `target/release/nexum-cli`。使用固定的 Tauri CLI 2.11.5 构建 Desktop 也已通过。App 的 `Info.plist` 在 `CFBundleLocalizations` 下包含 `en` 和 `zh-Hans`。显式添加本机临时签名后，App 通过 `codesign --verify --deep --strict`；`spctl --assess --type execute` 仍拒绝它。分发签名、公证和 Gatekeeper 放行仍未验收。
 
-release App 已连接本地 Server 并显示已完成的 1 MB HTTP 下载。应用内选择“跟随系统”时，macOS 的 Nexum 应用专属 English 覆盖使 release 界面及任务、进度辅助功能名称在重启后切换为英文；移除覆盖并重启后恢复简体中文。应用的 `settings.json` 哈希未变化。启用 macOS“减弱动态效果”后，“添加下载”窗口仍会打开并聚焦“来源 URL”，Escape 会将焦点返回“添加下载”；测试后已恢复系统偏好。曾短暂启用“旁白”，App 通过 macOS 辅助功能树提供了任务、操作及进度控件名称，随后已将“旁白”恢复为关闭。尚未直接确认实际朗读内容和不确定进度的动画停止，因此这两项仍待验收。下方截图来自 debug App；release 包的明暗模式截图仍待补充。
+主检出目录的 release App 已连接本地 Server 并显示已完成的 1 MB HTTP 下载；新固定 CLI 构建的 App 已通过构建及签名检查，但尚未单独启动。应用内选择“跟随系统”时，macOS 的 Nexum 应用专属 English 覆盖使运行中的 release 界面及任务、进度辅助功能名称在重启后切换为英文；移除覆盖并重启后恢复简体中文。应用的 `settings.json` 哈希未变化。启用 macOS“减弱动态效果”后，“添加下载”窗口仍会打开并聚焦“来源 URL”，Escape 会将焦点返回“添加下载”；测试后已恢复系统偏好。曾短暂启用“旁白”，App 通过 macOS 辅助功能树提供了任务、操作及进度控件名称，随后已将“旁白”恢复为关闭。尚未直接确认实际朗读内容和不确定进度的动画停止，因此这两项仍待验收。下方截图来自 debug App；release 包的明暗模式截图仍待补充。
 
 ### macOS 原生界面截图留证
 
