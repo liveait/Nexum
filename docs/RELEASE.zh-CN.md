@@ -21,4 +21,28 @@
 9. 在该原生 macOS Desktop 构建中保持应用打开，切换 macOS“浅色”和“深色”外观。检查两种模式下的侧边栏、Downloads 任务行及状态徽标、Inspector、设置卡片与输入框、Add Download Sheet 和键盘焦点环，并保存截图以供视觉比较。在“设置 → 外观”依次选择“跟随系统”、English 和“简体中文”，确认可见标签、提示、任务状态、校验消息、通知和 VoiceOver 名称即时切换；重启应用后确认语言选择保留。在 `Nexum.app/Contents/Info.plist` 中确认 `CFBundleLocalizations` 包含 `en` 和 `zh-Hans`。选择“跟随系统”时，在 macOS“语言与地区 → 应用程序”中分别将 Nexum 设为“简体中文”和 English，每次更改后重启应用并确认界面语言；验收后恢复原有的应用语言设置。确认 Server 和操作系统诊断原文不变，切换语言也不会改变任务协议值或请求。缺少 `language` 字段的旧设置应以“跟随系统”加载。
 10. 验证实际产物后，人工创建版本标签和 GitHub Release；在发布说明中记录目标平台及尚未完成的集成。
 
+### macOS 原生界面截图留证
+
+执行检查表第 9 项时，使用已构建并正在运行的 `Nexum.app`。配置的默认窗口尺寸为 1200 × 800 point；实际截图边界应以 JSON sidecar 为准。PNG 包含原生标题栏，并以显示器的实际像素比例保存。先在应用中打开所需的下载列表、Inspector、设置、添加下载和焦点状态，并手动把 macOS 外观切换为浅色或深色。然后在仓库根目录截图：
+
+```sh
+mkdir -p "$PWD/../nexum-native-qa"
+swift scripts/capture-native-macos-window.swift \
+  --app "$PWD/target/release/bundle/macos/Nexum.app" \
+  --output "$PWD/../nexum-native-qa/downloads-light.png" \
+  --appearance light
+```
+
+脚本只选择该精确 App 路径和 PID 所属的一个可见 layer-0 窗口，再执行 `screencapture -x -o -l<windowid>`。窗口不存在、存在多个候选、系统外观不符或输出文件已存在时会拒绝截图；不会更改窗口、系统外观或应用设置。每张 PNG 旁边会生成 `.png.json`，记录 App 路径、PID、窗口 ID、point 尺寸、macOS 当前外观、截图时间和实际像素尺寸。对应的深色截图应使用新文件名、`--appearance dark`，并通过 `--expect-pixels WIDTHxHEIGHT` 指定浅色截图报告的像素尺寸；像素尺寸不同时脚本会拒绝截图，不会缩放图片。再比较两份 sidecar 的 point 边界和像素尺寸，检查窗口几何尺寸或显示器缩放是否变化。对每组界面状态重复截图并人工比较 PNG。终端应用可能需要“屏幕录制”权限。验收后恢复原有的 macOS 外观和临时 Nexum 设置。
+
+以下原生 debug App 截图拍摄于 2026 年 10 月 8–9 日，应用跟随 macOS 的简体中文语言设置。截图时，脚本报告各组浅色与深色截图的窗口边界均为 1200 × 801 point，图像尺寸均为 2400 × 1602 像素。[脱敏截图摘要](assets/native-macos/capture-summary.json)保留尺寸与图像哈希，不包含本机路径或 PID。
+
+| 界面状态 | 浅色 | 深色 |
+| --- | --- | --- |
+| 下载列表、已完成任务及 Inspector | [查看](assets/native-macos/downloads-light.png) | [查看](assets/native-macos/downloads-dark.png) |
+| 设置首页 | [查看](assets/native-macos/settings-light.png) | [查看](assets/native-macos/settings-dark.png) |
+| 添加下载，来源 URL 已聚焦 | [查看](assets/native-macos/add-download-light.png) | [查看](assets/native-macos/add-download-dark.png) |
+
+2026 年 10 月 9 日，同一个原生 debug App 的应用内语言也完成即时切换：[英文外观页](assets/native-macos/appearance-english-light.png)与[简体中文外观页](assets/native-macos/appearance-chinese-light.png)。英文选项在应用重启后仍然生效，设置、外观和语言的辅助功能名称也随界面切换。这些图片仅记录视觉外观。发布检查表仍需人工完成 VoiceOver 朗读、macOS 应用专属语言、减少动态效果，以及最终 release App 的验收。
+
 英文版见 [RELEASE.md](RELEASE.md)。

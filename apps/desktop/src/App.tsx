@@ -894,9 +894,24 @@ function SettingsView({ category, server, serverDraft, settingsReady, settingsBu
   onCredentialChanged: () => void;
 }) {
   const t = useTranslation();
+  const categoryButtons = useRef<Partial<Record<SettingsCategory, HTMLButtonElement | null>>>({});
+  const returnFocusCategory = useRef<SettingsCategory | null>(null);
+
+  useEffect(() => {
+    if (category !== "home" || !returnFocusCategory.current) return;
+    const previous = returnFocusCategory.current;
+    returnFocusCategory.current = null;
+    categoryButtons.current[previous]?.focus();
+  }, [category]);
+
+  const goBack = () => {
+    returnFocusCategory.current = category;
+    onCategory("home");
+  };
+
   if (category !== "home") {
     const card = SETTINGS_CARDS.find((item) => item.id === category);
-    if (category === "general") return <SettingsDetail title={t(card?.label ?? "General")} icon="general" onBack={() => onCategory("home")}>
+    if (category === "general") return <SettingsDetail title={t(card?.label ?? "General")} icon="general" onBack={goBack}>
       <div className="settings-card">
         <div className="settings-card-heading"><div><span className="eyebrow">{t("Connection")}</span><h2>{t("Server")}</h2></div><span className={`status-pill ${connection}`}>{t(connection)}</span></div>
         <label>{t("Server address")}<input value={serverDraft} onChange={(event) => onServerChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onApply(); }} placeholder={DEFAULT_SERVER} disabled={settingsBusy} /></label>
@@ -905,17 +920,17 @@ function SettingsView({ category, server, serverDraft, settingsReady, settingsBu
       </div>
       <CredentialSettings key={server} server={server} serverDraft={serverDraft} settingsReady={settingsReady} onCredentialChanged={onCredentialChanged} />
     </SettingsDetail>;
-    if (category === "downloads") return <SettingsDetail title={t(card?.label ?? "Downloads")} icon="downloads" onBack={() => onCategory("home")}>
+    if (category === "downloads") return <SettingsDetail title={t(card?.label ?? "Downloads")} icon="downloads" onBack={goBack}>
       <div className="settings-card"><span className="eyebrow">{t("Updates")}</span><h2>{t("Refresh policy")}</h2><p className="field-help">{t("Idle tasks refresh every five seconds. Active downloads refresh every second.")}</p><select value={refreshSeconds} onChange={(event) => onRefreshSecondsChange(Number(event.target.value))} aria-label={t("Refresh policy")} disabled={settingsBusy}><option value={0}>{t("Manual")}</option><option value={5}>{t("Automatic")}</option></select><button className="button primary settings-save" onClick={onApply} disabled={settingsBusy || !settingsReady}>{t("Save settings")}</button></div>
     </SettingsDetail>;
-    if (category === "appearance") return <SettingsDetail title={t(card?.label ?? "Appearance")} icon="appearance" onBack={() => onCategory("home")}>
+    if (category === "appearance") return <SettingsDetail title={t(card?.label ?? "Appearance")} icon="appearance" onBack={goBack}>
       <div className="settings-card"><span className="eyebrow">{t("Appearance")}</span><h2>{t("System appearance and language")}</h2><p className="field-help">{t("Appearance follows the Mac system setting.")}</p><label>{t("Language")}<select value={language} onChange={(event) => onLanguageChange(event.target.value as LanguagePreference)} disabled={settingsBusy || !settingsReady}><option value="system">{t("Follow system")}</option><option value="en">{t("English")}</option><option value="zh-CN">{t("Simplified Chinese")}</option></select></label><p className="field-help">{t("Language changes are saved immediately.")}</p></div>
     </SettingsDetail>;
-    return <SettingsDetail title={t(card?.label ?? "Settings")} icon={card?.icon ?? "settings"} onBack={() => onCategory("home")}>
+    return <SettingsDetail title={t(card?.label ?? "Settings")} icon={card?.icon ?? "settings"} onBack={goBack}>
       <div className="settings-card settings-planned"><span className="eyebrow">{t("Planned capability")}</span><h2>{t(card?.label ?? "Settings")}</h2><p>{t("{description}. This page is reserved so the navigation can remain stable while the underlying engine and protocol are implemented.", { description: t(card?.description ?? "Planned capability") })}</p><span className="planned-badge">{t("Coming later")}</span></div>
     </SettingsDetail>;
   }
-  return <div className="settings-page"><div className="page-heading"><div><span className="eyebrow">{t("Client preferences")}</span><h1>{t("Settings")}</h1><p>{t("Configure Nexum without mixing connection options into the download list.")}</p></div></div><div className="settings-grid">{SETTINGS_CARDS.map((card) => <button className={`settings-card-tile ${card.available ? "" : "planned"}`} key={card.id} onClick={() => onCategory(card.id)}><span className={`settings-tile-icon icon-${card.id}`}><Icon name={card.icon} size={28} /></span><strong>{t(card.label)}</strong><p>{t(card.description)}</p>{!card.available && <span className="planned-badge">{t("Planned")}</span>}</button>)}</div></div>;
+  return <div className="settings-page"><div className="page-heading"><div><span className="eyebrow">{t("Client preferences")}</span><h1>{t("Settings")}</h1><p>{t("Configure Nexum without mixing connection options into the download list.")}</p></div></div><div className="settings-grid">{SETTINGS_CARDS.map((card) => <button ref={(element) => { categoryButtons.current[card.id] = element; }} className={`settings-card-tile ${card.available ? "" : "planned"}`} key={card.id} onClick={() => onCategory(card.id)}><span className={`settings-tile-icon icon-${card.id}`}><Icon name={card.icon} size={28} /></span><strong>{t(card.label)}</strong><p>{t(card.description)}</p>{!card.available && <span className="planned-badge">{t("Planned")}</span>}</button>)}</div></div>;
 }
 
 function CredentialSettings({ server, serverDraft, settingsReady, onCredentialChanged }: { server: string; serverDraft: string; settingsReady: boolean; onCredentialChanged: () => void }) {
@@ -1051,5 +1066,7 @@ function CredentialSettings({ server, serverDraft, settingsReady, onCredentialCh
 
 function SettingsDetail({ title, icon, onBack, children }: { title: string; icon: IconName; onBack: () => void; children: ReactNode }) {
   const t = useTranslation();
-  return <div className="settings-page"><button className="back-button" onClick={onBack}>{t("‹ Settings")}</button><div className="settings-detail-heading"><span className="settings-tile-icon"><Icon name={icon} size={27} /></span><div><span className="eyebrow">{t("Settings")}</span><h1>{title}</h1></div></div>{children}</div>;
+  const backButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => { backButton.current?.focus(); }, []);
+  return <div className="settings-page"><button ref={backButton} className="back-button" onClick={onBack}>{t("‹ Settings")}</button><div className="settings-detail-heading"><span className="settings-tile-icon"><Icon name={icon} size={27} /></span><div><span className="eyebrow">{t("Settings")}</span><h1>{title}</h1></div></div>{children}</div>;
 }
