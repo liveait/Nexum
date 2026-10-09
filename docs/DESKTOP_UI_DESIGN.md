@@ -37,9 +37,9 @@ Use a macOS-style sidebar and a single main task surface rather than tabs across
 └───────────────┴────────────────────────────────────────────────┘
 ```
 
-- Minimum window: 960×640; preferred window: 1120×720.
-- Sidebar width: 208–240 px and collapsible.
-- Main content has a list-first layout. A selected task opens an inspector on the right at widths above 1100 px; below that width it opens as a sheet or stacked detail panel.
+- Default native window: 1200×800, so the task list and Inspector can appear together when downloads are present. The window remains resizable; no native minimum size is configured.
+- The sidebar currently has a fixed width of 226 px (194 px at viewport widths of 980 px or less). A collapse control remains planned.
+- Main content has a list-first layout. Above the 980 px viewport breakpoint, the enabled Inspector appears beside the task list and shows the selected task. At 980 px or below, the current CSS hides the Inspector and shows a single-column list; a sheet or stacked detail panel for narrow windows remains planned.
 - Use the system font stack, Nexum's purple accent, light/dark system appearance, and visible keyboard focus rings. A system accent-color option remains planned.
 
 ### 2.1.1 Appearance and language implementation decision

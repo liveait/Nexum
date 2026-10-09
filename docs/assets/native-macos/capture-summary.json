@@ -1,0 +1,82 @@
+{
+  "source": "Native Nexum.app debug bundle on macOS",
+  "windowBoundsPoints": {
+    "width": 1200,
+    "height": 801
+  },
+  "note": "Summary of capture-script measurements. Machine-specific bundle paths, PIDs, and window IDs from raw sidecars are omitted.",
+  "captures": [
+    {
+      "file": "downloads-light.png",
+      "capturedOn": "2026-10-08",
+      "appearance": "light",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "51dbb388deaf3292bdcca1e984b5b205ccee87ddbb4d3d7eb2b820288b918046"
+    },
+    {
+      "file": "downloads-dark.png",
+      "capturedOn": "2026-10-08",
+      "appearance": "dark",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "e46bf2a087abb5d492625e0472ad5c311699bdba9f099ef0baea4a2e4ea137a8"
+    },
+    {
+      "file": "settings-light.png",
+      "capturedOn": "2026-10-09",
+      "appearance": "light",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "12b7efd6821622301dc0daed9776e1ce4a78cacb86299d6b6c75728f43a5a35f"
+    },
+    {
+      "file": "settings-dark.png",
+      "capturedOn": "2026-10-08",
+      "appearance": "dark",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "bd5c4961e8d03b95d950ae0ca49bcc6721bab6f5966f389098b5e30c72857f4d"
+    },
+    {
+      "file": "add-download-light.png",
+      "capturedOn": "2026-10-08",
+      "appearance": "light",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "b6bb17019171d0905b49c54f305e5a5dbd375fcb622221f35f1859b62e818e4a"
+    },
+    {
+      "file": "add-download-dark.png",
+      "capturedOn": "2026-10-08",
+      "appearance": "dark",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "c4ad4e46278deb17a8f8d5daee82294e132d63ec59da52cace5f02cdc8ccd063"
+    },
+    {
+      "file": "appearance-english-light.png",
+      "capturedOn": "2026-10-09",
+      "appearance": "light",
+      "uiLanguage": "en",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "770f5675c13e0dfa4a96da0da3f48ef2ac64590431b5562404f729e59b3e4700"
+    },
+    {
+      "file": "appearance-chinese-light.png",
+      "capturedOn": "2026-10-09",
+      "appearance": "light",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "5269e3bc0780124a219c6fd1b6eefd81b6b754a3ddeda73866dd715b18c2741f"
+    }
+  ]
+}

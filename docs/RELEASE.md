@@ -21,4 +21,28 @@ The following steps describe what the current source tree requires for a release
 9. In that native macOS Desktop build, switch macOS Appearance between Light and Dark while the app is open. Inspect the sidebar, Downloads rows and status badges, Inspector, Settings cards and inputs, Add Download sheet, and keyboard focus rings in both modes; capture screenshots for a visual comparison. In Settings → Appearance, choose Follow system, English, and Simplified Chinese. Confirm that visible labels, tooltips, task states, validation messages, notifications, and VoiceOver names change immediately; restart the app to confirm the selected language persists. Confirm that `Nexum.app/Contents/Info.plist` lists `en` and `zh-Hans` under `CFBundleLocalizations`. With Follow system selected, use macOS Language & Region → Applications to set Nexum to Simplified Chinese and English in turn, relaunching after each change to verify the interface language; restore the original per-app language setting afterward. Verify that Server and operating-system diagnostic text stays verbatim and that changing language does not alter task protocol values or requests. An older settings file without `language` should load with Follow system selected.
 10. After verifying the actual artifacts, create a version tag and GitHub Release manually. Record target platforms and any incomplete integrations in the release notes.
 
+### Native macOS visual evidence
+
+Use a running, built `Nexum.app` for checklist step 9. The configured default window size is 1200 × 800 points; measure the captured window's actual bounds from the JSON sidecar. The PNG includes the native title bar and uses the display's pixel scale. Open the required Downloads, Inspector, Settings, Add Download, and focused-control states in the app. Set Light or Dark in macOS Appearance yourself, then capture each state from the repository root:
+
+```sh
+mkdir -p "$PWD/../nexum-native-qa"
+swift scripts/capture-native-macos-window.swift \
+  --app "$PWD/target/release/bundle/macos/Nexum.app" \
+  --output "$PWD/../nexum-native-qa/downloads-light.png" \
+  --appearance light
+```
+
+The script selects one visible layer-0 window belonging to the exact running app bundle and PID, then calls `screencapture -x -o -l<windowid>`. It refuses missing or ambiguous windows, an appearance mismatch, and existing output files. It never changes the window, system appearance, or app settings. Each PNG has a `.png.json` sidecar with the app path, PID, window ID and bounds in points, effective macOS appearance, capture time, and actual pixel dimensions. For the matching Dark capture, use a new output name, `--appearance dark`, and `--expect-pixels WIDTHxHEIGHT` with the Light capture's reported pixel dimensions; this rejects a capture with different pixel dimensions without resizing the image. Compare both sidecars' point bounds and pixel dimensions to check for window geometry or display-scale changes. Repeat for each matching UI state and review the PNGs visually. Screen Recording permission may be needed for the terminal app. Restore the original macOS Appearance and any temporary Nexum settings after validation.
+
+The following native debug-bundle captures were taken on October 8–9, 2026, with the app following a Simplified Chinese macOS language setting. During capture, the script reported the same 1200 × 801-point window bounds and 2400 × 1602-pixel image dimensions for each pair. The [sanitized capture summary](assets/native-macos/capture-summary.json) records the dimensions and image hashes without local paths or PIDs.
+
+| App state | Light | Dark |
+| --- | --- | --- |
+| Downloads, completed task, and Inspector | [View](assets/native-macos/downloads-light.png) | [View](assets/native-macos/downloads-dark.png) |
+| Settings overview | [View](assets/native-macos/settings-light.png) | [View](assets/native-macos/settings-dark.png) |
+| Add Download with Source URL focused | [View](assets/native-macos/add-download-light.png) | [View](assets/native-macos/add-download-dark.png) |
+
+On October 9, 2026, the same native debug app also switched its in-app language immediately: [English Appearance](assets/native-macos/appearance-english-light.png) and [Simplified Chinese Appearance](assets/native-macos/appearance-chinese-light.png). The English choice survived an app restart, and the accessible Settings, Appearance, and Language names changed with the interface. These images document visual appearance only. The release checklist still requires a human VoiceOver reading, macOS per-app language checks, Reduce Motion, and validation of the final release bundle.
+
 For the Chinese version, see [RELEASE.zh-CN.md](RELEASE.zh-CN.md).
