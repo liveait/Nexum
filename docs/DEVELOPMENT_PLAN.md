@@ -97,10 +97,14 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Add keyboard navigation, accessible labels, focus management, and reduced-motion behavior
 - [x] Follow the macOS light/dark appearance with readable Desktop palettes
 - [x] Add a persisted System/English/Simplified Chinese language choice and localized visible and accessibility-facing Desktop strings
+- [x] Pin the Desktop pnpm and Tauri CLI versions, commit its dependency lockfile, and build an unsigned macOS app in CI from frozen dependencies; handle the Browser extension separately
 - [ ] Capture light/dark screenshots and complete native macOS visual, bilingual, and VoiceOver release checks
   - [x] Capture native debug-app Downloads, Settings, and Add Download states in both appearances; see [Release Process](RELEASE.md#native-macos-visual-evidence).
   - [x] Verify immediate in-app English/Simplified Chinese switching, accessible names, and English persistence after restart in the native debug app.
-  - [ ] Verify macOS per-app language override, Reduce Motion, VoiceOver reading, and the final release bundle.
+  - [x] Launch the main-checkout release bundle with the local Server; verify macOS per-app English override and restoration to system Simplified Chinese without changing Desktop settings.
+  - [ ] Confirm stopped transitions and indeterminate progress animation with macOS Reduce Motion enabled in the release bundle.
+  - [ ] Confirm actual VoiceOver reading of task actions, state, and Inspector progress in the release bundle.
+  - [ ] Separately launch the pinned-CLI release bundle and capture its light/dark visual evidence.
 - [ ] Add manual theme and accent-color options
 
 ### Phase 9 - Browser Integration
@@ -155,7 +159,7 @@ This plan distinguishes code-level foundations from an end-to-end feature availa
 - [x] Extend generated-certificate coverage to invalid or incomplete TLS configuration and trust/hostname handshake failures. Test CLI and Desktop credential gating for RPC and event subscriptions, and verify that the CLI does not retry plaintext after a TLS failure; keep private keys out of the repository.
 
 The staged transport decision and its non-goals are recorded in [ADR 0005](decisions/0005-tls-transport.md).
-2. The Desktop's system light/dark palettes and in-app English/Simplified Chinese switching have native debug-app evidence. Complete macOS per-app language, VoiceOver, Reduce Motion, and release-bundle checks. Keyboard navigation, accessible labels, focus management, and reduced-motion behavior are implemented but still need the full native release check.
+2. The Desktop's system light/dark palettes and in-app English/Simplified Chinese switching have native debug-app evidence. The main-checkout release bundle passed per-app English/system Chinese and local HTTP task checks. The pinned-CLI bundle still needs a separate native launch and final screenshots, plus actual VoiceOver speech and indeterminate-animation checks under Reduce Motion. Keyboard navigation, accessible labels, focus management, and reduced-motion behavior are implemented but still need the full native release check.
 3. Connect plugin providers and enforce their declared permissions.
 4. Replace simulated media operations with real processing, then expose automation and remote-device workflows.
 
