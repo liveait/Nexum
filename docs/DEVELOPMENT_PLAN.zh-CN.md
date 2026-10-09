@@ -101,10 +101,10 @@
 - [ ] 增加明暗模式截图，并完成原生 macOS 视觉、双语与 VoiceOver 发布检查
   - [x] 已用原生 debug App 拍摄下载列表、设置及添加下载的明暗模式截图；见[发布流程](RELEASE.zh-CN.md#macos-原生界面截图留证)。
   - [x] 已在原生 debug App 中验证应用内中英文即时切换、辅助功能名称和重启后保留英文选项。
-  - [x] 使用本地 Server 启动 release App；验证 macOS 应用专属 English 覆盖及恢复系统简体中文，且 Desktop 设置不变。
+  - [x] 使用本地 Server 启动主检出目录的 release App；验证 macOS 应用专属 English 覆盖及恢复系统简体中文，且 Desktop 设置不变。
   - [ ] 在 release App 中确认 macOS“减弱动态效果”会停止过渡及不确定进度动画。
   - [ ] 在 release App 中确认 VoiceOver 对任务操作、状态和详情进度的实际朗读。
-  - [ ] 补充最终 release App 的明暗模式视觉截图。
+  - [ ] 单独启动固定 CLI 构建的 release App，并补充其明暗模式视觉截图。
 - [ ] 增加手动主题和强调色选项
 
 ### Phase 9 - Browser 集成
@@ -159,7 +159,7 @@
 - [x] 补充无效或不完整 TLS 配置、信任/主机名握手失败测试。验证 CLI 和 Desktop 的 RPC/事件订阅凭据门控，并确认 CLI 在 TLS 失败后不会重试明文；私钥不得进入仓库。
 
 分阶段传输决策及其不包含项见 [ADR 0005](decisions/0005-tls-transport.zh-CN.md)。
-2. Desktop 系统明暗配色和应用内中英文切换已有原生 debug App 证据；仍需在 macOS 上完成应用专属语言、VoiceOver、减少动态效果及 release App 检查。键盘导航、可访问性标签、焦点管理和减少动效行为已实现，但完整原生发布验收尚未完成。
+2. Desktop 系统明暗配色和应用内中英文切换已有原生 debug App 证据。主检出目录的 release App 已完成应用专属 English／系统简体中文及本地 HTTP 任务检查。固定 CLI 构建的 App 仍需单独启动并补充最终截图，也需确认 VoiceOver 实际朗读和“减弱动态效果”下不确定进度动画停止。键盘导航、可访问性标签、焦点管理和减少动效行为已实现，但完整原生发布验收尚未完成。
 3. 接入 Plugin Provider 并执行其声明的权限。
 4. 用真实处理替换模拟的 Media 操作，再对外提供 Automation 与远程设备工作流。
 

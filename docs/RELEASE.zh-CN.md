@@ -49,6 +49,6 @@ swift scripts/capture-native-macos-window.swift \
 | 设置首页 | [查看](assets/native-macos/settings-light.png) | [查看](assets/native-macos/settings-dark.png) |
 | 添加下载，来源 URL 已聚焦 | [查看](assets/native-macos/add-download-light.png) | [查看](assets/native-macos/add-download-dark.png) |
 
-2026 年 10 月 9 日，同一个原生 debug App 的应用内语言也完成即时切换：[英文外观页](assets/native-macos/appearance-english-light.png)与[简体中文外观页](assets/native-macos/appearance-chinese-light.png)。英文选项在应用重启后仍然生效，设置、外观和语言的辅助功能名称也随界面切换。这些图片仅记录视觉外观。发布检查表仍需人工完成 VoiceOver 朗读、macOS 应用专属语言、减少动态效果，以及最终 release App 的验收。
+2026 年 10 月 9 日，同一个原生 debug App 的应用内语言也完成即时切换：[英文外观页](assets/native-macos/appearance-english-light.png)与[简体中文外观页](assets/native-macos/appearance-chinese-light.png)。英文选项在应用重启后仍然生效，设置、外观和语言的辅助功能名称也随界面切换。这些图片仅记录视觉外观。主检出目录的 release App 随后完成了上文记录的应用专属 English／系统简体中文验收。固定 CLI 构建的 App 仍需单独启动并补充最终明暗模式截图；实际 VoiceOver 朗读和“减弱动态效果”下不确定进度动画停止仍待确认。
 
 英文版见 [RELEASE.md](RELEASE.md)。
