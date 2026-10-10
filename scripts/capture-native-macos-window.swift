@@ -7,6 +7,7 @@ import Foundation
 import ImageIO
 
 private let bundleIdentifier = "com.nexum.desktop"
+private let primaryWindowTitle = "Nexum"
 
 private struct Options {
     let appURL: URL
@@ -60,7 +61,7 @@ private func usage() {
       --app /absolute/path/Nexum.app --output /absolute/path/capture.png \\
       --appearance light|dark [--expect-pixels WIDTHxHEIGHT]
 
-    Captures exactly one visible native Nexum.app window, without resizing it.
+    Captures exactly one visible primary Nexum.app window titled Nexum, without resizing it.
     The PNG includes the native title bar and uses the display's native pixel scale.
     A JSON metadata file is written beside it as capture.png.json.
     The output files must not already exist. Screen Recording permission may be required.
@@ -206,10 +207,14 @@ let allowedOwners = Set([
     bundle.object(forInfoDictionaryKey: "CFBundleName") as? String,
     bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
 ].compactMap { $0 })
+// macOS accessibility/UI helpers can create tiny layer-0 auxiliary windows in
+// the App process. The configured Tauri primary window has the title Nexum;
+// still refuse a capture if more than one such primary window is visible.
 private let candidates = windows(for: app.processIdentifier, owners: allowedOwners)
+    .filter { $0.title == primaryWindowTitle }
 guard candidates.count == 1, let window = candidates.first else {
     let ids = candidates.map { String($0.id) }.joined(separator: ", ")
-    fail("expected one visible layer-0 Nexum window for PID \(app.processIdentifier), found \(candidates.count)\(ids.isEmpty ? "" : " (IDs: \(ids))")")
+    fail("expected one visible layer-0 Nexum primary window titled \(primaryWindowTitle) for PID \(app.processIdentifier), found \(candidates.count)\(ids.isEmpty ? "" : " (IDs: \(ids))")")
 }
 
 capture(window, to: options.outputURL)

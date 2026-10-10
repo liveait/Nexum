@@ -44,7 +44,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -93,8 +94,8 @@ select:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 2px 5px 13px 10px;
+  gap: 8px;
+  padding: 2px 4px 13px 8px;
 }
 
 .sidebar-brand {
@@ -107,7 +108,8 @@ select:focus-visible {
 .sidebar-top-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex: none;
+  gap: 4px;
 }
 
 .sidebar-icon-button,
@@ -121,9 +123,15 @@ select:focus-visible {
 }
 
 .sidebar-icon-button {
-  width: 29px;
-  height: 29px;
+  width: 32px;
+  height: 32px;
+  flex: none;
   border-radius: 8px;
+}
+
+.sidebar-icon-button svg,
+.floating-add svg {
+  display: block;
 }
 
 .sidebar-icon-button:hover,
@@ -137,8 +145,6 @@ select:focus-visible {
   color: #fff;
   background: rgba(155, 124, 255, 0.78);
   box-shadow: 0 4px 12px rgba(8, 6, 25, 0.28);
-  font-size: 21px;
-  line-height: 1;
 }
 
 .primary-nav {
@@ -273,13 +279,24 @@ select:focus-visible {
 }
 
 .round-tool {
+  display: inline-flex;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
   width: 32px;
   height: 32px;
+  padding: 0;
   border-color: var(--line);
   border-radius: 9px;
   color: #9aa4bd;
   background: rgba(255, 255, 255, 0.035);
+  line-height: 0;
   transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.round-tool svg {
+  display: block;
+  flex: none;
 }
 
 .round-tool:hover,
@@ -324,6 +341,7 @@ input::placeholder {
 .message-banner {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   flex: 0 0 auto;
@@ -332,6 +350,19 @@ input::placeholder {
   border: 1px solid;
   border-radius: 8px;
   font-size: 12px;
+}
+
+.message-banner > span {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.message-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .message-banner.error {
@@ -388,6 +419,18 @@ input::placeholder {
   background: linear-gradient(135deg, #9878fa, #6980e7);
 }
 
+.dashboard-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.dashboard-add svg {
+  display: block;
+  flex: none;
+}
+
 .danger-text {
   color: #f4889a !important;
 }
@@ -430,10 +473,7 @@ input::placeholder {
 }
 
 .task-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 17px;
+  min-width: 0;
   min-height: 120px;
   padding: 15px 16px;
   border: 1px solid var(--line);
@@ -461,9 +501,10 @@ input::placeholder {
 }
 
 .task-row-main {
-  min-width: 0;
-  flex: 1;
   display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
   padding: 0;
   border: 0;
   color: inherit;
@@ -581,6 +622,9 @@ input::placeholder {
 
 .progress-track > span.indeterminate {
   width: 38%;
+}
+
+.progress-track > span.indeterminate.active {
   animation: progress-slide 1.4s ease-in-out infinite;
 }
 
@@ -589,12 +633,22 @@ input::placeholder {
   100% { transform: translateX(280%); }
 }
 
+.task-row-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+
 .task-row-meta {
   display: flex;
+  flex: 1 1 250px;
+  min-width: 0;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 8px;
   color: #7f89a2;
   font-size: 11px;
 }
@@ -620,6 +674,7 @@ input::placeholder {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 5px;
+  margin-left: auto;
   max-width: 145px;
 }
 
@@ -788,8 +843,6 @@ input::placeholder {
   color: #fff;
   background: linear-gradient(135deg, #8968f0, #587cd9);
   box-shadow: 0 10px 25px rgba(42, 35, 108, 0.46);
-  font-size: 28px;
-  line-height: 1;
   transition: transform 140ms ease, box-shadow 140ms ease;
 }
 
@@ -1046,7 +1099,19 @@ input::placeholder {
 .notification-list {
   display: grid;
   gap: 9px;
-  max-width: 760px;
+  width: 100%;
+}
+
+.notifications-page .page-heading {
+  flex-wrap: wrap;
+}
+
+.notification-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .notification-row {
@@ -1060,19 +1125,68 @@ input::placeholder {
   background: rgba(27, 33, 49, 0.82);
 }
 
-.notification-row > div {
+.notification-row.unread {
+  border-color: rgba(155, 124, 255, 0.4);
+  background: rgba(101, 77, 166, 0.18);
+}
+
+.notification-row > .status-light {
+  flex: none;
+}
+
+.notification-body {
   display: grid;
+  flex: 1;
+  min-width: 0;
   gap: 4px;
 }
 
-.notification-row strong {
+.notification-row strong,
+.notification-open {
   color: #e9ebf8;
   font-size: 12px;
 }
 
-.notification-row span:last-child {
+.notification-body strong {
+  overflow-wrap: anywhere;
+}
+
+.notification-open {
+  width: max-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-weight: 700;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.notification-open:hover:not(:disabled),
+.notification-open:hover:not(:disabled) strong {
+  color: #c9b9ff;
+  text-decoration: underline;
+}
+
+.notification-time {
   color: #7f8aa4;
   font-size: 11px;
+}
+
+.notification-dismiss {
+  flex: none;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 5px;
+  color: #aab3c8;
+  background: transparent;
+  font-size: 11px;
+}
+
+.notification-dismiss:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 /* Settings */
@@ -1193,6 +1307,11 @@ input::placeholder {
   margin-top: 7px;
 }
 
+.modal .server-directory-input {
+  display: block;
+  margin-top: 7px;
+}
+
 .input-with-action input {
   min-width: 0;
   flex: 1;
@@ -1207,7 +1326,8 @@ input::placeholder {
 
 .settings-card input,
 .settings-card select,
-.modal input {
+.modal input,
+.modal textarea {
   width: 100%;
   min-height: 38px;
   padding: 8px 10px;
@@ -1220,7 +1340,8 @@ input::placeholder {
 
 .settings-card input:focus,
 .settings-card select:focus,
-.modal input:focus {
+.modal input:focus,
+.modal textarea:focus {
   border-color: rgba(155, 124, 255, 0.62);
   box-shadow: 0 0 0 3px rgba(155, 124, 255, 0.12);
 }
@@ -1297,12 +1418,44 @@ input::placeholder {
 }
 
 .modal {
-  width: min(470px, 100%);
+  width: min(570px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   padding: 22px;
   border: 1px solid rgba(171, 148, 255, 0.27);
   border-radius: 15px;
   background: linear-gradient(145deg, #20263a, #151a29);
   box-shadow: 0 24px 65px rgba(0, 0, 0, 0.48);
+}
+
+.modal .source-url-input {
+  display: block;
+  min-height: 94px;
+  max-height: 220px;
+  margin-top: 7px;
+  resize: vertical;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.add-field-help {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.add-final-path {
+  margin: 13px 0 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.add-final-path output {
+  color: var(--text);
 }
 
 .modal-header {
@@ -1419,7 +1572,7 @@ input::placeholder {
     transition: none;
   }
 
-  .progress-track > span.indeterminate {
+  .progress-track > span.indeterminate.active {
     animation: none;
   }
 
@@ -1603,6 +1756,7 @@ input::placeholder {
   .activity-row strong,
   .notifications-empty h2,
   .notification-row strong,
+  .notification-open,
   .settings-card-tile strong { color: var(--text); }
 
   .state-created,
@@ -1650,7 +1804,7 @@ input::placeholder {
   .dashboard-empty,
   .dashboard-connection,
   .notifications-empty,
-  .notification-row span:last-child,
+  .notification-time,
   .field-help,
   .settings-planned p { color: var(--muted); }
 
@@ -1712,6 +1866,18 @@ input::placeholder {
 
   .notifications-empty svg { color: var(--accent); }
   .notification-row { background: #fff; }
+  .notification-row.unread {
+    border-color: rgba(101, 69, 207, 0.3);
+    background: #f4f0ff;
+  }
+
+  .notification-open:hover:not(:disabled),
+  .notification-open:hover:not(:disabled) strong { color: var(--accent-strong); }
+  .notification-dismiss { color: #4c5873; }
+  .notification-dismiss:hover:not(:disabled) {
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+  }
 
   .settings-card-tile:hover {
     border-color: rgba(101, 69, 207, 0.42);
@@ -1725,14 +1891,16 @@ input::placeholder {
 
   .settings-card input,
   .settings-card select,
-  .modal input {
+  .modal input,
+  .modal textarea {
     color: var(--text);
     background: #fff;
   }
 
   .settings-card input:focus,
   .settings-card select:focus,
-  .modal input:focus {
+  .modal input:focus,
+  .modal textarea:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
   }

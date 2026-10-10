@@ -25,7 +25,7 @@
 
 2026 年 10 月 9 日，本机 macOS release 构建生成了 `target/release/bundle/macos/Nexum.app`、`target/release/nexum-server` 和 `target/release/nexum-cli`。使用固定的 Tauri CLI 2.11.5 构建 Desktop 也已通过。App 的 `Info.plist` 在 `CFBundleLocalizations` 下包含 `en` 和 `zh-Hans`。显式添加本机临时签名后，App 通过 `codesign --verify --deep --strict`；`spctl --assess --type execute` 仍拒绝它。分发签名、公证和 Gatekeeper 放行仍未验收。
 
-主检出目录的 release App 已连接本地 Server 并显示已完成的 1 MB HTTP 下载；新固定 CLI 构建的 App 已通过构建及签名检查，但尚未单独启动。应用内选择“跟随系统”时，macOS 的 Nexum 应用专属 English 覆盖使运行中的 release 界面及任务、进度辅助功能名称在重启后切换为英文；移除覆盖并重启后恢复简体中文。应用的 `settings.json` 哈希未变化。启用 macOS“减弱动态效果”后，“添加下载”窗口仍会打开并聚焦“来源 URL”，Escape 会将焦点返回“添加下载”；测试后已恢复系统偏好。曾短暂启用“旁白”，App 通过 macOS 辅助功能树提供了任务、操作及进度控件名称，随后已将“旁白”恢复为关闭。尚未直接确认实际朗读内容和不确定进度的动画停止，因此这两项仍待验收。下方截图来自 debug App；release 包的明暗模式截图仍待补充。
+主检出目录的 release App 已连接本地 Server 并显示已完成的 1 MB HTTP 下载。10 月 10 日，隔离 macOS M0/M1 worktree 中由固定版本 CLI 构建的 App 也已单独启动并连接本地 Server；原生界面显示了已完成的已知大小任务、已暂停的未知大小任务，以及一个 `total_bytes=null`、下载量为 90,112 字节的已完成任务。最后一项任务的任务行显示满格进度，macOS 辅助功能树读为 100%；验收后已精确移除该测试任务和文件。同一 release App 的通知页已原生目视检查：通知卡片使用内容区可用宽度，右侧仅留正常页边距；测试通知可跳转并聚焦对应任务，测试后只清理了该通知、对应任务与文件，原有任务仍保留。应用内选择“跟随系统”时，macOS 的 Nexum 应用专属 English 覆盖使运行中的 release 界面及任务、进度辅助功能名称在重启后切换为英文；移除覆盖并重启后恢复简体中文。应用的 `settings.json` 哈希未变化。启用 macOS“减弱动态效果”后，“添加下载”窗口仍会打开并聚焦“来源 URL”，Escape 会将焦点返回“添加下载”；测试后已恢复系统偏好。曾短暂启用“旁白”，App 通过 macOS 辅助功能树提供了任务、操作及进度控件名称，随后已将“旁白”恢复为关闭。尚未直接确认实际朗读内容和不确定进度的动画停止，因此这两项仍待验收。下方截图来自 debug App；release 包的明暗模式截图仍待补充。
 
 ### macOS 原生界面截图留证
 
@@ -39,7 +39,7 @@ swift scripts/capture-native-macos-window.swift \
   --appearance light
 ```
 
-脚本只选择该精确 App 路径和 PID 所属的一个可见 layer-0 窗口，再执行 `screencapture -x -o -l<windowid>`。窗口不存在、存在多个候选、系统外观不符或输出文件已存在时会拒绝截图；不会更改窗口、系统外观或应用设置。每张 PNG 旁边会生成 `.png.json`，记录 App 路径、PID、窗口 ID、point 尺寸、macOS 当前外观、截图时间和实际像素尺寸。对应的深色截图应使用新文件名、`--appearance dark`，并通过 `--expect-pixels WIDTHxHEIGHT` 指定浅色截图报告的像素尺寸；像素尺寸不同时脚本会拒绝截图，不会缩放图片。再比较两份 sidecar 的 point 边界和像素尺寸，检查窗口几何尺寸或显示器缩放是否变化。对每组界面状态重复截图并人工比较 PNG。终端应用可能需要“屏幕录制”权限。验收后恢复原有的 macOS 外观和临时 Nexum 设置。
+脚本只选择该精确 App 路径和 PID 所属、标题为 `Nexum` 的一个可见 layer-0 主窗口，忽略其他标题的辅助窗口，再执行 `screencapture -x -o -l<windowid>`。窗口不存在、存在多个候选、系统外观不符或输出文件已存在时会拒绝截图；不会更改窗口、系统外观或应用设置。每张 PNG 旁边会生成 `.png.json`，记录 App 路径、PID、窗口 ID、point 尺寸、macOS 当前外观、截图时间和实际像素尺寸。对应的深色截图应使用新文件名、`--appearance dark`，并通过 `--expect-pixels WIDTHxHEIGHT` 指定浅色截图报告的像素尺寸；像素尺寸不同时脚本会拒绝截图，不会缩放图片。再比较两份 sidecar 的 point 边界和像素尺寸，检查窗口几何尺寸或显示器缩放是否变化。对每组界面状态重复截图并人工比较 PNG。终端应用可能需要“屏幕录制”权限。验收后恢复原有的 macOS 外观和临时 Nexum 设置。
 
 以下原生 debug App 截图拍摄于 2026 年 10 月 8–9 日，应用跟随 macOS 的简体中文语言设置。截图时，脚本报告各组浅色与深色截图的窗口边界均为 1200 × 801 point，图像尺寸均为 2400 × 1602 像素。[脱敏截图摘要](assets/native-macos/capture-summary.json)保留尺寸与图像哈希，不包含本机路径或 PID。
 
@@ -49,6 +49,6 @@ swift scripts/capture-native-macos-window.swift \
 | 设置首页 | [查看](assets/native-macos/settings-light.png) | [查看](assets/native-macos/settings-dark.png) |
 | 添加下载，来源 URL 已聚焦 | [查看](assets/native-macos/add-download-light.png) | [查看](assets/native-macos/add-download-dark.png) |
 
-2026 年 10 月 9 日，同一个原生 debug App 的应用内语言也完成即时切换：[英文外观页](assets/native-macos/appearance-english-light.png)与[简体中文外观页](assets/native-macos/appearance-chinese-light.png)。英文选项在应用重启后仍然生效，设置、外观和语言的辅助功能名称也随界面切换。这些图片仅记录视觉外观。主检出目录的 release App 随后完成了上文记录的应用专属 English／系统简体中文验收。固定 CLI 构建的 App 仍需单独启动并补充最终明暗模式截图；实际 VoiceOver 朗读和“减弱动态效果”下不确定进度动画停止仍待确认。
+2026 年 10 月 9 日，同一个原生 debug App 的应用内语言也完成即时切换：[英文外观页](assets/native-macos/appearance-english-light.png)与[简体中文外观页](assets/native-macos/appearance-chinese-light.png)。英文选项在应用重启后仍然生效，设置、外观和语言的辅助功能名称也随界面切换。这些图片仅记录视觉外观。主检出目录的 release App 随后完成了上文记录的应用专属 English／系统简体中文验收。固定 CLI 构建的 App 已单独启动并检查下载状态；最终明暗模式截图、实际 VoiceOver 朗读和“减弱动态效果”下不确定进度动画停止仍待确认。
 
 英文版见 [RELEASE.md](RELEASE.md)。

@@ -2082,7 +2082,9 @@ name = "nexum-desktop"
 version = "0.1.0"
 dependencies = [
  "nexum-protocol",
+ "percent-encoding",
  "rcgen",
+ "reqwest 0.12.28",
  "rustls",
  "rustls-native-certs",
  "security-framework",
@@ -2093,6 +2095,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
+ "tokio",
 ]
 
 [[package]]
@@ -2103,11 +2106,13 @@ version = "0.1.0"
 name = "nexum-engine"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "nexum-domain",
  "nexum-task",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -312,7 +312,7 @@ impl HttpTransferControl {
         self.with_state(|state| state.cancelled)
     }
 
-    /// Returns whether the completed response has replaced the destination.
+    /// Returns whether the complete response was committed to the destination.
     pub fn is_committed(&self) -> bool {
         self.with_state(|state| state.committed)
     }
@@ -530,6 +530,152 @@ fn write_resume_metadata(
     ))
 }
 
+fn ensure_destination_absent(destination: &Path) -> Result<(), EngineError> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(_) => Err(EngineError::Failed(format!(
+            "download destination already exists: {}",
+            destination.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(EngineError::Failed(format!(
+            "could not inspect download destination {}: {error}",
+            destination.display()
+        ))),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_without_replacing(partial: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let partial = CString::new(partial.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    // SAFETY: Both paths are NUL-terminated and remain alive for the call.
+    if unsafe { libc::renamex_np(partial.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rename_without_replacing(partial: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let partial = CString::new(partial.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    // SAFETY: Both paths are NUL-terminated and remain alive for the call.
+    if unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            partial.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_without_replacing(partial: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let partial = partial
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: Both paths are NUL-terminated and remain alive for the call.
+    // Omitting MOVEFILE_REPLACE_EXISTING makes this an atomic no-clobber move.
+    if unsafe { MoveFileExW(partial.as_ptr(), destination.as_ptr(), 0) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn rename_without_replacing(_partial: &Path, _destination: &Path) -> std::io::Result<()> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn no_replace_rename_unsupported(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENOSYS | libc::EINVAL | libc::ENOTSUP)
+    )
+}
+
+#[cfg(windows)]
+fn no_replace_rename_unsupported(_error: &std::io::Error) -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn no_replace_rename_unsupported(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Unsupported
+}
+
+/// Publishes a fully written partial file without replacing an existing path.
+fn commit_download(partial: &Path, destination: &Path) -> Result<(), EngineError> {
+    commit_download_with_rename(partial, destination, rename_without_replacing)
+}
+
+fn commit_download_with_rename(
+    partial: &Path,
+    destination: &Path,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), EngineError> {
+    let result = match rename(partial, destination) {
+        Ok(()) => return Ok(()),
+        Err(error) if no_replace_rename_unsupported(&error) => {
+            // On older kernels or filesystems without no-clobber rename, hard
+            // links retain the atomic publish guarantee. If neither operation
+            // is supported, fail rather than expose an empty placeholder file.
+            match std::fs::hard_link(partial, destination) {
+                Ok(()) => Ok(()),
+                Err(link_error) if link_error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(link_error)
+                }
+                Err(link_error) => {
+                    return Err(EngineError::Failed(format!(
+                        "could not atomically commit download to {}: no-clobber rename unavailable ({error}); hard-link fallback failed ({link_error})",
+                        destination.display()
+                    )));
+                }
+            }
+        }
+        Err(error) => Err(error),
+    };
+    result.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            EngineError::Failed(format!(
+                "download destination already exists: {}",
+                destination.display()
+            ))
+        } else {
+            EngineError::Failed(format!(
+                "could not commit download to {}: {error}",
+                destination.display()
+            ))
+        }
+    })
+}
+
 /// Reads a valid partial response's progress without changing it.
 pub fn resumable_partial_progress(
     source: &str,
@@ -606,8 +752,7 @@ impl TemporaryDownload {
             .sync_all()
             .map_err(|error| EngineError::Failed(error.to_string()))?;
         drop(self.file.take());
-        std::fs::rename(&self.path, destination)
-            .map_err(|error| EngineError::Failed(error.to_string()))
+        commit_download(&self.path, destination)
     }
 }
 
@@ -654,8 +799,10 @@ impl ResumableDownload {
             .sync_all()
             .map_err(|error| EngineError::Failed(error.to_string()))?;
         drop(self.file.take());
-        std::fs::rename(&self.path, destination)
-            .map_err(|error| EngineError::Failed(error.to_string()))?;
+        commit_download(&self.path, destination)?;
+        // The destination is visible and complete now. Cleanup cannot turn a
+        // committed response back into a failed one, even if removal fails.
+        let _ = std::fs::remove_file(&self.path);
         let _ = std::fs::remove_file(&self.metadata_path);
         Ok(())
     }
@@ -700,7 +847,7 @@ impl HttpEngine {
             .ok_or_else(|| EngineError::TaskNotFound(task.task_id.clone()))
     }
 
-    /// Downloads a complete HTTP response before replacing the destination.
+    /// Downloads a complete HTTP response before committing the destination.
     ///
     /// This call blocks and may be run from a worker without holding Core's lock.
     pub fn download_to(&self, source: &str, destination: &str) -> Result<Progress, EngineError> {
@@ -749,8 +896,9 @@ impl HttpEngine {
     /// Downloads an HTTP response into a stable partial file and resumes it
     /// after a process restart when the saved validator and server range match.
     ///
-    /// The partial file is renamed to `destination` only after the complete
-    /// response has been received. Ordinary transfer errors keep a validated
+    /// The partial file is published at `destination` only after the complete
+    /// response has been received, and an existing destination is never replaced.
+    /// Ordinary transfer errors keep a validated
     /// partial response; cancellation removes it together with its sidecar.
     pub fn download_to_resumable<F>(
         &self,
@@ -814,6 +962,10 @@ impl HttpEngine {
         F: FnMut(Progress) -> Result<(), EngineError>,
     {
         control.check_cancelled()?;
+        // The hard-link fallback can leave both paths pointing at the same
+        // inode if a crash happens before cleanup. Never open or truncate that
+        // partial while a final destination already exists.
+        ensure_destination_absent(Path::new(destination))?;
 
         let mut candidate = match read_resume_metadata(partial_path) {
             Ok(Some(metadata)) => {
@@ -1595,6 +1747,136 @@ mod tests {
         assert!(matches!(result, Err(EngineError::Failed(_))));
         assert_eq!(std::fs::read(&destination).unwrap(), b"old bytes");
         assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn completed_temporary_download_publishes_one_file() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let mut temporary = TemporaryDownload::create(&destination).unwrap();
+        temporary
+            .file
+            .as_mut()
+            .unwrap()
+            .write_all(b"complete bytes")
+            .unwrap();
+
+        temporary.finish(&destination).unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete bytes");
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn unsupported_no_replace_rename_uses_atomic_hard_link_fallback() {
+        let dir = TestDir::new();
+        let partial = dir.0.join("file.part");
+        let destination = dir.0.join("file.bin");
+        std::fs::write(&partial, b"complete bytes").unwrap();
+
+        commit_download_with_rename(&partial, &destination, |_, _| {
+            Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete bytes");
+        assert_eq!(std::fs::read(&partial).unwrap(), b"complete bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_download_does_not_replace_a_dangling_symlink() {
+        let dir = TestDir::new();
+        let partial = dir.0.join("file.part");
+        let destination = dir.0.join("file.bin");
+        std::fs::write(&partial, b"complete bytes").unwrap();
+        std::os::unix::fs::symlink("missing-target", &destination).unwrap();
+
+        let result = commit_download(&partial, &destination);
+
+        assert!(
+            matches!(result, Err(EngineError::Failed(message)) if message.contains("destination already exists"))
+        );
+        assert_eq!(std::fs::read(&partial).unwrap(), b"complete bytes");
+        assert_eq!(
+            std::fs::read_link(&destination).unwrap(),
+            Path::new("missing-target")
+        );
+    }
+
+    #[test]
+    fn completed_http_response_does_not_replace_existing_destination() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        std::fs::write(&destination, b"original bytes").unwrap();
+        let (source, server) =
+            serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+
+        let result = HttpEngine::new().download_to(&source, destination.to_str().unwrap());
+
+        server.join().unwrap();
+        assert!(
+            matches!(result, Err(EngineError::Failed(message)) if message.contains("destination already exists"))
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"original bytes");
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn resumable_http_response_does_not_replace_destination_created_during_transfer() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let partial = dir.0.join(".file.bin.nexum.part");
+        let (source, server) =
+            serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+        let control = HttpTransferControl::new();
+
+        let result = HttpEngine::new().download_to_resumable_with_control(
+            &source,
+            destination.to_str().unwrap(),
+            &partial,
+            &control,
+            |_| {
+                std::fs::write(&destination, b"another file")
+                    .map_err(|error| EngineError::Failed(error.to_string()))
+            },
+        );
+
+        server.join().unwrap();
+        assert!(
+            matches!(result, Err(EngineError::Failed(message)) if message.contains("destination already exists"))
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"another file");
+        assert!(!partial.exists());
+        assert!(!resumable_metadata_path(&partial).exists());
+        assert!(!control.is_committed());
+    }
+
+    #[test]
+    fn resumable_http_recovery_never_truncates_a_linked_completed_file() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let partial = dir.0.join(".file.bin.nexum.part");
+        std::fs::write(&partial, b"completed bytes").unwrap();
+        std::fs::hard_link(&partial, &destination).unwrap();
+        let control = HttpTransferControl::new();
+
+        let result = HttpEngine::new().download_to_resumable_with_control(
+            "http://127.0.0.1:9/file",
+            destination.to_str().unwrap(),
+            &partial,
+            &control,
+            |_| Ok(()),
+        );
+
+        assert!(
+            matches!(result, Err(EngineError::Failed(message)) if message.contains("destination already exists"))
+        );
+        assert_eq!(std::fs::read(&destination).unwrap(), b"completed bytes");
+        assert_eq!(std::fs::read(&partial).unwrap(), b"completed bytes");
+        assert!(!control.is_committed());
+        assert!(control.is_finished());
     }
 
     #[test]
