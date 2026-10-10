@@ -66,6 +66,17 @@ Server 将任务元数据和进度保存到 `--data-dir` 下的 `nexum.sqlite`�
 `task queue` 会持久化任务并触发 Server 派发器。派发器会持续选取符合条件的排队 HTTP/HTTPS 任务，直到达到 Scheduler 并发上限或目标路径规则不允许继续领取。`task start` 仍是手动 kick，会选取一个排队 HTTP/HTTPS 任务，启动 Worker 后返回任务 ID，然后调用同一派发器填充其他可用槽位。Worker 每写入一个响应块就报告进度；Server 在新增至少 1 MiB 或经过 250 ms 时持久化中间快照，并在任务标记为 `Completed` 前刷新最终快照。传输异步完成，可再次执行 `task list` 或 `task get ID` 查看字节数和完成状态。Server 会拒绝数据目录内的目标、符号链接目标，以及与活动传输重叠的目标。Worker 会将响应写入目标目录的隐藏稳定部分文件，并原子维护记录来源、目标、校验器和预期长度的 JSON sidecar，完整后再重命名到目标路径。传输失败会保留已有目标文件，并将错误文本保存到任务视图的 `error` 字段；在重试策略允许时重新排队，有可用槽位时派发器会自动启动重试。默认策略允许重试三次。领取新一轮传输时会清除旧错误；如果 sidecar 匹配，Server 会在领取后恢复部分字节进度。活跃 HTTP 传输可以在响应块边界暂停，并在同一 Server 进程内恢复；Worker 暂停时保留临时文件和 HTTP 响应。`task remove` 会取消活跃 HTTP Worker，最多等待其退出 30 秒后删除任务，并保留已有目标文件。超时会返回错误，Worker 可能继续阻塞到 30 分钟 HTTP 请求超时，退出后可以重试删除。阻塞中的响应读取可能让暂停等到 HTTP 请求超时；Server 重启后，只有来源、目标、ETag 或 Last-Modified 校验器、预期长度以及服务端确认的 `206 Partial Content` 范围都匹配时，才会复用稳定的部分文件和 sidecar。收到 `200`、校验器变化或缺失、范围格式错误或长度不一致时，会丢弃部分响应并从零开始；没有校验器的响应无法在重启后续传。Magnet 和本地文件来源仍无传输 Engine。
 
 
+### 托管 Server 协议测试
+
+`--managed` 是 App 子进程的私有启动入口，要求绝对数据目录和 stdin 启动帧，不能通过 `--auth-token` 或外部配置文件提供密钥。它当前尚未接入 Desktop。控制帧、就绪响应、启动等待和退出边界见 [ADR 0006](decisions/0006-managed-macos-server.zh-CN.md#首个实现切片server-托管启动协议)。运行隔离的协议与进程测试：
+
+```bash
+cargo test --locked -p nexum-protocol managed::tests
+cargo test --locked -p nexum-server --test managed
+```
+
+进程测试自动创建并清理临时数据和下载目录，不需要停止现有的开发 Server。
+
 ## 认证
 
 Server 接受 `Bearer` 和 `ApiKey` 凭据。通过 `--config` 传入的 key-value 文件配置认证：

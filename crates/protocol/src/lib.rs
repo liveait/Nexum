@@ -1,5 +1,7 @@
 //! Nexum JSON-RPC 2.0 protocol primitives.
 
+pub mod managed;
+
 pub use nexum_security::{
     AuthenticationError, AuthenticationScheme, Credential, RateLimit, TlsConfig, TlsConfigError,
 };

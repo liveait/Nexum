@@ -1,5 +1,7 @@
 //! Nexum TCP server with configuration support.
 
+mod managed;
+
 use nexum_core::{
     Core,
     nexum_domain::TaskId,
@@ -99,6 +101,8 @@ const LOCK_FILE: &str = "nexum.lock";
 
 struct ServerState {
     core: ServerCore,
+    // Workers retain the lock along with the database until process termination.
+    _data_dir_lock: File,
     data_dir: PathBuf,
     active_http: HashMap<TaskId, HttpTransfer>,
     active_destinations: HashSet<PathBuf>,
@@ -1747,6 +1751,7 @@ fn print_usage() {
     eprintln!("  --config PATH       Load config from file");
     eprintln!("  --port PORT         Server port (default: 39100)");
     eprintln!("  --data-dir PATH     Data directory (default: ./data)");
+    eprintln!("  --managed           Desktop-managed mode; requires an absolute --data-dir");
     eprintln!("  --max-connections N Max concurrent connections (default: 100)");
     eprintln!("  --require-auth BOOL Require authentication for all requests");
     eprintln!("  --auth-scheme SCHEME Authentication scheme (Bearer or ApiKey)");
@@ -1826,7 +1831,25 @@ fn load_tls_server_config(config: &ServerConfig) -> io::Result<Option<Arc<rustls
     Ok(None)
 }
 
+fn managed_mode_requested(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--managed" => return true,
+            "--config" | "--port" | "--data-dir" | "--max-connections" | "--require-auth"
+            | "--auth-scheme" | "--auth-token" | "--tls-cert-path" | "--tls-key-path"
+            | "--rate-limit-rps" | "--rate-limit-burst" => index += 2,
+            _ => index += 1,
+        }
+    }
+    false
+}
+
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if managed_mode_requested(&args) {
+        return managed::run(&args);
+    }
     let (config, _config_path, show_version, show_help) =
         parse_cli_flags().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
 
@@ -1845,9 +1868,10 @@ fn main() -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let tls_server = load_tls_server_config(&config)?;
 
-    let _data_dir_lock = lock_data_dir(&config.data_dir)?;
+    let data_dir_lock = lock_data_dir(&config.data_dir)?;
     let state = Arc::new(Mutex::new(ServerState {
         core: open_core(&config.data_dir)?,
+        _data_dir_lock: data_dir_lock,
         data_dir: std::fs::canonicalize(&config.data_dir)?,
         active_http: HashMap::new(),
         active_destinations: HashSet::new(),
@@ -1912,6 +1936,150 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn managed_args(options: &[&str]) -> Vec<String> {
+        options.iter().map(|option| (*option).to_owned()).collect()
+    }
+
+    #[test]
+    fn managed_mode_detection_preserves_external_option_values() {
+        for flag in [
+            "--config",
+            "--port",
+            "--data-dir",
+            "--max-connections",
+            "--require-auth",
+            "--auth-scheme",
+            "--auth-token",
+            "--tls-cert-path",
+            "--tls-key-path",
+            "--rate-limit-rps",
+            "--rate-limit-burst",
+        ] {
+            assert!(!managed_mode_requested(&managed_args(&[flag, "--managed"])));
+        }
+        let args = managed_args(&[
+            "--auth-scheme",
+            "Bearer",
+            "--auth-token",
+            "--managed",
+            "--require-auth",
+            "true",
+        ]);
+        assert!(!managed_mode_requested(&args));
+        let (config, _, _, _) = parse_cli_args(&args).unwrap();
+        assert!(config.require_auth);
+        assert_eq!(config.auth_token.as_deref(), Some("--managed"));
+    }
+
+    #[test]
+    fn managed_mode_detection_accepts_real_option_in_any_position() {
+        for options in [
+            vec!["--managed", "--data-dir", "/tmp/nexum"],
+            vec!["--data-dir", "/tmp/nexum", "--managed"],
+            vec!["--auth-token", "--managed", "--managed"],
+            vec!["--ignored", "--managed"],
+        ] {
+            assert!(managed_mode_requested(&managed_args(&options)));
+        }
+        assert!(!managed_mode_requested(&managed_args(&[
+            "--ignored",
+            "value"
+        ])));
+    }
+
+    #[test]
+    fn managed_mode_requires_explicit_absolute_data_dir() {
+        for options in [
+            vec!["--managed"],
+            vec!["--managed", "--data-dir"],
+            vec!["--managed", "--data-dir", "./data"],
+            vec!["--managed", "--data-dir", ""],
+        ] {
+            assert!(managed::parse_args(&managed_args(&options)).is_err());
+        }
+        let config = managed::parse_args(&managed_args(&[
+            "--managed",
+            "--data-dir",
+            "/tmp/nexum-managed",
+            "--max-connections",
+            "12",
+        ]))
+        .unwrap();
+        assert_eq!(config.port, 0);
+        assert_eq!(config.max_connections, 12);
+        assert!(config.require_auth);
+        assert_eq!(config.auth_scheme.as_deref(), Some("Bearer"));
+        assert!(config.auth_token.is_none());
+        assert!(config.tls_cert_path.is_none());
+        assert!(config.tls_key_path.is_none());
+        assert!(config.rate_limit.is_none());
+    }
+
+    #[test]
+    fn managed_mode_rejects_external_flags_and_duplicate_options() {
+        for flag in [
+            "--config",
+            "--port",
+            "--require-auth",
+            "--auth-scheme",
+            "--auth-token",
+            "--tls-cert-path",
+            "--tls-key-path",
+            "--rate-limit-rps",
+            "--rate-limit-burst",
+            "--version",
+            "--help",
+            "--unknown",
+        ] {
+            let args = managed_args(&[
+                "--managed",
+                "--data-dir",
+                "/tmp/nexum-managed",
+                flag,
+                "private-token-do-not-log",
+            ]);
+            let error = managed::parse_args(&args).unwrap_err();
+            assert!(!error.contains("private-token-do-not-log"));
+        }
+        for options in [
+            vec!["--managed", "--managed", "--data-dir", "/tmp/nexum"],
+            vec![
+                "--managed",
+                "--data-dir",
+                "/tmp/nexum",
+                "--data-dir",
+                "/tmp/nexum",
+            ],
+            vec![
+                "--managed",
+                "--data-dir",
+                "/tmp/nexum",
+                "--max-connections",
+                "10",
+                "--max-connections",
+                "10",
+            ],
+        ] {
+            assert!(managed::parse_args(&managed_args(&options)).is_err());
+        }
+    }
+
+    #[test]
+    fn managed_mode_rejects_zero_or_invalid_connection_limit() {
+        for limit in ["0", "-1", "invalid", "184467440737095516160"] {
+            assert!(
+                managed::parse_args(&managed_args(&[
+                    "--managed",
+                    "--data-dir",
+                    "/tmp/nexum",
+                    "--max-connections",
+                    limit,
+                ]))
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn config_from_default_returns_defaults() {

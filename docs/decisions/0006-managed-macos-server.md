@@ -1,6 +1,6 @@
 # ADR 0006: App-Managed Local Server for macOS
 
-- Status: Accepted for M1 design; implementation pending
+- Status: Accepted for M1; Server managed bootstrap implemented, Desktop supervisor pending
 - Date: 2026-10-10
 
 ## Context
@@ -35,6 +35,17 @@ M1 makes a macOS installation usable by opening the App and pasting an HTTP(S) U
 - Introduce an explicit Managed/External settings schema. Refactor Desktop commands and event subscriptions to resolve the active endpoint in Rust.
 - Add a managed default-destination and task-creation command. Do not claim the M1 acceptance gate until these are usable from the release App.
 - `port 0` requires reporting the actual bound port; the current Server log line prints the configured port and is insufficient. The current `--auth-token` flag exposes a secret in process arguments and must not be used for the managed child.
+
+### First implementation slice: managed Server bootstrap
+
+On October 11, 2026, the Server gained a dedicated `--managed` entry point that accepts only an explicit absolute `--data-dir` and an optional positive `--max-connections`. It rejects external configuration, fixed-port, TLS, and command-line authentication flags. The existing manually started Server path remains available. The Desktop does not call this entry point yet.
+
+- `nexum_protocol::managed` defines private pipe frames: a four-byte big-endian length followed by JSON, capped at 4096 bytes per frame. The first stdin frame has `type=start`, control version `1`, the Server package version, RPC version, and a 32-byte Bearer secret encoded as 64 hexadecimal characters. The Server validates it before creating storage, opening the database, or listening; an incomplete startup frame fails after five seconds. Generating the random secret remains the future Desktop supervisor's responsibility.
+- stdout carries exactly one readiness frame with the control/Server/RPC versions, child PID, and actual loopback endpoint from `listener.local_addr()`. It contains no secret. Diagnostics use stderr, and frame-parser errors do not echo input. The future Desktop still needs to verify the bundled binary's SHA-256 digest, validate readiness, and perform an authenticated health probe.
+- After startup, `type=shutdown` with control version `1`, stdin EOF, or an invalid control frame ends the child. The listener checks its control channel every 25 ms. It does not wait for blocked RPC, event, or HTTP workers and does not remove/cancel tasks to clear partial files. Exit relies on existing transactional persistence and cross-restart recovery; it does not guarantee flushing every in-flight byte before exit. Shared Server state retains the data-directory lock until workers holding the database exit with the process.
+- Isolated process tests cover ephemeral endpoints, TCP/HTTP/events authentication, invalid/timed-out startup, duplicate data-directory ownership, private readiness output, lock release after Shutdown/EOF, and stalled-transfer resume and destination protection. They use independent temporary directories and HTTP fixtures without adopting development Server data.
+
+This slice does not bundle the Server, implement the App supervisor/settings modes, select the App data directory, or wire native UI. M1 remains unaccepted. The next slice connects the Tauri backend to this protocol.
 
 ## Acceptance and verification boundary
 
