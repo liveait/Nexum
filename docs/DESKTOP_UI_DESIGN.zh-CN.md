@@ -2,7 +2,7 @@
 
 状态：已实现 macOS Desktop UI 基线；剩余项目已标注为计划项。
 
-本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、带 macOS Keychain 凭据操作的 Settings 卡片、带原生目标选择器的 Add Download Sheet、状态栏、事件驱动刷新、键盘交互、可访问性标签、焦点管理、减少动效行为、跟随系统的明暗配色、中英文 UI 文案和计划能力占位。
+本文定义 Tauri Desktop 的 macOS 优先信息架构和交互模型。当前 `apps/desktop/src/App.tsx` 与 `App.css` 已实现侧边栏、Downloads、Inspector、带 macOS Keychain 凭据操作的 Settings 卡片、带原生文件夹选择器的 Add Download Sheet、状态栏、事件驱动刷新、键盘交互、可访问性标签、焦点管理、减少动效行为、跟随系统的明暗配色、中英文 UI 文案和计划能力占位。
 
 英文版见 [DESKTOP_UI_DESIGN.md](DESKTOP_UI_DESIGN.md)。
 
@@ -70,7 +70,8 @@ Downloads 页头提供过滤器和紧凑控制：
 - **添加**：从侧边栏或悬浮按钮打开 Add Download Sheet。
 - **过滤**：选择全部、活动、排队、已完成或失败任务。
 - **Inspector**：宽窗口切换列表右侧详情，窄窗口切换选中任务行下方详情。
-- **搜索**：在任务 ID、来源、目标路径和状态中做本地过滤。
+- **搜索**：在显示的文件名、来源、目标路径和状态中做本地过滤。
+- 更多操作占位、Inspector 和搜索图标在等大的工具栏按钮中居中。
 - 任务行根据状态提供暂停、恢复、排队、启动或删除操作。
 - 底部状态栏显示 HTTP/HTTPS、连接状态和最近刷新时间。
 
@@ -80,11 +81,12 @@ Downloads 页头提供过滤器和紧凑控制：
 
 ### 3.1 任务行内容
 
-每行只显示 Server 实际提供的值：
+每行展示基于 Server 任务数据的内容：
 
-- 任务名称：当前使用任务 ID；协议提供文件名后再派生更友好的名称。
-- 状态徽标：Created、Queued、Downloading、Paused、Completed 或 Failed。
-- 进度条：知道 `total_bytes` 时使用确定进度，否则使用不确定进度。
+- 任务名称：从目标路径提取文件名，必要时回退到来源 URL 的文件名或主机名。任务 ID 只用于内部 RPC 和选中状态。
+- 状态徽标：Created、Queued、Downloading、Paused、Completed 或 Failed。徽标在每行标题的右侧对齐，不受可用操作数量影响。
+- 进度条：`Completed` 总是显示满条，因为终态表示传输已结束，即使总大小缺失或与已下载量不一致也一样。字节文字仍保留实际报告的值，不虚构总大小。其他任务在已知 `total_bytes` 时显示确定进度；总大小未知时使用不确定进度条，仅在 `Downloading` 状态滚动，其余状态保持静止；Inspector 遵循同一规则。
+- 来源和进度条使用卡片的内部宽度。元数据与任务操作放在可随窄窗口换行的底部区域，操作仅占自身宽度；不再预留贯穿整行的操作列。
 - 字节文本：`downloaded_bytes / total_bytes`，使用可读单位。
 - 目标路径，过长时截断并提供 Tooltip。
 - `error` 存在时在行下显示最近一次错误。
@@ -107,23 +109,24 @@ Inspector 只读展示任务元数据。任务行提供当前任务操作；原�
 
 - **未连接：** 保留任务页面，在底部状态栏/错误条显示不可用状态，并引导用户到 Settings 修改 Server 地址。
 - **已连接但没有任务：** 将“添加下载”作为主操作。
-- **加载中：** 保留现有列表，只在工具栏显示小型加载指示。
+- **加载中：** 同一 Server 与凭据上下文内刷新时保留现有列表。切换 Server 或凭据时，立即隐藏旧任务列表、选中项、上次更新时间和正在执行的行操作；只有新上下文的快照成功后才显示任务。旧请求即使迟到，也不能恢复旧任务行或对新 Server 执行行操作。
 - **请求失败：** 保留最近一次成功列表，标记数据过期，并显示可重试错误条。瞬时错误不能把有用列表替换成空状态。
+- **操作消息：** 成功操作在 Downloads 页显示可手动关闭的提示，并在五秒后自动消失。错误提示可手动关闭；可通过刷新恢复时保留“重试”入口。后续成功会清除旧错误，后台轮询不会立刻抹掉它。
 - **不支持来源：** 提交前校验 HTTP/HTTPS，并说明 Magnet/本地文件传输尚未可用。
 
 ## 4. Add Download Sheet
 
 Sheet 只承担一条清晰流程：
 
-1. Source URL 输入框。
-2. Destination 输入框，通过 Tauri dialog plugin 提供原生保存对话框。
-3. 当前 Server 合约要求显式填写 Task ID。
+1. 较高的 Source URL 文本框会自动软换行。每次只接收一个 HTTP/HTTPS URL；实际换行视为输入错误。
+2. 先根据 URL 路径最后一段解码并立即显示可编辑的文件名建议，再短时探测 HTTP 响应头中的 `Content-Disposition`（优先使用有效的 UTF-8 `filename*`，其次使用 `filename`）。响应头没有安全名称时，可使用重定向后的最终 URL 路径。探测先发 HEAD，必要时再发只读取响应头的带单字节 Range 的 GET；不读取响应正文。探测有较短的总超时，失败时保留路径建议。未经手动编辑的文件名正在探测时禁用提交，避免快速提交把 GitHub codeload 链接的 `main` 路径段当作文件名。手动修改立即优先，后续探测和 URL 改动不得覆盖；URL 改动或关闭 Sheet 后忽略过期结果。
+3. 连接回环地址的 Server 时，每次新建 Sheet 都默认使用这台 Mac 的系统 Downloads 目录，可用原生目录选择器为当前任务另选文件夹。连接远程 Server 时，需输入 Server 主机上的绝对文件夹路径。提交前显示最终完整路径。
 4. Advanced 折叠区预留 headers、优先级和带宽策略；Server 支持前保持隐藏。
 5. Cancel 与 Add Download 按钮。
 
 提交时创建任务并立即排队。只有两个 RPC 都成功后才关闭 Sheet。创建成功但排队失败后，不重复创建任务的重试流程仍待实现。
 
-当前 Server 要求显式任务 ID 和目标路径，因此第一版保留这两个字段。协议未来允许 ID 可选时无需改变布局。
+当前 Server RPC 要求显式任务 ID 和目标路径。Desktop 为每项新任务在内部生成唯一 ID，传给 `task.create` 和 `task.queue`；用户提供来源，并可修改文件名或文件夹。文件名不得为空、`.`、`..`，也不得包含路径分隔符和控制字符。创建任务前，只有连接回环地址的 Server 才检查本机目标文件是否已存在；两类 Server 都会检查已有任务的目标路径，冲突时要求更换名称。这台 Mac 无法预检远程 Server 的文件系统。传输引擎提交文件时也不会替换已有目标，因为仅靠提交前检查无法阻止之后的竞态。
 
 ## 5. 设置
 
@@ -133,7 +136,7 @@ Sheet 只承担一条清晰流程：
 - **认证：** 在通用设置中针对当前已保存的 Server 显示 `Bearer`/`ApiKey` scheme 选择器、只写 secret 输入框、已配置 scheme 状态，以及保存/清除操作。将 scheme 和 secret 一起按 Server 地址保存在 macOS Keychain，不能把 secret 回读到 React。保存、清除或切换当前 Server 后重启事件订阅并刷新 Task 快照。允许为回环明文地址和显式 `tls://` 地址保存凭据。明文凭据仍只允许回环地址；TLS 客户端会先校验 Server 名称和系统根证书链，再发送凭据。
 - **更新：** 自动策略使用事件刷新；事件流断开时回退到空闲每五秒、下载中每秒的轮询。手动策略会禁用该轮询回退。
 - **外观：** 壳层跟随系统明暗外观；跟随系统/英文/简体中文语言选择即时保存，并与 Server 地址、刷新策略一起持久化。手动主题和强调色选择仍待实现。
-- **通知：** 在本次 Desktop 会话的 Activity Center 显示任务完成、失败和重试事件；通知偏好与静音控制留待后续切片。
+- **通知：** 在本次 Desktop 会话的活动中心显示任务操作、完成、失败和重试事件。卡片使用内容区可用宽度，不留下无用的右侧空列。侧边栏角标只计未读项，打开通知页即标记为已读。若相关任务仍在当前 Server，点击通知会切换到 Downloads、清除遮挡该任务的过滤或搜索条件、选中该任务、将其滚动到可见区域并聚焦，同时打开 Inspector；已移除或不可用的任务不显示失效的跳转操作。每条通知可单独清除，也可全部清除。内存中只保留最新 30 条，重启应用后不持久化；通知偏好与静音控制留待后续切片。
 - 第一版 Server 是独立进程的说明。
 
 通过 Tauri 命令将地址、刷新策略和语言偏好保存到 macOS Application Support 目录。凭据只保存在 macOS Keychain。Tauri 后端会为普通 RPC 和独立的 `events.subscribe` 请求附加凭据，Keychain 失败时显示不含 secret 的错误。其他平台的 Desktop 可以无认证连接，但不支持保存或清除凭据。
@@ -172,8 +175,8 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 - `⌘N` 打开 Add Download；`⌘F` 打开并聚焦 Downloads 搜索。Escape 关闭已打开的 Sheet 或搜索框。侧边栏和操作控件仍按正常 Tab 顺序访问。
 - 任务选择控件是按钮：Enter 或 Space 选中任务，上/下方向键在可见任务之间移动，Home/End 移到首个或最后一个可见任务。任务操作使用独立按钮。
 - Add Sheet 首先聚焦 Source URL，Tab 和 Shift+Tab 保持在弹窗内，关闭后将焦点还给打开弹窗的控件。原生目标选择器关闭后焦点回到 Choose 按钮。
-- 导航使用 `aria-current`；任务选择控件读出状态与进度，Inspector 进度有进度条语义，任务操作有可访问名称。错误和操作消息使用 alert/status 语义，不播报每次进度变化。
-- CSS 针对 `prefers-reduced-motion` 关闭过渡、悬停位移和不确定进度动画，并通过 `prefers-color-scheme` 跟随系统明暗外观。
+- 导航使用 `aria-current`；任务选择控件读出状态与进度，Inspector 进度有进度条语义，并在总大小未知时读出任务状态；任务操作有可访问名称。错误和操作消息使用 alert/status 语义，不播报每次进度变化。
+- CSS 针对 `prefers-reduced-motion` 关闭过渡、悬停位移和活跃任务的不确定进度动画，并通过 `prefers-color-scheme` 跟随系统明暗外观。
 - 类型化中英文文案目录覆盖 Desktop 自有的可见及无障碍文案。任务原生上下文菜单和明确的删除确认文案仍待实现。
 
 ## 8. 实现切片
@@ -187,8 +190,9 @@ RPC 边界留在 Rust/Tauri 命令中。React 只负责展示状态，不能直�
 
 ### Slice B — Add Sheet 与原生设置（部分实现）
 
-- 增加 URL 校验和任务 ID 推导。[ ]
-- 通过 Tauri dialog plugin 增加原生目标保存对话框。[x]
+- 增加 URL 校验。[ ]
+- 内部生成任务 ID，并改用文件名展示任务标题。[x]
+- 增加原生文件夹选择器、系统 Downloads 默认位置、可编辑的推测文件名和最终路径预览。[x]
 - 增加读取/保存 Desktop 设置的 Tauri 命令。[x]
 - 增加按 Server 地址存储的 macOS Keychain 凭据保存/清除操作，并为 RPC 和事件订阅附加凭据。[x]
 - Add 流程在创建任务后自动排队。[x]

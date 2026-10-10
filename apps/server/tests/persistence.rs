@@ -885,7 +885,6 @@ fn active_http_remove_cancels_worker_and_preserves_destination() {
     let second = vec![b'b'; 32 * 1024];
     let fixture = ChunkedHttpFixture::new(first, second);
     let destination = dir.output_path("removed-http");
-    fs::write(&destination, b"old bytes").unwrap();
     server.call(
         "task.create",
         Some(json!({
@@ -896,6 +895,7 @@ fn active_http_remove_cancels_worker_and_preserves_destination() {
     );
     server.call("task.queue", Some(json!({"id": "removed-http"})));
     fixture.wait_until_first_chunk();
+    fs::write(&destination, b"old bytes").unwrap();
     assert_eq!(
         server.call("task.pause", Some(json!({"id": "removed-http"}))),
         true
@@ -1106,14 +1106,16 @@ fn http_download_cannot_replace_server_database_or_lock() {
 }
 
 #[test]
-fn http_downloads_to_the_same_destination_do_not_overlap() {
+fn http_downloads_to_the_same_destination_do_not_overlap_or_replace() {
     let _test_guard = server_test_guard();
     let dir = TestDir::new();
     let mut server = ServerProcess::start(dir.path());
     let first = HttpFixture::new(b"first response");
-    let second = HttpFixture::new(b"second response");
     let destination = dir.output_path("shared");
-    for (id, source) in [("first", &first.source), ("second", &second.source)] {
+    for (id, source) in [
+        ("first", first.source.as_str()),
+        ("second", "http://127.0.0.1:9/file"),
+    ] {
         server.call(
             "task.create",
             Some(json!({
@@ -1132,10 +1134,14 @@ fn http_downloads_to_the_same_destination_do_not_overlap() {
     server.wait_for_state("first", "Completed");
     assert_eq!(fs::read(&destination).unwrap(), b"first response");
 
-    second.wait_until_connected();
-    second.finish();
-    server.wait_for_state("second", "Completed");
-    assert_eq!(fs::read(&destination).unwrap(), b"second response");
+    server.wait_for_state("second", "Failed");
+    assert!(
+        server.call("task.get", Some(json!({"id": "second"})))["error"]
+            .as_str()
+            .unwrap()
+            .contains("destination already exists")
+    );
+    assert_eq!(fs::read(&destination).unwrap(), b"first response");
     server.stop();
 }
 

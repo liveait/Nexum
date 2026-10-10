@@ -1,0 +1,602 @@
+{
+  "source": "Native Nexum.app release bundle on macOS",
+  "sourceCommit": "1df5eab8411081e0177037029025f6e2e81fdfcc",
+  "captureTool": "CUA",
+  "profile": "release",
+  "bundleId": "com.nexum.desktop",
+  "tauriCliVersion": "2.11.5",
+  "binarySha256": "b6549f6a9bbbf4ed7b13e609800cd2bd231f2017d86cd8650d3849da4a7753f1",
+  "frontendIndexSha256": "f539f1e44640a0efe48a43fd90b9ede2dd266290985f326dd0640a77fd4456b2",
+  "notes": [
+    "Capture timestamps come from raw CUA capture records; pixel dimensions and image hashes were measured from the saved PNG files.",
+    "Pixel dimensions are recorded without inferring window bounds in points.",
+    "Only Add Download images contain a public redaction, clearly labeled [redacted]; other images retain isolated QA localhost endpoints and temporary directories.",
+    "Exported sha256 values identify the public PNG files. sourceSha256 identifies each original CUA PNG, before any marked redaction."
+  ],
+  "captures": [
+    {
+      "file": "downloads-light.png",
+      "capturedAt": "2026-10-10T15:04:15.781Z",
+      "appearance": "light",
+      "state": "Unknown-size Completed task selected; Inspector 100%; slow unknown-size task Downloading",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "e7f37dc81c0dfb901089e3cfb7bf9d023a41ea5d3dff291f6072be315f3125e7",
+      "sourceSha256": "e7f37dc81c0dfb901089e3cfb7bf9d023a41ea5d3dff291f6072be315f3125e7",
+      "redactions": [],
+      "appearanceCheck": {
+        "method": "Actual RGB samples and visual inspection; metadata alone was not used.",
+        "samples": [
+          {
+            "x": 500,
+            "y": 250,
+            "rgb": [
+              247,
+              248,
+              252
+            ]
+          },
+          {
+            "x": 1000,
+            "y": 250,
+            "rgb": [
+              249,
+              246,
+              255
+            ]
+          },
+          {
+            "x": 1500,
+            "y": 1000,
+            "rgb": [
+              250,
+              251,
+              255
+            ]
+          },
+          {
+            "x": 2000,
+            "y": 1000,
+            "rgb": [
+              248,
+              249,
+              253
+            ]
+          }
+        ],
+        "matchesMetadata": true
+      }
+    },
+    {
+      "file": "downloads-dark.png",
+      "capturedAt": "2026-10-10T15:14:35.740Z",
+      "appearance": "dark",
+      "state": "Unknown-size Completed task selected; Inspector 100%; slow unknown-size task Downloading",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "8a795a7d37ccb49a6d3ee282271854d329275dcd9106f1d32796157302fdffd1",
+      "sourceSha256": "8a795a7d37ccb49a6d3ee282271854d329275dcd9106f1d32796157302fdffd1",
+      "redactions": [],
+      "appearanceCheck": {
+        "method": "Actual RGB samples and visual inspection; metadata alone was not used.",
+        "samples": [
+          {
+            "x": 500,
+            "y": 250,
+            "rgb": [
+              18,
+              20,
+              32
+            ]
+          },
+          {
+            "x": 1000,
+            "y": 250,
+            "rgb": [
+              47,
+              51,
+              63
+            ]
+          },
+          {
+            "x": 1500,
+            "y": 1000,
+            "rgb": [
+              24,
+              28,
+              40
+            ]
+          },
+          {
+            "x": 2000,
+            "y": 1000,
+            "rgb": [
+              18,
+              20,
+              32
+            ]
+          }
+        ],
+        "matchesMetadata": true
+      }
+    },
+    {
+      "file": "settings-light.png",
+      "capturedAt": "2026-10-10T15:04:54.563Z",
+      "appearance": "light",
+      "state": "Settings home; full width",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "e84f49c7262bc74bbb20ac79d7ac24df358dcb20eb62a1966614b5e6f8c508f5",
+      "sourceSha256": "e84f49c7262bc74bbb20ac79d7ac24df358dcb20eb62a1966614b5e6f8c508f5",
+      "redactions": [],
+      "appearanceCheck": {
+        "method": "Actual RGB samples and visual inspection; metadata alone was not used.",
+        "samples": [
+          {
+            "x": 500,
+            "y": 250,
+            "rgb": [
+              248,
+              249,
+              253
+            ]
+          },
+          {
+            "x": 1000,
+            "y": 250,
+            "rgb": [
+              226,
+              230,
+              239
+            ]
+          },
+          {
+            "x": 1500,
+            "y": 1000,
+            "rgb": [
+              252,
+              253,
+              255
+            ]
+          },
+          {
+            "x": 2000,
+            "y": 1000,
+            "rgb": [
+              251,
+              252,
+              255
+            ]
+          }
+        ],
+        "matchesMetadata": true
+      }
+    },
+    {
+      "file": "settings-dark.png",
+      "capturedAt": "2026-10-10T15:15:13.672Z",
+      "appearance": "dark",
+      "state": "Settings home; full width",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "3d523917eaff3bcffde970ab605870ce8c49a8e128803309f313d88500057dae",
+      "sourceSha256": "3d523917eaff3bcffde970ab605870ce8c49a8e128803309f313d88500057dae",
+      "redactions": [],
+      "appearanceCheck": {
+        "method": "Actual RGB samples and visual inspection; metadata alone was not used.",
+        "samples": [
+          {
+            "x": 500,
+            "y": 250,
+            "rgb": [
+              18,
+              20,
+              32
+            ]
+          },
+          {
+            "x": 1000,
+            "y": 250,
+            "rgb": [
+              34,
+              40,
+              54
+            ]
+          },
+          {
+            "x": 1500,
+            "y": 1000,
+            "rgb": [
+              23,
+              29,
+              43
+            ]
+          },
+          {
+            "x": 2000,
+            "y": 1000,
+            "rgb": [
+              23,
+              29,
+              43
+            ]
+          }
+        ],
+        "matchesMetadata": true
+      }
+    },
+    {
+      "file": "add-download-light.png",
+      "capturedAt": "2026-10-10T15:05:15.253Z",
+      "appearance": "light",
+      "state": "Add Download; Source URL focused; system Downloads default",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "016e42dd6c6def996d208f8795d8c4dca489d01c9bde250024212845af488448",
+      "sourceSha256": "f6a4b60b5b95eb4f8db7d1c660dff61caf44fe54952d2d98440c3787173fd6cd",
+      "redactions": [
+        {
+          "pixelBounds": [
+            690,
+            1035,
+            1020,
+            1080
+          ],
+          "marker": "[redacted]",
+          "reason": "Local home-directory path in the save-folder field; the original field value is concealed, not replaced with a fabricated path."
+        }
+      ],
+      "appearanceCheck": {
+        "method": "Actual RGB samples and visual inspection; metadata alone was not used.",
+        "samples": [
+          {
+            "x": 500,
+            "y": 250,
+            "rgb": [
+              173,
+              175,
+              187
+            ]
+          },
+          {
+            "x": 1000,
+            "y": 250,
+            "rgb": [
+              156,
+              160,
+              172
+            ]
+          },
+          {
+            "x": 1500,
+            "y": 1000,
+            "rgb": [
+              250,
+              249,
+              254
+            ]
+          },
+          {
+            "x": 2000,
+            "y": 1000,
+            "rgb": [
+              178,
+              181,
+              190
+            ]
+          }
+        ],
+        "matchesMetadata": true
+      }
+    },
+    {
+      "file": "add-download-dark.png",
+      "capturedAt": "2026-10-10T15:15:14.441Z",
+      "appearance": "dark",
+      "state": "Add Download; Source URL focused; system Downloads default",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "1cfb0560af018134386a1b0342b83cb514e991441eaa0ce295b3ad133f9b0e38",
+      "sourceSha256": "665fed387062647ff0181000e08f6351b6670632f475b274f8882d1a22569002",
+      "redactions": [
+        {
+          "pixelBounds": [
+            690,
+            1035,
+            1020,
+            1080
+          ],
+          "marker": "[redacted]",
+          "reason": "Local home-directory path in the save-folder field; the original field value is concealed, not replaced with a fabricated path."
+        }
+      ],
+      "appearanceCheck": {
+        "method": "Actual RGB samples and visual inspection; metadata alone was not used.",
+        "samples": [
+          {
+            "x": 500,
+            "y": 250,
+            "rgb": [
+              7,
+              10,
+              17
+            ]
+          },
+          {
+            "x": 1000,
+            "y": 250,
+            "rgb": [
+              13,
+              16,
+              23
+            ]
+          },
+          {
+            "x": 1500,
+            "y": 1000,
+            "rgb": [
+              26,
+              29,
+              46
+            ]
+          },
+          {
+            "x": 2000,
+            "y": 1000,
+            "rgb": [
+              9,
+              12,
+              21
+            ]
+          }
+        ],
+        "matchesMetadata": true
+      }
+    },
+    {
+      "file": "notifications-light.png",
+      "capturedAt": "2026-10-10T15:16:36.925Z",
+      "appearance": "light",
+      "state": "Notifications full width; pause and resume linked events",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "c8ce73d4641d63f20d732cec367d70bd91f98aab9928cea3ef983b68cb30a8ff",
+      "sourceSha256": "c8ce73d4641d63f20d732cec367d70bd91f98aab9928cea3ef983b68cb30a8ff",
+      "redactions": [],
+      "appearanceCheck": {
+        "method": "Actual RGB samples and visual inspection; metadata alone was not used.",
+        "samples": [
+          {
+            "x": 500,
+            "y": 250,
+            "rgb": [
+              248,
+              249,
+              253
+            ]
+          },
+          {
+            "x": 1000,
+            "y": 250,
+            "rgb": [
+              248,
+              249,
+              253
+            ]
+          },
+          {
+            "x": 1500,
+            "y": 1000,
+            "rgb": [
+              248,
+              249,
+              253
+            ]
+          },
+          {
+            "x": 2000,
+            "y": 1000,
+            "rgb": [
+              248,
+              249,
+              253
+            ]
+          }
+        ],
+        "matchesMetadata": true
+      }
+    },
+    {
+      "file": "notifications-dark.png",
+      "capturedAt": "2026-10-10T15:15:53.297Z",
+      "appearance": "dark",
+      "state": "Notifications full width; pause and resume linked events",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "c84824a1ed257299f65da9e2fd01bbe437deae01ffee80f5528ea1df1953b559",
+      "sourceSha256": "c84824a1ed257299f65da9e2fd01bbe437deae01ffee80f5528ea1df1953b559",
+      "redactions": [],
+      "appearanceCheck": {
+        "method": "Actual RGB samples and visual inspection; metadata alone was not used.",
+        "samples": [
+          {
+            "x": 500,
+            "y": 250,
+            "rgb": [
+              18,
+              20,
+              32
+            ]
+          },
+          {
+            "x": 1000,
+            "y": 250,
+            "rgb": [
+              18,
+              20,
+              32
+            ]
+          },
+          {
+            "x": 1500,
+            "y": 1000,
+            "rgb": [
+              18,
+              20,
+              32
+            ]
+          },
+          {
+            "x": 2000,
+            "y": 1000,
+            "rgb": [
+              18,
+              20,
+              32
+            ]
+          }
+        ],
+        "matchesMetadata": true
+      }
+    },
+    {
+      "file": "downloads-narrow-dark.png",
+      "capturedAt": "2026-10-10T15:44:07.279Z",
+      "appearance": "dark",
+      "state": "System half-screen narrower window; unknown-size Paused task selected; Inspector visible",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2058,
+      "pixelHeight": 2458,
+      "sha256": "744ddc648d6805195689585b9a803534d097b5a3882281b920983d3cf9ccaf9a",
+      "sourceSha256": "744ddc648d6805195689585b9a803534d097b5a3882281b920983d3cf9ccaf9a",
+      "redactions": []
+    },
+    {
+      "file": "paused-c.png",
+      "capturedAt": "2026-10-10T15:19:14.825Z",
+      "appearance": "light",
+      "state": "Reduce Motion off; unknown-size task Paused; stable layout C",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "4f3a56a8e8f78ece3d1dd460c5eba6df8437823fa019e301c9a936a57b71d2af",
+      "sourceSha256": "4f3a56a8e8f78ece3d1dd460c5eba6df8437823fa019e301c9a936a57b71d2af",
+      "redactions": []
+    },
+    {
+      "file": "paused-d.png",
+      "capturedAt": "2026-10-10T15:19:48.448Z",
+      "appearance": "light",
+      "state": "Reduce Motion off; unknown-size task Paused; stable layout D",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "8206e40ad008833aafc967fffe4f02040280bfae9589f693e17f8bc1c8bece2f",
+      "sourceSha256": "8206e40ad008833aafc967fffe4f02040280bfae9589f693e17f8bc1c8bece2f",
+      "redactions": []
+    },
+    {
+      "file": "reduced-motion-c.png",
+      "capturedAt": "2026-10-10T15:10:40.020Z",
+      "appearance": "light",
+      "state": "Reduce Motion on; unknown-size task Downloading; stable layout comparison C",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "57a203b7969e0ef4cf8f231fe548b26441539c1bb29afe2bb6c84d20f12a7d97",
+      "sourceSha256": "57a203b7969e0ef4cf8f231fe548b26441539c1bb29afe2bb6c84d20f12a7d97",
+      "redactions": []
+    },
+    {
+      "file": "reduced-motion-d.png",
+      "capturedAt": "2026-10-10T15:11:48.793Z",
+      "appearance": "light",
+      "state": "Reduce Motion on; unknown-size task Downloading; stable layout comparison D",
+      "uiLanguage": "zh-CN",
+      "pixelWidth": 2400,
+      "pixelHeight": 1602,
+      "sha256": "1a8322a0da4e7026f22d662e3c5fd6096d9b3f028e3e6e819d3ca8d884b806cf",
+      "sourceSha256": "1a8322a0da4e7026f22d662e3c5fd6096d9b3f028e3e6e819d3ca8d884b806cf",
+      "redactions": []
+    }
+  ],
+  "progressTrackComparisons": [
+    {
+      "first": "paused-c.png",
+      "second": "paused-d.png",
+      "elapsedSeconds": 33.623,
+      "regions": [
+        {
+          "name": "listTrack",
+          "pixelBounds": [
+            540,
+            916,
+            1655,
+            928
+          ],
+          "differenceBoundingBox": null,
+          "rgbPixelsIdentical": true,
+          "firstRgbSha256": "f229d1d40c777dff5adfc52ed19f53a690b2cf28c292790bb50f903174d31fc4",
+          "secondRgbSha256": "f229d1d40c777dff5adfc52ed19f53a690b2cf28c292790bb50f903174d31fc4"
+        },
+        {
+          "name": "inspectorTrack",
+          "pixelBounds": [
+            1766,
+            479,
+            2306,
+            491
+          ],
+          "differenceBoundingBox": null,
+          "rgbPixelsIdentical": true,
+          "firstRgbSha256": "b65f2d2ac1ee645dedc8a6a0af61cb720d30f93358d81a4c615d6e0b92b4d5c6",
+          "secondRgbSha256": "b65f2d2ac1ee645dedc8a6a0af61cb720d30f93358d81a4c615d6e0b92b4d5c6"
+        }
+      ],
+      "limitation": "The two sampled frames have identical pixels in these progress-track regions. This does not establish continuous absence of motion during the interval or at all later times."
+    },
+    {
+      "first": "reduced-motion-c.png",
+      "second": "reduced-motion-d.png",
+      "elapsedSeconds": 68.773,
+      "regions": [
+        {
+          "name": "listTrack",
+          "pixelBounds": [
+            540,
+            916,
+            1655,
+            928
+          ],
+          "differenceBoundingBox": null,
+          "rgbPixelsIdentical": true,
+          "firstRgbSha256": "a22e110a94dd4b833456bbd4fba2d9b66033f062ecbd1da9fc8fac483142fc58",
+          "secondRgbSha256": "a22e110a94dd4b833456bbd4fba2d9b66033f062ecbd1da9fc8fac483142fc58"
+        },
+        {
+          "name": "inspectorTrack",
+          "pixelBounds": [
+            1766,
+            479,
+            2306,
+            491
+          ],
+          "differenceBoundingBox": null,
+          "rgbPixelsIdentical": true,
+          "firstRgbSha256": "b65f2d2ac1ee645dedc8a6a0af61cb720d30f93358d81a4c615d6e0b92b4d5c6",
+          "secondRgbSha256": "b65f2d2ac1ee645dedc8a6a0af61cb720d30f93358d81a4c615d6e0b92b4d5c6"
+        }
+      ],
+      "limitation": "The two sampled frames have identical pixels in these progress-track regions. This does not establish continuous absence of motion during the interval or at all later times."
+    }
+  ]
+}

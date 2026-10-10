@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod desktop_lib;
+mod download_metadata;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -69,6 +70,45 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map(|directory| directory.join(SETTINGS_FILE))
         .map_err(|error| format!("could not resolve application settings directory: {error}"))
+}
+
+fn path_exists(path: &std::path::Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("could not inspect download destination: {error}")),
+    }
+}
+
+#[tauri::command]
+fn destination_exists(path: String) -> Result<bool, String> {
+    path_exists(std::path::Path::new(&path))
+}
+
+#[tauri::command]
+async fn suggest_download_filename(source: String) -> Option<String> {
+    download_metadata::suggest_download_filename(source).await
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::path_exists;
+
+    #[test]
+    fn destination_check_distinguishes_missing_and_existing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "nexum-destination-check-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!path_exists(&path).unwrap());
+        std::fs::write(&path, b"existing content").unwrap();
+        assert!(path_exists(&path).unwrap());
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[tauri::command]
@@ -207,6 +247,8 @@ fn main() {
             stop_event_stream,
             load_settings,
             save_settings,
+            destination_exists,
+            suggest_download_filename,
             credential_status,
             save_credential,
             clear_credential,

@@ -67,6 +67,10 @@ jobs:
         working-directory: apps/desktop
         run: pnpm build
 
+      - name: Test Desktop task flow
+        working-directory: apps/desktop
+        run: pnpm test
+
       - name: Build macOS app bundle
         working-directory: apps/desktop
         run: pnpm exec tauri build --bundles app

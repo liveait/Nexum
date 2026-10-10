@@ -1,8 +1,13 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
+import { downloadDir, join } from "@tauri-apps/api/path";
+import { open } from "@tauri-apps/plugin-dialog";
+import { hasHardLineBreak, isHttpSource, isValidFileName, suggestedFileName } from "./downloadDraft";
 import { resolveLocale, translate, TranslationProvider, useTranslation, type LanguagePreference, type Locale, type MessageKey, type Translate } from "./i18n";
+import { addDownload, invokeTaskCommand, type TaskCommand } from "./taskCommands";
+import { valueForContext, type ContextValue, type TaskContext } from "./taskContext";
+import { taskDisplayName } from "./taskPresentation";
 import "./App.css";
 
 type TaskState =
@@ -24,6 +29,9 @@ interface TaskItem {
   error: string | null;
 }
 
+const EMPTY_TASKS: TaskItem[] = [];
+const EMPTY_TASK_ACTIONS: Record<string, TaskCommand | "start"> = {};
+
 interface DesktopSettings {
   server: string;
   refresh_interval_secs: number;
@@ -34,7 +42,6 @@ type Section = "dashboard" | "downloads" | "trackers" | "plugins" | "notificatio
 type TaskFilter = "all" | "active" | "queued" | "completed" | "failed";
 type SettingsCategory = "home" | "general" | "appearance" | "downloads" | "bittorrent" | "integration" | "network" | "advanced" | "about";
 type ConnectionState = "disconnected" | "connecting" | "connected" | "error";
-type TaskCommand = "task_queue" | "task_pause" | "task_resume" | "task_remove";
 type NoticeTone = "success" | "error";
 type CredentialScheme = "Bearer" | "ApiKey";
 
@@ -43,7 +50,18 @@ interface Notice {
   message: LocalizedMessage;
   tone: NoticeTone;
   createdAt: number;
+  read: boolean;
+  server: string;
+  taskId?: string;
 }
+
+const NOTIFICATION_LIMIT = 30;
+const SUCCESS_BANNER_DURATION_MS = 5_000;
+const SCHEDULER_MESSAGES: Record<string, { named: MessageKey; generic: MessageKey; tone: NoticeTone }> = {
+  "scheduler.completed": { named: "{name} completed", generic: "Task completed", tone: "success" },
+  "scheduler.failed": { named: "{name} failed", generic: "Task failed", tone: "error" },
+  "scheduler.retrying": { named: "{name} will retry", generic: "Task will retry", tone: "error" },
+};
 
 type LocalizedMessage = { key: MessageKey; values?: Record<string, string | number> } | { raw: string };
 
@@ -57,6 +75,18 @@ function renderStatus(message: string | LocalizedMessage, t: Translate): string 
 
 function localMessage(key: MessageKey, values?: Record<string, string | number>): LocalizedMessage {
   return { key, values };
+}
+
+function taskActionMessage(key: MessageKey, name: string | null): LocalizedMessage {
+  if (!name) return localMessage(key);
+  const namedKeys: Partial<Record<MessageKey, MessageKey>> = {
+    "Download started": "{name} started",
+    "Download paused": "{name} paused",
+    "Download resumed": "{name} resumed",
+    "Task removed": "{name} removed",
+    "Task queued": "{name} queued",
+  };
+  return localMessage(namedKeys[key] ?? key, { name });
 }
 
 interface ServerEvent {
@@ -135,8 +165,9 @@ function formatBytesMaybe(bytes: number | null, t: Translate): string {
 }
 
 function taskProgress(task: TaskItem): number | null {
+  if (task.state === "Completed") return 100;
   if (task.total_bytes === null) return null;
-  if (task.total_bytes === 0) return task.state === "Completed" ? 100 : 0;
+  if (task.total_bytes === 0) return 0;
   return Math.max(0, Math.min(100, (task.downloaded_bytes / task.total_bytes) * 100));
 }
 
@@ -175,6 +206,24 @@ function isLoopbackServerAddress(address: string): boolean {
   return octets.length === 4 && octets[0] === "127" && octets.every((octet) => /^(?:0|[1-9]\d{0,2})$/.test(octet) && Number(octet) <= 255);
 }
 
+function isLocalServerAddress(address: string): boolean {
+  const value = address.trim();
+  return isLoopbackServerAddress(value.startsWith("tls://") ? value.slice("tls://".length) : value);
+}
+
+function isAbsoluteServerFolder(directory: string): boolean {
+  const value = directory.trim();
+  return value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function serverDestination(directory: string, fileName: string): string | null {
+  if (!isAbsoluteServerFolder(directory) || !isValidFileName(fileName)) return null;
+  const folder = directory.trim();
+  const windowsFolder = folder.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(folder);
+  const separator = windowsFolder && folder.includes("\\") ? "\\" : "/";
+  return `${folder}${/[\\/]$/.test(folder) ? "" : separator}${fileName}`;
+}
+
 function isTlsServerAddress(address: string): boolean {
   const value = address.trim();
   if (!value.startsWith("tls://")) return false;
@@ -185,7 +234,7 @@ function isTlsServerAddress(address: string): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65535;
 }
 
-type IconName = "dashboard" | "downloads" | "trackers" | "plugins" | "notifications" | "settings" | "general" | "appearance" | "bittorrent" | "integration" | "network" | "advanced" | "about" | "search" | "info" | "list" | "more";
+type IconName = "dashboard" | "downloads" | "trackers" | "plugins" | "notifications" | "settings" | "general" | "appearance" | "bittorrent" | "integration" | "network" | "advanced" | "about" | "search" | "info" | "list" | "more" | "plus";
 
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
@@ -207,11 +256,13 @@ function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
     case "info": return <svg {...common}><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></svg>;
     case "list": return <svg {...common}><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>;
     case "more": return <svg {...common}><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></svg>;
+    case "plus": return <svg {...common}><path d="M12 5v14M5 12h14" /></svg>;
   }
 }
 
 export default function App() {
   const [section, setSection] = useState<Section>("downloads");
+  const sectionRef = useRef(section);
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("home");
   const [server, setServer] = useState(DEFAULT_SERVER);
@@ -229,28 +280,36 @@ export default function App() {
   tRef.current = t;
   const [settingsReady, setSettingsReady] = useState(false);
   const [credentialRevision, setCredentialRevision] = useState(0);
-  const [tasks, setTasks] = useState<TaskItem[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [taskSnapshot, setTaskSnapshot] = useState<ContextValue<{ items: TaskItem[]; updatedAt: number }> | null>(null);
+  const [taskSelection, setTaskSelection] = useState<ContextValue<string | null> | null>(null);
+  const [notificationTargetId, setNotificationTargetId] = useState<string | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
   const [eventStreamConnected, setEventStreamConnected] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [actionByTask, setActionByTask] = useState<Record<string, TaskCommand | "start">>({});
-  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
-  const [notice, setNotice] = useState<string | LocalizedMessage>("");
+  const [taskActions, setTaskActions] = useState<ContextValue<Record<string, TaskCommand | "start">> | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [error, setError] = useState<string | LocalizedMessage>("");
   const [notifications, setNotifications] = useState<Notice[]>([]);
+  const nextNotificationId = useRef(0);
   const [showAdd, setShowAdd] = useState(false);
   const [showInspector, setShowInspector] = useState(true);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [newId, setNewId] = useState("");
   const [newSource, setNewSource] = useState("");
-  const [newDest, setNewDest] = useState("");
+  const [newDirectory, setNewDirectory] = useState("");
+  const [newFileName, setNewFileName] = useState("");
+  const [fileNameEdited, setFileNameEdited] = useState(false);
+  const [nameProbePending, setNameProbePending] = useState(false);
+  const nameProbeVersion = useRef(0);
+  const [finalPath, setFinalPath] = useState("");
   const [addLoading, setAddLoading] = useState(false);
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
+  const localServer = isLocalServerAddress(server);
+  const remoteFinalPath = localServer ? null : serverDestination(newDirectory, newFileName);
+  const destinationPreview = localServer ? finalPath : remoteFinalPath;
   const addDialogRef = useRef<HTMLElement>(null);
-  const addSourceRef = useRef<HTMLInputElement>(null);
+  const addSourceRef = useRef<HTMLTextAreaElement>(null);
   const destinationButtonRef = useRef<HTMLButtonElement>(null);
   const addReturnFocus = useRef<HTMLElement | null>(null);
   const sidebarAddRef = useRef<HTMLButtonElement>(null);
@@ -259,10 +318,18 @@ export default function App() {
   const searchReturnFocus = useRef<HTMLElement | null>(null);
   const eventRefreshTimer = useRef<number | null>(null);
   const streamTransition = useRef<Promise<void>>(Promise.resolve());
-  const snapshotContext = useRef({ server, credentialRevision });
+  const snapshotContext = useRef<TaskContext>({ server, credentialRevision });
   if (snapshotContext.current.server !== server || snapshotContext.current.credentialRevision !== credentialRevision) {
     snapshotContext.current = { server, credentialRevision };
   }
+  const renderedContext = snapshotContext.current;
+  const currentSnapshot = valueForContext(taskSnapshot, renderedContext);
+  const tasks = currentSnapshot?.items ?? EMPTY_TASKS;
+  const lastUpdatedAt = currentSnapshot?.updatedAt ?? null;
+  const selectedId = valueForContext(taskSelection, renderedContext);
+  const actionByTask = valueForContext(taskActions, renderedContext) ?? EMPTY_TASK_ACTIONS;
+  const tasksRef = useRef(tasks);
+  tasksRef.current = tasks;
 
   const queueStreamTransition = (operation: () => Promise<void>): Promise<void> => {
     const next = streamTransition.current.then(operation);
@@ -270,17 +337,35 @@ export default function App() {
     return next;
   };
 
-  const pushNotification = (message: LocalizedMessage, tone: NoticeTone) => {
-    const item = { id: Date.now(), message, tone, createdAt: Date.now() };
-    setNotifications((current) => [item, ...current].slice(0, 30));
+  const pushNotification = (message: LocalizedMessage, tone: NoticeTone, taskId?: string): number => {
+    const item: Notice = {
+      id: ++nextNotificationId.current,
+      message,
+      tone,
+      createdAt: Date.now(),
+      read: sectionRef.current === "notifications",
+      server,
+      taskId,
+    };
+    setNotifications((current) => [item, ...current].slice(0, NOTIFICATION_LIMIT));
     if (tone === "success") {
-      setNotice(message);
+      setNotice(item);
       setError("");
     } else {
       setError(message);
-      setNotice("");
+      setNotice(null);
     }
+    return item.id;
   };
+
+  const noticeId = notice?.id;
+  useEffect(() => {
+    if (noticeId === undefined) return undefined;
+    const timer = window.setTimeout(() => {
+      setNotice((current) => current?.id === noticeId ? null : current);
+    }, SUCCESS_BANNER_DURATION_MS);
+    return () => window.clearTimeout(timer);
+  }, [noticeId]);
 
   const refreshTasks = async (address = server, options: { silent?: boolean } = {}): Promise<void> => {
     const context = snapshotContext.current;
@@ -298,17 +383,23 @@ export default function App() {
       setLoading(true);
       setConnection("connecting");
     }
-    setError("");
     try {
       const result = await invoke<TaskItem[]>("task_list", { server: address });
       if (!isCurrent()) return;
-      setTasks(result);
-      setSelectedId((current) => current && result.some((task) => task.id === current) ? current : result[0]?.id ?? null);
-      setLastUpdatedAt(Date.now());
+      if (!silent) setError("");
+      setTaskSnapshot({ context, value: { items: result, updatedAt: Date.now() } });
+      setTaskSelection((current) => {
+        const previousId = valueForContext(current, context);
+        return {
+          context,
+          value: previousId && result.some((task) => task.id === previousId) ? previousId : result[0]?.id ?? null,
+        };
+      });
       setConnection("connected");
     } catch (caught) {
       if (isCurrent()) {
         setConnection("error");
+        setNotice(null);
         setError(errorMessage(caught, tRef.current));
       }
     } finally {
@@ -361,17 +452,30 @@ export default function App() {
     };
 
     const handleServerEvent = (payload: ServerEvent) => {
-      if (payload.server !== server) return;
+      if (payload.server !== server || snapshotContext.current !== renderedContext) return;
       if (!payload.event.startsWith("task.") && !payload.event.startsWith("scheduler.")) return;
       scheduleRefresh();
+      const eventMessage = SCHEDULER_MESSAGES[payload.event];
+      if (!eventMessage) return;
       const taskId = typeof payload.data.task_id === "string" ? payload.data.task_id : null;
-      if (payload.event === "scheduler.completed") pushNotification(taskId ? localMessage("{id} completed", { id: taskId }) : localMessage("Task completed"), "success");
-      if (payload.event === "scheduler.failed") pushNotification(taskId ? localMessage("{id} failed", { id: taskId }) : localMessage("Task failed"), "error");
-      if (payload.event === "scheduler.retrying") pushNotification(taskId ? localMessage("{id} will retry", { id: taskId }) : localMessage("Task will retry"), "error");
+      const task = taskId ? tasksRef.current.find((item) => item.id === taskId) : null;
+      const name = task ? taskDisplayName(task) : null;
+      const message = name ? localMessage(eventMessage.named, { name }) : localMessage(eventMessage.generic);
+      const noticeId = pushNotification(message, eventMessage.tone, taskId ?? undefined);
+      if (!taskId || name) return;
+      void invoke<TaskItem>("task_get", { server, taskId }).then((resolvedTask) => {
+        if (!active || snapshotContext.current !== renderedContext || resolvedTask.id !== taskId) return;
+        const resolvedName = taskDisplayName(resolvedTask);
+        if (!resolvedName) return;
+        const namedMessage = localMessage(eventMessage.named, { name: resolvedName });
+        setNotifications((current) => current.map((item) => item.id === noticeId ? { ...item, message: namedMessage } : item));
+        setNotice((current) => current?.id === noticeId ? { ...current, message: namedMessage } : current);
+        if (eventMessage.tone === "error") setError((current) => current === message ? namedMessage : current);
+      }).catch(() => undefined);
     };
 
     const handleEventStreamStatus = (payload: EventStreamStatus) => {
-      if (!active || payload.server !== server) return;
+      if (!active || payload.server !== server || snapshotContext.current !== renderedContext) return;
       setEventStreamConnected(payload.connected);
       if (payload.connected || payload.resync_required) scheduleRefresh();
     };
@@ -440,7 +544,7 @@ export default function App() {
   useEffect(() => {
     if (!settingsReady || eventStreamConnected || pollingSeconds <= 0) return undefined;
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refreshTasks();
+      if (document.visibilityState === "visible") void refreshTasks(server, { silent: true });
     }, pollingSeconds * 1000);
     return () => window.clearInterval(timer);
     // Keep fallback polling on the active server and credential revision.
@@ -451,22 +555,103 @@ export default function App() {
     result[item.id] = tasks.filter((task) => matchesFilter(task, item.id)).length;
     return result;
   }, { all: tasks.length, active: 0, queued: 0, completed: 0, failed: 0 }), [tasks]);
+  const unreadNotificationCount = notifications.filter((item) => !item.read).length;
 
   const visibleTasks = useMemo(() => tasks.filter((task) => {
     if (!matchesFilter(task, filter)) return false;
     const query = searchQuery.trim().toLowerCase();
-    return !query || [task.id, task.source, task.destination, task.state, taskStateLabel(task.state, t)].some((value) => value.toLowerCase().includes(query));
+    return !query || [taskDisplayName(task) ?? t("Download"), task.source, task.destination, task.state, taskStateLabel(task.state, t)].some((value) => value.toLowerCase().includes(query));
   }), [tasks, filter, searchQuery, t]);
   const selectedTask = visibleTasks.find((task) => task.id === selectedId) ?? visibleTasks[0] ?? null;
 
+  useLayoutEffect(() => {
+    if (section !== "downloads" || !notificationTargetId) return;
+    const row = Array.from(document.querySelectorAll<HTMLElement>(".task-row"))
+      .find((element) => element.dataset.taskId === notificationTargetId);
+    row?.scrollIntoView({ block: "nearest", behavior: "auto" });
+    row?.querySelector<HTMLButtonElement>(".task-row-main")?.focus({ preventScroll: true });
+    setNotificationTargetId(null);
+  }, [section, notificationTargetId, visibleTasks]);
+
+  useEffect(() => {
+    setNewDirectory("");
+    setFinalPath("");
+  }, [server]);
+
+  useEffect(() => {
+    if (!showAdd || !localServer || newDirectory) return undefined;
+    let active = true;
+    void downloadDir()
+      .then((directory) => {
+        if (active) setNewDirectory((current) => current || directory);
+      })
+      .catch(() => {
+        if (active) setAddError(tRef.current("Choose a download folder before adding a task."));
+      });
+    return () => { active = false; };
+  }, [showAdd, localServer, newDirectory]);
+
+  useEffect(() => {
+    if (!localServer || !newDirectory || !isValidFileName(newFileName)) {
+      setFinalPath("");
+      return undefined;
+    }
+    let active = true;
+    setFinalPath("");
+    void join(newDirectory, newFileName)
+      .then((path) => { if (active) setFinalPath(path); })
+      .catch(() => { if (active) setFinalPath(""); });
+    return () => { active = false; };
+  }, [localServer, newDirectory, newFileName]);
+
+  useEffect(() => {
+    if (!showAdd || fileNameEdited || !isHttpSource(newSource)) return undefined;
+    const version = nameProbeVersion.current;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void invoke<string | null>("suggest_download_filename", { source: newSource.trim() })
+        .then((name) => {
+          if (active && version === nameProbeVersion.current && name && isValidFileName(name)) {
+            setNewFileName(name);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (active && version === nameProbeVersion.current) setNameProbePending(false);
+        });
+    }, 350);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [showAdd, newSource, fileNameEdited]);
+
+  const changeSource = (source: string) => {
+    nameProbeVersion.current += 1;
+    setNewSource(source);
+    if (!fileNameEdited) {
+      setNewFileName(suggestedFileName(source));
+      setNameProbePending(isHttpSource(source));
+    }
+  };
+
   const openAdd = (trigger?: HTMLElement) => {
-    addReturnFocus.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    nameProbeVersion.current += 1;
+    const active = document.activeElement;
+    addReturnFocus.current = trigger ?? (active instanceof HTMLElement && active.tabIndex >= 0 ? active : sidebarAddRef.current);
     setAddError("");
+    setNewSource("");
+    setNewDirectory("");
+    setNewFileName("");
+    setFileNameEdited(false);
+    setNameProbePending(false);
+    setFinalPath("");
     setShowAdd(true);
   };
 
   const closeAdd = () => {
-    if (!addLoading && !destinationPicking) setShowAdd(false);
+    if (!addLoading && !destinationPicking) {
+      nameProbeVersion.current += 1;
+      setNameProbePending(false);
+      setShowAdd(false);
+    }
   };
 
   const openSearch = (trigger?: HTMLElement) => {
@@ -474,7 +659,8 @@ export default function App() {
       searchInputRef.current?.focus();
       return;
     }
-    searchReturnFocus.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    const active = document.activeElement;
+    searchReturnFocus.current = trigger ?? (active instanceof HTMLElement && active.tabIndex >= 0 ? active : searchToggleRef.current);
     setSearchOpen(true);
   };
 
@@ -530,9 +716,21 @@ export default function App() {
   }, [section, searchOpen, showAdd]);
 
   const selectSection = (next: Section) => {
+    sectionRef.current = next;
     setSection(next);
     if (next === "settings") setSettingsCategory("home");
     if (next === "downloads") setFilter("all");
+    if (next === "notifications") setNotifications((current) => current.map((item) => item.read ? item : { ...item, read: true }));
+  };
+
+  const openNotificationTask = (item: Notice) => {
+    if (snapshotContext.current !== renderedContext) return;
+    if (!item.taskId || item.server !== server || !tasksRef.current.some((task) => task.id === item.taskId)) return;
+    setSearchQuery("");
+    setTaskSelection({ context: renderedContext, value: item.taskId });
+    setNotificationTargetId(item.taskId);
+    setShowInspector(true);
+    selectSection("downloads");
   };
 
   const applyServer = async () => {
@@ -576,43 +774,69 @@ export default function App() {
   };
 
   const runTaskCommand = async (id: string, command: TaskCommand, successMessage: MessageKey): Promise<void> => {
-    setActionByTask((current) => ({ ...current, [id]: command }));
-    setNotice("");
+    const context = renderedContext;
+    if (snapshotContext.current !== context) return;
+    const task = tasksRef.current.find((item) => item.id === id);
+    if (!task) return;
+    const name = taskDisplayName(task);
+    setTaskActions((current) => ({ context, value: { ...(valueForContext(current, context) ?? EMPTY_TASK_ACTIONS), [id]: command } }));
+    setNotice(null);
     setError("");
     try {
-      await invoke<boolean>(command, { server, task_id: id });
-      pushNotification(localMessage(successMessage), "success");
+      await invokeTaskCommand(invoke, command, server, id);
+      if (snapshotContext.current !== context) return;
+      pushNotification(taskActionMessage(successMessage, name), "success", command === "task_remove" ? undefined : id);
       await refreshTasks();
     } catch (caught) {
-      pushNotification({ raw: errorMessage(caught, t) }, "error");
+      if (snapshotContext.current !== context) return;
+      const detail = errorMessage(caught, t);
+      pushNotification(name ? localMessage("{name}: {error}", { name, error: detail }) : { raw: detail }, "error", id);
     } finally {
-      setActionByTask((current) => { const next = { ...current }; delete next[id]; return next; });
+      setTaskActions((current) => {
+        if (current?.context !== context) return current;
+        const next = { ...current.value }; delete next[id];
+        return { context, value: next };
+      });
     }
   };
 
   const startNextTask = async (taskId?: string): Promise<void> => {
+    const context = renderedContext;
+    if (snapshotContext.current !== context) return;
+    if (taskId && !tasksRef.current.some((task) => task.id === taskId)) return;
     const actionKey = taskId ?? selectedId ?? "__next__";
-    setActionByTask((current) => ({ ...current, [actionKey]: "start" }));
+    setTaskActions((current) => ({ context, value: { ...(valueForContext(current, context) ?? EMPTY_TASK_ACTIONS), [actionKey]: "start" } }));
     try {
-      await invoke<string>("task_start", { server });
-      pushNotification(localMessage("Download started"), "success");
+      const startedId = await invoke<string>("task_start", { server });
+      if (snapshotContext.current !== context) return;
+      const startedTask = tasksRef.current.find((task) => task.id === startedId);
+      const name = startedTask ? taskDisplayName(startedTask) : null;
+      pushNotification(taskActionMessage("Download started", name), "success", startedId);
       await refreshTasks();
     } catch (caught) {
+      if (snapshotContext.current !== context) return;
       pushNotification({ raw: errorMessage(caught, t) }, "error");
     } finally {
-      setActionByTask((current) => { const next = { ...current }; delete next[actionKey]; return next; });
+      setTaskActions((current) => {
+        if (current?.context !== context) return current;
+        const next = { ...current.value }; delete next[actionKey];
+        return { context, value: next };
+      });
     }
   };
 
   const chooseDestination = async (): Promise<void> => {
+    if (!localServer) return;
     setDestinationPicking(true);
     setAddError("");
     try {
-      const destination = await save({
-        title: t("Choose download destination"),
-        defaultPath: newDest.trim() || undefined,
+      const directory = await open({
+        title: t("Choose download folder"),
+        directory: true,
+        multiple: false,
+        defaultPath: newDirectory || undefined,
       });
-      if (destination) setNewDest(destination);
+      if (typeof directory === "string") setNewDirectory(directory);
     } catch (caught) {
       setAddError(errorMessage(caught, t));
     } finally {
@@ -623,21 +847,54 @@ export default function App() {
 
   const createAndQueue = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
+    if (nameProbePending) return;
+    if (hasHardLineBreak(newSource)) {
+      setAddError(t("Enter one URL without line breaks."));
+      return;
+    }
+    if (!isHttpSource(newSource)) {
+      setAddError(t("Enter an HTTP or HTTPS URL."));
+      return;
+    }
+    if (!isValidFileName(newFileName)) {
+      setAddError(t("Enter a valid file name without slashes or control characters."));
+      return;
+    }
+    if (!newDirectory.trim()) {
+      setAddError(t(localServer ? "Choose a download folder before adding a task." : "Enter an absolute folder path on the Server host."));
+      return;
+    }
+    if (!localServer && !isAbsoluteServerFolder(newDirectory)) {
+      setAddError(t("Enter an absolute folder path on the Server host."));
+      return;
+    }
     setAddLoading(true);
     setAddError("");
     try {
-      const id = newId.trim();
-      await invoke("task_create", { server, id, source: newSource.trim(), destination: newDest.trim() });
-      try {
-        await invoke<boolean>("task_queue", { server, task_id: id });
-      } catch (caught) {
-        setAddError(t("Task created, but queueing failed: {error}", { error: errorMessage(caught, t) }));
+      const destination = localServer ? await join(newDirectory, newFileName) : serverDestination(newDirectory, newFileName);
+      if (!destination) {
+        setAddError(t("Enter an absolute folder path on the Server host."));
+        return;
+      }
+      if (localServer && await invoke<boolean>("destination_exists", { path: destination })) {
+        setAddError(t("A file already exists at this destination. Choose another file name."));
+        return;
+      }
+      const currentTasks = await invoke<TaskItem[]>("task_list", { server });
+      if (currentTasks.some((task) => task.destination === destination)) {
+        setAddError(t("A download task already uses this destination. Choose another file name."));
+        return;
+      }
+      const result = await addDownload(invoke, server, newSource.trim(), destination);
+      if (!result.queued) {
+        setAddError(t("Task created, but queueing failed: {error}", { error: errorMessage(result.error, t) }));
         await refreshTasks();
         return;
       }
-      setNewId(""); setNewSource(""); setNewDest(""); setShowAdd(false);
+      nameProbeVersion.current += 1;
+      setNewSource(""); setNewFileName(""); setFileNameEdited(false); setNameProbePending(false); setShowAdd(false);
       selectSection("downloads");
-      pushNotification(localMessage("Download added and queued"), "success");
+      pushNotification(localMessage("{name} added and queued", { name: newFileName }), "success", result.id);
       await refreshTasks();
     } catch (caught) {
       setAddError(errorMessage(caught, t));
@@ -680,7 +937,7 @@ export default function App() {
           <span className="sidebar-brand">NEXUM</span>
           <div className="sidebar-top-actions">
             <button className="sidebar-icon-button" onClick={() => setShowInspector((current) => !current)} title={t("Toggle inspector")} aria-label={showInspector ? t("Hide task details") : t("Show task details")} aria-pressed={showInspector}><Icon name="list" size={18} /></button>
-            <button ref={sidebarAddRef} className="sidebar-icon-button add-sidebar-button" onClick={(event) => openAdd(event.currentTarget)} title={t("Add download")} aria-label={t("Add download")}>＋</button>
+            <button ref={sidebarAddRef} className="sidebar-icon-button add-sidebar-button" onClick={(event) => openAdd(event.currentTarget)} title={t("Add download")} aria-label={t("Add download")}><Icon name="plus" size={18} /></button>
           </div>
         </div>
         <nav className="primary-nav">
@@ -693,7 +950,7 @@ export default function App() {
         </nav>
         <div className="sidebar-spacer" />
         <button className={`nav-item ${section === "notifications" ? "selected" : ""}`} onClick={() => selectSection("notifications")} aria-current={section === "notifications" ? "page" : undefined}>
-          <Icon name="notifications" size={20} /><span>{t("Notifications")}</span>{notifications.length > 0 && <span className="nav-count">{notifications.length}</span>}
+          <Icon name="notifications" size={20} /><span>{t("Notifications")}</span>{unreadNotificationCount > 0 && <span className="nav-count" aria-label={t("{count} unread notifications", { count: unreadNotificationCount })}>{unreadNotificationCount}</span>}
         </button>
         <div className="sidebar-divider" />
         <button className={`nav-item ${section === "settings" ? "selected" : ""}`} onClick={() => selectSection("settings")} aria-current={section === "settings" ? "page" : undefined}><Icon name="settings" size={20} /><span>{t("Settings")}</span></button>
@@ -721,11 +978,13 @@ export default function App() {
             searchInputRef={searchInputRef}
             searchToggleRef={searchToggleRef}
             onFilterChange={setFilter}
-            onSelect={setSelectedId}
+            onSelect={(id) => setTaskSelection({ context: renderedContext, value: id })}
             onSearchOpen={(trigger) => { if (searchOpen) closeSearch(); else openSearch(trigger); }}
             onSearchQuery={setSearchQuery}
             onToggleInspector={() => setShowInspector((current) => !current)}
             onRefresh={() => void refreshTasks()}
+            onDismissNotice={() => setNotice(null)}
+            onDismissError={() => setError("")}
             onAdd={openAdd}
             onPause={(id) => void runTaskCommand(id, "task_pause", "Download paused")}
             onResume={(id) => void runTaskCommand(id, "task_resume", "Download resumed")}
@@ -737,23 +996,34 @@ export default function App() {
         {section === "dashboard" && <DashboardView tasks={tasks} connection={connection} onAdd={openAdd} onDownloads={() => selectSection("downloads")} />}
         {section === "trackers" && <UnavailableView icon="trackers" title={t("Trackers")} description={t("Tracker discovery and health checks will appear here when the BitTorrent engine is connected.")} />}
         {section === "plugins" && <UnavailableView icon="plugins" title={t("Plugins")} description={t("The plugin manager is currently a runtime foundation. Executable providers and a plugin catalog are planned.")} />}
-        {section === "notifications" && <NotificationsView notifications={notifications} locale={effectiveLocale} onDownloads={() => selectSection("downloads")} />}
+        {section === "notifications" && <NotificationsView notifications={notifications} locale={effectiveLocale} server={server} tasks={tasks} onDownloads={() => selectSection("downloads")} onOpenTask={openNotificationTask} onClear={(id) => setNotifications((current) => current.filter((item) => item.id !== id))} onClearAll={() => setNotifications([])} />}
         {section === "settings" && <SettingsView category={settingsCategory} server={server} serverDraft={serverDraft} settingsReady={settingsReady} settingsBusy={settingsBusy} connection={connection} refreshSeconds={refreshSeconds} language={language} onCategory={setSettingsCategory} onServerChange={setServerDraft} onRefreshSecondsChange={setRefreshSeconds} onLanguageChange={(next) => void changeLanguage(next)} onApply={() => void applyServer()} onCredentialChanged={() => setCredentialRevision((current) => current + 1)} />}
       </section>
 
       <div className="sr-only" role="alert">{renderStatus(error, t)}</div>
-      <div className="sr-only" role="status">{renderStatus(notice, t)}</div>
+      <div className="sr-only" role="status">{notice ? renderMessage(notice.message, t) : ""}</div>
 
       {showAdd && (
         <div className="modal-backdrop" role="presentation" onMouseDown={closeAdd}>
           <section ref={addDialogRef} className="modal" role="dialog" aria-modal="true" aria-labelledby="add-download-title" onKeyDown={handleAddDialogKeyDown} onMouseDown={(event) => event.stopPropagation()}>
             <div className="modal-header"><div><span className="eyebrow">{t("New task")}</span><h2 id="add-download-title">{t("Add Download")}</h2></div><button className="close-button" onClick={closeAdd} disabled={addLoading || destinationPicking} aria-label={t("Close Add Download")}>×</button></div>
             <form onSubmit={createAndQueue}>
-              <label>{t("Source URL")}<input ref={addSourceRef} value={newSource} onChange={(event) => setNewSource(event.target.value)} placeholder="https://example.com/file.zip" required /></label>
-              <label htmlFor="add-destination">{t("Destination")}</label><div className="input-with-action"><input id="add-destination" value={newDest} onChange={(event) => setNewDest(event.target.value)} placeholder="/Users/you/Downloads/file.zip" required /><button ref={destinationButtonRef} type="button" className="button chooser-button" onClick={() => void chooseDestination()} disabled={addLoading || destinationPicking}>{destinationPicking ? t("Choosing…") : t("Choose…")}</button></div>
-              <label>{t("Task ID")}<input value={newId} onChange={(event) => setNewId(event.target.value)} placeholder="file-download" required /></label>
+              <label htmlFor="add-source">{t("Source URL")}</label>
+              <textarea id="add-source" ref={addSourceRef} className="source-url-input" value={newSource} onChange={(event) => changeSource(event.target.value)} placeholder="https://example.com/file.zip" rows={3} wrap="soft" aria-describedby="add-source-help" required />
+              <p id="add-source-help" className="add-field-help">{t("Long URLs wrap automatically. Enter one URL per download.")}</p>
+              <label htmlFor="add-file-name">{t("File name")}</label>
+              <input id="add-file-name" value={newFileName} onChange={(event) => { nameProbeVersion.current += 1; setNewFileName(event.target.value); setFileNameEdited(true); setNameProbePending(false); }} aria-describedby="add-name-help" aria-invalid={newFileName.length > 0 && !isValidFileName(newFileName)} placeholder={t("Enter a file name")} required />
+              <p id="add-name-help" className="add-field-help" aria-live="polite">{t(nameProbePending ? "Checking file name from the response… You can edit it now." : "Suggested from the URL or response; you can edit it before adding the download.")}</p>
+              <label htmlFor="add-directory">{t(localServer ? "Save folder" : "Save folder on Server")}</label>
+              {localServer ? (
+                <div className="input-with-action"><input id="add-directory" value={newDirectory} readOnly title={newDirectory} placeholder={t("Choose a download folder")} aria-describedby="add-directory-help add-final-path" /><button ref={destinationButtonRef} type="button" className="button chooser-button" onClick={() => void chooseDestination()} disabled={addLoading || destinationPicking}>{destinationPicking ? t("Choosing…") : t("Choose…")}</button></div>
+              ) : (
+                <input id="add-directory" className="server-directory-input" value={newDirectory} onChange={(event) => setNewDirectory(event.target.value)} placeholder={t("Enter an absolute folder path on the Server host.")} aria-describedby="add-directory-help add-final-path" aria-invalid={Boolean(newDirectory.trim()) && !isAbsoluteServerFolder(newDirectory)} autoComplete="off" spellCheck={false} required />
+              )}
+              <p id="add-directory-help" className="add-field-help">{localServer ? t("Defaults to this Mac's Downloads folder.") : t("The Server at {server} writes downloads to this folder on its own filesystem.", { server })}</p>
+              <p id="add-final-path" className="add-final-path">{t("Destination")}: <output>{destinationPreview || t(localServer ? "Choose a folder and file name" : "Enter a Server folder and file name")}</output></p>
               {addError && <p className="form-error" role="alert">{addError}</p>}
-              <div className="modal-actions"><button type="button" className="button" onClick={closeAdd} disabled={addLoading || destinationPicking}>{t("Cancel")}</button><button type="submit" className="button primary" disabled={addLoading || destinationPicking || !newId.trim() || !newSource.trim() || !newDest.trim()}>{addLoading ? t("Adding…") : t("Add and Queue")}</button></div>
+              <div className="modal-actions"><button type="button" className="button" onClick={closeAdd} disabled={addLoading || destinationPicking}>{t("Cancel")}</button><button type="submit" className="button primary" disabled={addLoading || destinationPicking || nameProbePending || !newSource.trim() || !newDirectory || !newFileName}>{addLoading ? t("Adding…") : nameProbePending ? t("Checking name…") : t("Add and Queue")}</button></div>
             </form>
           </section>
         </div>
@@ -765,7 +1035,7 @@ export default function App() {
 
 function DownloadsView({
   tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, eventStreamConnected, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
-  searchInputRef, searchToggleRef, onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onAdd, onPause, onResume, onRemove, onQueue, onStart,
+  searchInputRef, searchToggleRef, onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onDismissNotice, onDismissError, onAdd, onPause, onResume, onRemove, onQueue, onStart,
 }: {
   tasks: TaskItem[];
   visibleTasks: TaskItem[];
@@ -778,7 +1048,7 @@ function DownloadsView({
   server: string;
   loading: boolean;
   error: string | LocalizedMessage;
-  notice: string | LocalizedMessage;
+  notice: Notice | null;
   lastUpdatedAt: number | null;
   showInspector: boolean;
   searchOpen: boolean;
@@ -791,6 +1061,8 @@ function DownloadsView({
   onSearchQuery: (query: string) => void;
   onToggleInspector: () => void;
   onRefresh: () => void;
+  onDismissNotice: () => void;
+  onDismissError: () => void;
   onAdd: (trigger?: HTMLElement) => void;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
@@ -807,7 +1079,7 @@ function DownloadsView({
         <div className="header-tools"><button className="round-tool" title={t("More actions (planned)")} aria-label={t("More actions (planned)")} disabled><Icon name="more" /></button><button className={`round-tool ${showInspector ? "active" : "muted"}`} onClick={onToggleInspector} title={t("Toggle task details")} aria-label={showInspector ? t("Hide task details") : t("Show task details")} aria-pressed={showInspector}><Icon name="info" /></button><button ref={searchToggleRef} className="round-tool" onClick={(event) => onSearchOpen(event.currentTarget)} title={t("Search downloads")} aria-label={t("Search downloads")} aria-expanded={searchOpen} aria-controls={searchOpen ? "download-search" : undefined}><Icon name="search" /></button></div>
       </header>
       {searchOpen && <div id="download-search" className="search-row"><Icon name="search" size={16} /><input ref={searchInputRef} value={searchQuery} onChange={(event) => onSearchQuery(event.target.value)} placeholder={t("Search downloads")} aria-label={t("Search downloads")} /></div>}
-      {(error || notice) && <div className={`message-banner ${error ? "error" : "success"}`}><span>{renderStatus(error || notice, t)}</span>{error && <button onClick={onRefresh}>{t("Retry")}</button>}</div>}
+      {(error || notice) && <div className={`message-banner ${error ? "error" : "success"}`}><span>{error ? renderStatus(error, t) : notice && renderMessage(notice.message, t)}</span><div className="message-banner-actions">{error && <button type="button" onClick={onRefresh}>{t("Retry")}</button>}<button type="button" onClick={error ? onDismissError : onDismissNotice} aria-label={t("Dismiss message")}>{t("Dismiss")}</button></div></div>}
       <div className="download-content">
         {visibleTasks.length === 0 ? (
           <EmptyDownloads onAdd={onAdd} hasFilter={filter !== "all" || Boolean(searchQuery)} />
@@ -826,7 +1098,7 @@ function DownloadsView({
         )}
       </div>
       <footer className="status-bar"><span className="status-mode">HTTP/HTTPS</span><span className="status-transfer"><span>↓ —</span><span>↑ —</span></span><span className="status-spacer" /><span className="status-item"><span className={`status-light ${connection}`} />{connection === "connected" ? t("Server connected") : t("Server unavailable")}</span><span className="status-item"><span className={`status-light ${eventStreamConnected ? "ready" : "connecting"}`} />{eventStreamConnected ? t("Live updates") : t("Polling fallback")}</span><span className="status-item"><span className="status-light ready" />{loading ? t("Syncing") : formatUpdatedAt(lastUpdatedAt, t)}</span></footer>
-      <button className="floating-add" onClick={(event) => onAdd(event.currentTarget)} title={t("Add download")} aria-label={t("Add download")}>＋</button>
+      <button className="floating-add" onClick={(event) => onAdd(event.currentTarget)} title={t("Add download")} aria-label={t("Add download")}><Icon name="plus" size={24} /></button>
       <span className="sr-only">{t(title)}</span>
     </>
   );
@@ -835,9 +1107,10 @@ function DownloadsView({
 function TaskRow({ task, selected, action, onSelect, onPause, onResume, onRemove, onQueue, onStart }: { task: TaskItem; selected: boolean; action?: TaskCommand | "start"; onSelect: () => void; onPause: () => void; onResume: () => void; onRemove: () => void; onQueue: () => void; onStart: () => void }) {
   const t = useTranslation();
   const progress = taskProgress(task);
+  const name = taskDisplayName(task) ?? t("Download");
   const selectionLabel = (progress === null
-    ? t("Select {id}, {state}, progress unknown", { id: task.id, state: taskStateLabel(task.state, t) })
-    : t("Select {id}, {state}, {percent} percent complete", { id: task.id, state: taskStateLabel(task.state, t), percent: Math.round(progress) }))
+    ? t("Select {name}, {state}, progress unknown", { name, state: taskStateLabel(task.state, t) })
+    : t("Select {name}, {state}, {percent} percent complete", { name, state: taskStateLabel(task.state, t), percent: Math.round(progress) }))
     + (task.error ? t(", error: {error}", { error: task.error }) : "");
   const handleSelectionKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -849,11 +1122,15 @@ function TaskRow({ task, selected, action, onSelect, onPause, onResume, onRemove
     buttons[nextIndex].focus();
     buttons[nextIndex].click();
   };
-  return <article className={`task-row ${selected ? "selected" : ""}`}>
+  return <article className={`task-row ${selected ? "selected" : ""}`} data-task-id={task.id}>
     <button type="button" className="task-row-main" onClick={onSelect} onKeyDown={handleSelectionKeyDown} aria-pressed={selected} aria-label={selectionLabel}>
-      <span className="task-row-heading"><strong>{task.id}</strong><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span></span><span className="task-source" title={task.source}>{task.source}</span><span className="progress-track" aria-hidden="true"><span className={progress === null ? "indeterminate" : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></span><span className="task-row-meta"><span>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</span><span className="task-destination" title={task.destination}>{task.destination}</span></span>{task.error && <span className="task-error">{task.error}</span>}
+      <span className="task-row-heading"><strong>{name}</strong><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span></span><span className="task-source" title={task.source}>{task.source}</span><span className="progress-track" aria-hidden="true"><span className={progress === null ? (task.state === "Downloading" ? "indeterminate active" : "indeterminate") : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></span>
     </button>
-    <div className="task-row-actions">{task.state === "Downloading" && <button className="row-action" disabled={Boolean(action)} onClick={onPause} aria-label={t("Pause {id}", { id: task.id })}>{action === "task_pause" ? t("Pausing…") : t("Pause")}</button>}{task.state === "Paused" && <button className="row-action" disabled={Boolean(action)} onClick={onResume} aria-label={t("Resume {id}", { id: task.id })}>{action === "task_resume" ? t("Resuming…") : t("Resume")}</button>}{task.state === "Queued" && <button className="row-action" disabled={Boolean(action)} onClick={onStart} aria-label={t("Start next queued task")}>{action === "start" ? t("Starting…") : t("Start")}</button>}{task.state === "Created" && <button className="row-action" disabled={Boolean(action)} onClick={onQueue} aria-label={t("Queue {id}", { id: task.id })}>{action === "task_queue" ? t("Queueing…") : t("Queue")}</button>}<button className="row-action danger-text" disabled={Boolean(action)} onClick={onRemove} aria-label={t("Remove {id}", { id: task.id })}>{action === "task_remove" ? t("Removing…") : t("Remove")}</button></div>
+    <div className="task-row-footer">
+      <div className="task-row-meta"><span>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</span><span className="task-destination" title={task.destination}>{task.destination}</span></div>
+      <div className="task-row-actions">{task.state === "Downloading" && <button className="row-action" disabled={Boolean(action)} onClick={onPause} aria-label={t("Pause {name}", { name })}>{action === "task_pause" ? t("Pausing…") : t("Pause")}</button>}{task.state === "Paused" && <button className="row-action" disabled={Boolean(action)} onClick={onResume} aria-label={t("Resume {name}", { name })}>{action === "task_resume" ? t("Resuming…") : t("Resume")}</button>}{task.state === "Queued" && <button className="row-action" disabled={Boolean(action)} onClick={onStart} aria-label={t("Start next queued task")}>{action === "start" ? t("Starting…") : t("Start")}</button>}{task.state === "Created" && <button className="row-action" disabled={Boolean(action)} onClick={onQueue} aria-label={t("Queue {name}", { name })}>{action === "task_queue" ? t("Queueing…") : t("Queue")}</button>}<button className="row-action danger-text" disabled={Boolean(action)} onClick={onRemove} aria-label={t("Remove {name}", { name })}>{action === "task_remove" ? t("Removing…") : t("Remove")}</button></div>
+    </div>
+    {task.error && <span className="task-error">{task.error}</span>}
   </article>;
 }
 
@@ -861,7 +1138,8 @@ function TaskInspector({ task, server, className = "" }: { task: TaskItem | null
   const t = useTranslation();
   if (!task) return <aside className={`inspector inspector-empty ${className}`}><span className="inspector-icon"><Icon name="info" size={24} /></span><p>{t("Select a download to inspect it.")}</p></aside>;
   const progress = taskProgress(task);
-  return <aside className={`inspector ${className}`} aria-label={t("Task details")}><span className="eyebrow">{t("Task details")}</span><h2>{task.id}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={t("{id} download progress", { id: task.id })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={progress === null ? t("{bytes} downloaded; total size unknown", { bytes: formatBytes(task.downloaded_bytes) }) : undefined}><span className={progress === null ? "indeterminate" : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</strong></div><dl className="detail-list"><div><dt>{t("Source")}</dt><dd title={task.source}>{task.source}</dd></div><div><dt>{t("Destination")}</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>{t("Server")}</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>{t("Latest error")}</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>{t("Copy error")}</button></div>}</aside>;
+  const name = taskDisplayName(task) ?? t("Download");
+  return <aside className={`inspector ${className}`} aria-label={t("Task details")}><span className="eyebrow">{t("Task details")}</span><h2>{name}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={t("{name} download progress", { name })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={task.total_bytes === null ? `${taskStateLabel(task.state, t)}; ${t("{bytes} downloaded; total size unknown", { bytes: formatBytes(task.downloaded_bytes) })}` : undefined}><span className={progress === null ? (task.state === "Downloading" ? "indeterminate active" : "indeterminate") : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</strong></div><dl className="detail-list"><div><dt>{t("Source")}</dt><dd title={task.source}>{task.source}</dd></div><div><dt>{t("Destination")}</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>{t("Server")}</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>{t("Latest error")}</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>{t("Copy error")}</button></div>}</aside>;
 }
 
 function EmptyDownloads({ onAdd, hasFilter }: { onAdd: (trigger?: HTMLElement) => void; hasFilter: boolean }) {
@@ -874,7 +1152,7 @@ function DashboardView({ tasks, connection, onAdd, onDownloads }: { tasks: TaskI
   const active = tasks.filter((task) => task.state === "Downloading").length;
   const queued = tasks.filter((task) => task.state === "Queued" || task.state === "Retrying").length;
   const completed = tasks.filter((task) => task.state === "Completed").length;
-  return <div className="dashboard-page"><div className="page-heading"><div><span className="eyebrow">{t("Overview")}</span><h1>{t("Dashboard")}</h1><p>{t("Current activity from your Nexum Server.")}</p></div><button className="button primary" onClick={(event) => onAdd(event.currentTarget)}>＋ {t("Add Download")}</button></div><div className="metric-grid"><MetricCard label={t("All downloads")} value={tasks.length} icon="downloads" /><MetricCard label={t("Active")} value={active} icon="trackers" /><MetricCard label={t("Queued")} value={queued} icon="list" /><MetricCard label={t("Completed")} value={completed} icon="general" /></div><section className="dashboard-card"><div className="dashboard-card-heading"><div><span className="eyebrow">{t("Recent activity")}</span><h2>{tasks.length ? t("Latest downloads") : t("Nothing here yet")}</h2></div><button className="text-button" onClick={onDownloads}>{t("View downloads")}</button></div>{tasks.length ? tasks.slice(0, 5).map((task) => <div className="activity-row" key={task.id}><span className={`status-light ${task.state === "Completed" ? "ready" : "connected"}`} /><strong>{task.id}</strong><span>{taskStateLabel(task.state, t)}</span></div>) : <p className="dashboard-empty">{t("Add an HTTP or HTTPS URL to see it here.")}</p>}</section><div className="dashboard-connection"><span className={`status-light ${connection}`} />{connection === "connected" ? t("Server connected") : t("Start nexum-server to connect")}</div></div>;
+  return <div className="dashboard-page"><div className="page-heading"><div><span className="eyebrow">{t("Overview")}</span><h1>{t("Dashboard")}</h1><p>{t("Current activity from your Nexum Server.")}</p></div><button className="button primary dashboard-add" onClick={(event) => onAdd(event.currentTarget)}><Icon name="plus" size={16} />{t("Add Download")}</button></div><div className="metric-grid"><MetricCard label={t("All downloads")} value={tasks.length} icon="downloads" /><MetricCard label={t("Active")} value={active} icon="trackers" /><MetricCard label={t("Queued")} value={queued} icon="list" /><MetricCard label={t("Completed")} value={completed} icon="general" /></div><section className="dashboard-card"><div className="dashboard-card-heading"><div><span className="eyebrow">{t("Recent activity")}</span><h2>{tasks.length ? t("Latest downloads") : t("Nothing here yet")}</h2></div><button className="text-button" onClick={onDownloads}>{t("View downloads")}</button></div>{tasks.length ? tasks.slice(0, 5).map((task) => <div className="activity-row" key={task.id}><span className={`status-light ${task.state === "Completed" ? "ready" : "connected"}`} /><strong>{taskDisplayName(task) ?? t("Download")}</strong><span>{taskStateLabel(task.state, t)}</span></div>) : <p className="dashboard-empty">{t("Add an HTTP or HTTPS URL to see it here.")}</p>}</section><div className="dashboard-connection"><span className={`status-light ${connection}`} />{connection === "connected" ? t("Server connected") : t("Start nexum-server to connect")}</div></div>;
 }
 
 function MetricCard({ label, value, icon }: { label: string; value: number; icon: IconName }) {
@@ -886,9 +1164,36 @@ function UnavailableView({ icon, title, description }: { icon: IconName; title: 
   return <div className="unavailable-page"><div className="unavailable-icon"><Icon name={icon} size={34} /></div><span className="eyebrow">{t("Planned capability")}</span><h1>{title}</h1><p>{description}</p><span className="planned-badge">{t("Not connected yet")}</span></div>;
 }
 
-function NotificationsView({ notifications, locale, onDownloads }: { notifications: Notice[]; locale: Locale; onDownloads: () => void }) {
+function NotificationsView({ notifications, locale, server, tasks, onDownloads, onOpenTask, onClear, onClearAll }: {
+  notifications: Notice[];
+  locale: Locale;
+  server: string;
+  tasks: TaskItem[];
+  onDownloads: () => void;
+  onOpenTask: (item: Notice) => void;
+  onClear: (id: number) => void;
+  onClearAll: () => void;
+}) {
   const t = useTranslation();
-  return <div className="notifications-page"><div className="page-heading"><div><span className="eyebrow">{t("Activity center")}</span><h1>{t("Notifications")}</h1><p>{t("Task and connection events from this Desktop session.")}</p></div><button className="button" onClick={onDownloads}>{t("View downloads")}</button></div>{notifications.length === 0 ? <div className="notifications-empty"><Icon name="notifications" size={32} /><h2>{t("No notifications")}</h2><p>{t("Completion and failure events will appear here.")}</p></div> : <div className="notification-list">{notifications.map((item) => <div className={`notification-row ${item.tone}`} key={item.id}><span className={`status-light ${item.tone === "success" ? "ready" : "error"}`} /><div><strong>{renderMessage(item.message, t)}</strong><span>{new Date(item.createdAt).toLocaleTimeString(locale)}</span></div></div>)}</div>}</div>;
+  const taskIds = new Set(tasks.map((task) => task.id));
+  return <div className="notifications-page">
+    <div className="page-heading">
+      <div><span className="eyebrow">{t("Activity center")}</span><h1>{t("Notifications")}</h1><p>{t("Task and connection events from this Desktop session.")}</p></div>
+      <div className="notification-heading-actions"><button className="button" onClick={onDownloads}>{t("View downloads")}</button>{notifications.length > 0 && <button className="button" onClick={onClearAll}>{t("Clear all")}</button>}</div>
+    </div>
+    {notifications.length === 0 ? <div className="notifications-empty"><Icon name="notifications" size={32} /><h2>{t("No notifications")}</h2><p>{t("Completion and failure events will appear here.")}</p></div> : <div className="notification-list">{notifications.map((item) => {
+      const message = renderMessage(item.message, t);
+      const canOpenTask = Boolean(item.taskId && item.server === server && taskIds.has(item.taskId));
+      return <div className={`notification-row ${item.tone} ${item.read ? "" : "unread"}`} key={item.id}>
+        <span className={`status-light ${item.tone === "success" ? "ready" : "error"}`} aria-hidden="true" />
+        <div className="notification-body">
+          {canOpenTask ? <button type="button" className="notification-open" onClick={() => onOpenTask(item)} aria-label={t("Open {message} in Downloads", { message })}><strong>{message}</strong></button> : <strong>{message}</strong>}
+          <span className="notification-time">{new Date(item.createdAt).toLocaleTimeString(locale)}</span>
+        </div>
+        <button type="button" className="notification-dismiss" onClick={() => onClear(item.id)} aria-label={t("Clear notification: {message}", { message })}>{t("Clear")}</button>
+      </div>;
+    })}</div>}
+  </div>;
 }
 
 function SettingsView({ category, server, serverDraft, settingsReady, settingsBusy, connection, refreshSeconds, language, onCategory, onServerChange, onRefreshSecondsChange, onLanguageChange, onApply, onCredentialChanged }: {
