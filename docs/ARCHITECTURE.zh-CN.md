@@ -36,6 +36,8 @@ Browser 扩展 ── HTTP(S) POST /jsonrpc + CORS（复用同一监听器）
 
 Server 默认监听 `127.0.0.1:39100`。当前实现始终绑定回环地址，`--port` 只改变端口。CLI 可以连接不带 scheme 的 TCP 地址，也可以用 `tls://host:port` 选择 TLS；Desktop UI 可以填写 Server 地址。同一个监听器同时接受按行分隔的 TCP JSON-RPC 和单请求 HTTP(S) `POST /jsonrpc`。HTTP 请求必须使用 `Content-Type: application/json` 并提供有上限的 `Content-Length`；分块请求和事件订阅仍不支持 HTTP(S) 传输。只有通过校验的 Chrome、Firefox 或 Safari 扩展 Origin 会收到 CORS 响应；网页 Origin 会在 RPC 分发前被拒绝。
 
+Server 另有尚未被 Desktop 调用的 `--managed` 启动入口：只接受显式绝对数据目录，从私有 stdin 分帧读取并校验版本及 Bearer 密钥，然后在随机回环端口监听。stdout 仅报告一条不含密钥的就绪帧；stdin 关闭或收到关闭命令时结束进程，保留部分文件供原有恢复路径使用。共享 Server 状态保有数据目录锁，避免 Worker 尚持有数据库时提前释放。托管入口的契约与尚未接入的 App 管理者见 [ADR 0006](decisions/0006-managed-macos-server.zh-CN.md)。
+
 ## Crate 职责
 
 | Crate | 已实现职责 |

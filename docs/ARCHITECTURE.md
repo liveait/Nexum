@@ -36,6 +36,8 @@ Browser extension ── HTTP(S) POST /jsonrpc + CORS (same listener)
 
 The server listens on `127.0.0.1:39100` by default. Its address is always bound to loopback in the current implementation; `--port` changes only the port. The CLI can connect to a configured bare TCP address or select TLS with `tls://host:port`, and the desktop UI accepts a server address. The same listener accepts line-delimited TCP JSON-RPC and one-request HTTP(S) `POST /jsonrpc` calls. HTTP requests require `Content-Type: application/json` and a bounded `Content-Length`; chunked requests and event subscriptions remain unsupported over HTTP(S). CORS responses are emitted only for validated Chrome, Firefox, or Safari extension origins; web-page origins are rejected before RPC dispatch.
 
+The Server also has a `--managed` entry point that the Desktop does not call yet. It requires an explicit absolute data directory, validates versions and a Bearer secret from framed private stdin, then listens on an ephemeral loopback port. stdout reports one secret-free readiness frame. stdin closure or a shutdown command ends the process while leaving partial files for existing recovery. Shared Server state retains the data-directory lock so it is not released while a worker still holds the database. See [ADR 0006](decisions/0006-managed-macos-server.md) for this contract and the pending App supervisor.
+
 ## Crates and Responsibilities
 
 | Crate | Implemented role |

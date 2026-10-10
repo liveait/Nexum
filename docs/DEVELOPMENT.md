@@ -66,6 +66,17 @@ To enable the Server TLS listener, set both `tls_cert_path` and `tls_key_path` i
 `task queue` persists a task and triggers the server dispatcher. It selects eligible queued HTTP/HTTPS tasks until the scheduler's concurrent-task limit or destination rules prevent another claim. `task start` remains a manual kick that selects one queued HTTP/HTTPS task and returns its ID after launching a worker; it then invokes the same dispatcher to fill other available slots. The worker reports progress after each response chunk; the server persists an intermediate snapshot after 1 MiB or 250 ms and flushes the final snapshot before marking the task `Completed`. Check `task list` or `task get ID` again for the current byte counts and completion; completion is asynchronous. The server rejects destinations inside its data directory, symbolic-link destinations, and overlapping active destinations. The worker writes to a hidden stable partial file in the destination directory and atomically maintains a JSON sidecar with the source, destination, validator, and expected length before renaming a complete response into place. A failed transfer keeps an existing destination, stores the failure text in the task's `error` view field, and is queued again while the retry policy allows; the dispatcher starts it automatically when a slot is available. The default policy allows three retries. A new attempt clears the previous error; the server restores the validated partial byte count after the claim when the sidecar matches. An active HTTP transfer can be paused at a response chunk boundary and resumed in the same server process; the worker keeps its temporary file and response open while paused. `task remove` cancels an active HTTP worker, waits up to 30 seconds for it to exit, removes the task, and leaves an existing destination untouched. If that wait times out, the request returns an error and the worker can remain blocked until the 30-minute HTTP request timeout; retry removal after it exits. A blocking response read can delay pause until the HTTP request timeout. After a restart, a stable partial file and sidecar are reused only when the source, destination, ETag or Last-Modified validator, expected length, and server-confirmed `206 Partial Content` range match. A `200` response, validator change or absence, malformed range, or length mismatch discards the partial response and starts from zero; a response without a validator cannot resume after restart. Magnet and local-file sources have no transfer engine yet.
 
 
+### Managed Server protocol tests
+
+`--managed` is a private App-child entry point requiring an absolute data directory and a startup frame on stdin. Neither `--auth-token` nor an external configuration file can supply its secret. It is not wired into the Desktop yet. See [ADR 0006](decisions/0006-managed-macos-server.md#first-implementation-slice-managed-server-bootstrap) for control frames, readiness, startup waiting, and exit boundaries. Run the isolated protocol and process tests:
+
+```bash
+cargo test --locked -p nexum-protocol managed::tests
+cargo test --locked -p nexum-server --test managed
+```
+
+The process tests create and clean their own temporary data/download directories without stopping an existing development Server.
+
 ## Authentication
 
 The server accepts `Bearer` and `ApiKey` credentials. Configure authentication in a key-value file passed with `--config`:
