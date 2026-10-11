@@ -11,7 +11,7 @@ Nexum 仍在开发中。目前可运行的主线是用于创建和管理任务�
 
 ## 当前状态
 
-CLI 和早期 Tauri Desktop 客户端可调用本地 Server；Desktop 需要单独运行 Server。Server 在数据目录（默认 `./data`）下打开 `nexum.sqlite`，启动时恢复已保存的任务。排队支持的 HTTP/HTTPS 任务、带排队任务重启 Server，或活动 HTTP 传输完成/失败后，Server 都会自动填充可用的 Scheduler 槽位。中断的 HTTP 响应在稳定的部分文件、sidecar 以及 ETag 或 Last-Modified 校验器仍与服务端确认的范围匹配时，可以在重启后续传。`task.start` 仍可作为手动 kick 和兼容接口，用于启动一个排队的 HTTP/HTTPS 任务，之后同一派发器会继续填充其他可用槽位。Desktop 现在通过独立 TCP 事件流订阅进行去抖的实时任务刷新；事件流不可用时按已配置的刷新策略回退到轮询。Magnet 和本地文件来源可以创建任务，但尚无传输路径。Browser Extension 现在根据保存的地址通过 Server HTTP 或 HTTPS `/jsonrpc` 桥接发送 `task.create` 和 `task.queue`；事件订阅仍只走 TCP。
+macOS Tauri App 默认托管随包 Server：Rust 后端校验可执行文件，在随机且强制鉴权的回环端点启动它，并将任务保存在稳定的 App 数据目录。设置也可选择带显式地址和 Keychain 凭据的外部 Server。CLI 继续连接单独启动的 Server。托管接线及原生验收边界见 [ADR 0006](docs/decisions/0006-managed-macos-server.zh-CN.md)。Server 在数据目录（默认 `./data`）下打开 `nexum.sqlite`，启动时恢复已保存的任务。排队支持的 HTTP/HTTPS 任务、带排队任务重启 Server，或活动 HTTP 传输完成/失败后，Server 都会自动填充可用的 Scheduler 槽位。中断的 HTTP 响应在稳定的部分文件、sidecar 以及 ETag 或 Last-Modified 校验器仍与服务端确认的范围匹配时，可以在重启后续传。`task.start` 仍可作为手动 kick 和兼容接口，用于启动一个排队的 HTTP/HTTPS 任务，之后同一派发器会继续填充其他可用槽位。Desktop 现在通过独立 TCP 事件流订阅进行去抖的实时任务刷新；事件流不可用时按已配置的刷新策略回退到轮询。Magnet 和本地文件来源可以创建任务，但尚无传输路径。Browser Extension 现在根据保存的地址通过 Server HTTP 或 HTTPS `/jsonrpc` 桥接发送 `task.create` 和 `task.queue`；事件订阅仍只走 TCP。
 
 Server 可以在启用 `require_auth` 时执行 Bearer 或 ApiKey 认证，也可以启用可选的进程级 RPC 限流。配置成对的 PEM 证书和私钥路径后，Server 可以启用 TLS。CLI 和 macOS Desktop 都可使用 `tls://host:port` 地址选择 TLS，校验 Server 名称和系统根证书链，并且只在握手成功后发送凭据。Browser Extension 会将同样的 `tls://host:port` 映射到浏览器 HTTPS，并使用浏览器正常的信任库；它仍没有凭据设置。可执行插件和真实媒体处理尚未接入运行中的 Server。CLI 会将凭据保存在配置文件中；macOS Desktop 会按明文回环或 TLS Server 地址将凭据保存到 Keychain，并可连接要求认证的 Server。代码边界与调用路径见[架构设计](docs/ARCHITECTURE.zh-CN.md)，后续集成工作见[开发计划](docs/DEVELOPMENT_PLAN.zh-CN.md)。
 
@@ -48,7 +48,7 @@ cargo run -p nexum-cli -- task list
 cargo run -p nexum-cli -- auth clear
 ```
 
-缺少、无效或不匹配的凭据会返回 JSON-RPC 错误 `-32001`（`authentication required`）。`server.auth` 只返回已配置的 scheme，不会返回 secret。若设置 `require_auth=true` 却没有有效 scheme 和非空 token，Server 会拒绝启动。认证会覆盖普通 RPC 请求和 `events.subscribe`。CLI 只会在已校验的 `tls://` 连接上，或确认实际 peer 为回环地址的明文连接上附加已保存凭据。在 macOS Desktop 设置 → 通用中，为当前已保存的回环或 `tls://` Server 地址保存匹配的 scheme 和 secret；Desktop 会为这两类请求附加该凭据。secret 输入框只用于写入，清除凭据会从 Keychain 移除它。明文凭据仍只允许回环地址；已校验的 TLS 凭据使用包含传输身份的 Keychain 账户。
+缺少、无效或不匹配的凭据会返回 JSON-RPC 错误 `-32001`（`authentication required`）。`server.auth` 只返回已配置的 scheme，不会返回 secret。若设置 `require_auth=true` 却没有有效 scheme 和非空 token，Server 会拒绝启动。认证会覆盖普通 RPC 请求和 `events.subscribe`。CLI 只会在已校验的 `tls://` 连接上，或确认实际 peer 为回环地址的明文连接上附加已保存凭据。在 macOS Desktop 设置 → 通用中，先选择外部模式并保存地址，再为当前已保存的回环或 `tls://` Server 地址保存匹配的 scheme 和 secret；Desktop 会为这两类请求附加该凭据。secret 输入框只用于写入，清除凭据会从 Keychain 移除它。明文凭据仍只允许回环地址；已校验的 TLS 凭据使用包含传输身份的 Keychain 账户。
 
 要启用 Server TLS 监听器，请在启动前同时配置两个路径：
 

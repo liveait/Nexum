@@ -1,0 +1,144 @@
+{
+  "recorded_at": "2026-10-11T07:17:45.503656+00:00",
+  "source": {
+    "base_commit": "4acbb162384dbf12bc6019b66ea4def86991ba13",
+    "state": "uncommitted Desktop managed-server implementation and final shortcut fix; identified by source-file and artifact hashes",
+    "sha256": {
+      "apps/desktop/src-tauri/src/main.rs": "541595665c5a59145b1879f04f6a1d76b994aa83a32f675f3fa854a15927af13",
+      "apps/desktop/src-tauri/src/desktop_lib.rs": "db622867e7d3ed6394e3eb620b7dd82997cd8679eec5e8ed4cbf8c6bc1668ce3",
+      "apps/desktop/src-tauri/src/managed_server.rs": "4d067b3e533e1666356eadb6d27fc329ac849aaf58dd4676b7736f0d0b3beda8",
+      "apps/desktop/src-tauri/src/download_target.rs": "feb4f774658a93d36680809273d22c0940268fc484cda00f45d687f1491127b9",
+      "apps/desktop/src-tauri/build.rs": "863d7c04ff7199f333784c662290d7566d76c9306793825d46c2cf9a21459787",
+      "apps/desktop/src/App.tsx": "a21b030d77d2ad787808a1beed2d99cfe28ef7552dbcafce47369b394613224e",
+      "apps/desktop/src/connectionState.ts": "fc7dae3b51da655714a2b493bf7053a6c48b55b0ebe8da8003e49e68caac24af",
+      "apps/desktop/src/taskCommands.ts": "bd0e0d20b59b09c54c00f522295a31bed039115fc36fea30ceff1aad99f4a612",
+      "scripts/prepare-desktop-server.mjs": "6220ee102582e6e86e9c9b736fd8fc1d53a30e7efe1978024701e804559d4daf",
+      "scripts/verify-desktop-bundle.mjs": "ac14f98d1e367e5aa98acaa93d84a33702f39a7ae31787420cc30c6a770a08ba"
+    }
+  },
+  "artifacts": {
+    "final": {
+      "version": "0.1.0",
+      "target": "aarch64-apple-darwin",
+      "signing": "local ad-hoc; App and nested Server pass strict verification",
+      "sha256": {
+        "target/release/bundle/macos/Nexum.app/Contents/MacOS/nexum-desktop": "80c691b1bc032cee836c4a8229227652c7ed387bdaa6afa7047a5e8c8bbef64c",
+        "target/release/bundle/macos/Nexum.app/Contents/Resources/nexum-server": "d6aa4c0ccd2aca7939140d4002f9a8bd07ee7f70e6c4318d33bf03f89c31e8d4",
+        "apps/desktop/dist/assets/index-4uOXngzD.js": "44d81c1c3ce9973066e009767a456330f2fa4acca74616304d3e2d62bcce10cc",
+        "apps/desktop/dist/assets/index-PmFvUR3U.css": "b7b7a734a2cdfa6fdccc54db5ee70e157ec61464d743b211a1106063a58dc6fd",
+        "apps/desktop/dist/index.html": "a101aac6d4d2dcf0460b73f399820a4766d1fb772be59528b7c04a1a85d8ff43"
+      }
+    },
+    "before_shortcut_fix": {
+      "recorded_at": "2026-10-11T07:07:38.782282+00:00",
+      "hashes": {
+        "Contents/MacOS/nexum-desktop": "f07651469177423fa8804b89f8a970d15c8b0f238d4965fedebe1eb74b99b2ef",
+        "Contents/Resources/nexum-server": "d6aa4c0ccd2aca7939140d4002f9a8bd07ee7f70e6c4318d33bf03f89c31e8d4"
+      }
+    }
+  },
+  "screenshots": [
+    {
+      "file": "settings-managed.png",
+      "artifact": "before_shortcut_fix",
+      "state": "Connected Managed settings without an address or credentials",
+      "saved_at": "2026-10-11T06:38:50.049442+00:00",
+      "pixels": [
+        2400,
+        1602
+      ],
+      "sha256": "6472514b556be8c021ccff1dde7de30b62c0982cb0a7767390ad900e5c413b4a",
+      "redacted": false
+    },
+    {
+      "file": "settings-external.png",
+      "artifact": "before_shortcut_fix",
+      "state": "External settings showing address and Keychain controls",
+      "saved_at": "2026-10-11T06:55:11.913013+00:00",
+      "pixels": [
+        2400,
+        1602
+      ],
+      "sha256": "207dfbfbbfe3cabcc285786a350b7677cfcd3054243b2143f8484be39a58de9e",
+      "redacted": false
+    },
+    {
+      "file": "download-completed.png",
+      "artifact": "final",
+      "state": "Completed codeload task and Inspector with full progress; two local paths replaced with annotated ~/Downloads paths",
+      "saved_at": "2026-10-11T07:13:57.082197+00:00",
+      "pixels": [
+        2400,
+        1602
+      ],
+      "sha256": "3f300a49cbd4e317351ca2e18a7b4a2ac0e7bc6c86f379c4fd6d124748effe4b",
+      "redacted": true
+    }
+  ],
+  "checks": {
+    "native_before_shortcut_fix": [
+      "App starts bundled Server without a separate terminal process",
+      "Native codeload filename probe suggests omlx-main.zip",
+      "Collision allocation chooses omlx-main (1).zip around an existing partial and sidecar",
+      "Download completes with unknown total; list and Inspector expose 100 percent",
+      "Closing the window leaves App and owned Server running while downloading",
+      "Quit stops App and its owned child; relaunch restores the completed task",
+      "TERM of the verified owned child restarts it in 0.374 seconds without relaunching App and restores full snapshot",
+      "Managed hides address and Keychain; External shows them",
+      "External snapshot is empty, owned Managed child stops, and independent External Server stays alive across switch and Quit/relaunch"
+    ],
+    "native_final": [
+      "Final App relaunch automatically connects in Managed mode and restores the completed task",
+      "Native folder picker saves a temporary default directory; first Cmd+N after saving uses it",
+      "Use system Downloads reset is saved; first Cmd+N defaults to system Downloads",
+      "Completed task still exposes 100 percent and correct filename"
+    ],
+    "automated": {
+      "rust_workspace_tests": 276,
+      "desktop_library_tests": 29,
+      "managed_library_tests": 12,
+      "desktop_binary_tests": 8,
+      "frontend_tests": 13,
+      "passed": [
+        "cargo fmt --all -- --check",
+        "cargo check --locked --workspace --all-targets",
+        "cargo test --locked --workspace",
+        "cargo clippy --locked --workspace --all-targets -- -D warnings",
+        "pnpm install --frozen-lockfile",
+        "pnpm test",
+        "pnpm build",
+        "pnpm exec tauri build --bundles app",
+        "codesign --verify --deep --strict",
+        "node scripts/verify-desktop-bundle.mjs"
+      ]
+    }
+  },
+  "retained_download": {
+    "source": "https://codeload.github.com/liveait/omlx/zip/refs/heads/main",
+    "filename": "omlx-main (1).zip",
+    "state": "completed",
+    "downloaded_bytes": 52830371,
+    "total_bytes": null,
+    "sha256": "41e02518a2a65d1ca448117b04be25a9aad0f64fb5e3d9c688a6c1b2a0452fd6",
+    "zip_crc": "all entries passed"
+  },
+  "restoration": {
+    "settings": {
+      "mode": "managed",
+      "server": "127.0.0.1:39100",
+      "refresh_interval_secs": 5,
+      "language": "system",
+      "download_directory": null
+    },
+    "external_fixture": "owned fixture stopped; temporary directory removed and port released",
+    "completed_download": "retained for user inspection",
+    "preexisting_partial_and_sidecar": "preserved; SHA-256 unchanged"
+  },
+  "limitations": [
+    "This is local ad-hoc signing, not distribution signing, notarization or Gatekeeper acceptance",
+    "M0 actual VoiceOver speech remains unconfirmed",
+    "M1 complete-file publication/persisted-state crash reconciliation and final clean-user/upgrade acceptance remain open",
+    "Screenshots use Simplified Chinese and Light appearance, not new Light/Dark pairs; point bounds were not measured",
+    "Settings images and core lifecycle checks precede the final shortcut dependency fix; final task restoration and directory checks are separately recorded"
+  ]
+}

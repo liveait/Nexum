@@ -1,11 +1,11 @@
 # ADR 0006: App-Managed Local Server for macOS
 
-- Status: Accepted for M1; Server managed bootstrap implemented, Desktop supervisor pending
+- Status: Accepted for M1; Server bootstrap and Desktop supervision wired; final M1 acceptance pending
 - Date: 2026-10-10
 
 ## Context
 
-The Desktop is currently a TCP JSON-RPC client. It defaults to `127.0.0.1:39100`, stores that address in `settings.json`, and needs a separately started Server. The Server defaults to `./data/nexum.sqlite` relative to its launch directory and locks that data directory. Its listener also carries the HTTP bridge and event stream. A loopback listener alone does not authenticate the Desktop: another local process can bind a fixed port before the Server or call its RPC methods. HTTP partial files and their validator sidecars live beside each destination under [ADR 0004](0004-cross-restart-http-resume.md).
+Before the M1 managed slice, the Desktop was a TCP JSON-RPC client. It defaults to `127.0.0.1:39100`, stores that address in `settings.json`, and needs a separately started Server. The Server defaults to `./data/nexum.sqlite` relative to its launch directory and locks that data directory. Its listener also carries the HTTP bridge and event stream. A loopback listener alone does not authenticate the Desktop: another local process can bind a fixed port before the Server or call its RPC methods. HTTP partial files and their validator sidecars live beside each destination under [ADR 0004](0004-cross-restart-http-resume.md).
 
 M1 makes a macOS installation usable by opening the App and pasting an HTTP(S) URL. Nexum has not been released, so M1 does not need migration from earlier development builds or separately launched CLI Servers. Existing development data must not be deleted or silently attached.
 
@@ -38,14 +38,22 @@ M1 makes a macOS installation usable by opening the App and pasting an HTTP(S) U
 
 ### First implementation slice: managed Server bootstrap
 
-On October 11, 2026, the Server gained a dedicated `--managed` entry point that accepts only an explicit absolute `--data-dir` and an optional positive `--max-connections`. It rejects external configuration, fixed-port, TLS, and command-line authentication flags. The existing manually started Server path remains available. The Desktop does not call this entry point yet.
+On October 11, 2026, the Server gained a dedicated `--managed` entry point that accepts only an explicit absolute `--data-dir` and an optional positive `--max-connections`. It rejects external configuration, fixed-port, TLS, and command-line authentication flags. The existing manually started Server path remains available. The following Desktop slice now calls this entry point.
 
-- `nexum_protocol::managed` defines private pipe frames: a four-byte big-endian length followed by JSON, capped at 4096 bytes per frame. The first stdin frame has `type=start`, control version `1`, the Server package version, RPC version, and a 32-byte Bearer secret encoded as 64 hexadecimal characters. The Server validates it before creating storage, opening the database, or listening; an incomplete startup frame fails after five seconds. Generating the random secret remains the future Desktop supervisor's responsibility.
-- stdout carries exactly one readiness frame with the control/Server/RPC versions, child PID, and actual loopback endpoint from `listener.local_addr()`. It contains no secret. Diagnostics use stderr, and frame-parser errors do not echo input. The future Desktop still needs to verify the bundled binary's SHA-256 digest, validate readiness, and perform an authenticated health probe.
+- `nexum_protocol::managed` defines private pipe frames: a four-byte big-endian length followed by JSON, capped at 4096 bytes per frame. The first stdin frame has `type=start`, control version `1`, the Server package version, RPC version, and a 32-byte Bearer secret encoded as 64 hexadecimal characters. The Server validates it before creating storage, opening the database, or listening; an incomplete startup frame fails after five seconds. The Desktop supervisor now generates the random secret for each launch.
+- stdout carries exactly one readiness frame with the control/Server/RPC versions, child PID, and actual loopback endpoint from `listener.local_addr()`. It contains no secret. Diagnostics use stderr, and frame-parser errors do not echo input. The following Desktop slice verifies the bundled binary SHA-256, readiness, and authenticated health probe.
 - After startup, `type=shutdown` with control version `1`, stdin EOF, or an invalid control frame ends the child. The listener checks its control channel every 25 ms. It does not wait for blocked RPC, event, or HTTP workers and does not remove/cancel tasks to clear partial files. Exit relies on existing transactional persistence and cross-restart recovery; it does not guarantee flushing every in-flight byte before exit. Shared Server state retains the data-directory lock until workers holding the database exit with the process.
 - Isolated process tests cover ephemeral endpoints, TCP/HTTP/events authentication, invalid/timed-out startup, duplicate data-directory ownership, private readiness output, lock release after Shutdown/EOF, and stalled-transfer resume and destination protection. They use independent temporary directories and HTTP fixtures without adopting development Server data.
 
-This slice does not bundle the Server, implement the App supervisor/settings modes, select the App data directory, or wire native UI. M1 remains unaccepted. The next slice connects the Tauri backend to this protocol.
+The first slice implements only Server bootstrap; the following Desktop slice now connects it. M1 still requires final acceptance.
+
+### Second implementation slice: Desktop supervision
+
+On October 11, 2026, `managed_server.rs` wires bounded readiness/probing, handle-owned shutdown, three crash restarts with backoff, and manual retry. Settings default to Managed; External exposes the address and Keychain controls. Specific RPC/event commands resolve the current backend route without accepting a frontend endpoint. Event reconnect resolves the fresh route and requests a full snapshot. Public status contains only state, generation, and diagnostics.
+
+The build stages the target-architecture Server, applies its local ad-hoc signature before hashing, bundles it as `Contents/Resources/nexum-server`, and embeds SHA-256 in Desktop. A release build without matching resources fails; missing, changed, incompatible, or failed executables produce rebuild/retry guidance without PATH or fixed-port fallback. Managed storage uses stable `app_data_dir()/server/`. Closing the window hides the app, Quit stops its child, and Dock reopen restores the window.
+
+Rust validates the HTTP(S) URL, safe filename and folder, generates random IDs, and allocates around task destinations, complete files, stable partials, and sidecars without creating a final file. System Downloads is the default, with per-task and saved default-folder selection. This slice retains existing Server recovery; complete-file publication before Completed persistence remains open, as do final clean-user, upgrade, and actual VoiceOver speech checks. See [Release Process](../RELEASE.md) for artifact and native evidence.
 
 ## Acceptance and verification boundary
 

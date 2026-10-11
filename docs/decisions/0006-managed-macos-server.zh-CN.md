@@ -1,11 +1,11 @@
 # ADR 0006：由 macOS App 托管本地 Server
 
-- 状态：M1 设计已采纳；Server 托管启动协议已实现，Desktop 管理者尚未接入
+- 状态：M1 设计已采纳；Server 启动协议和 Desktop 管理者已接入，最终验收待完成
 - 日期：2026-10-10
 
 ## 背景
 
-目前 Desktop 是 TCP JSON-RPC 客户端，默认连接 `127.0.0.1:39100`，在 `settings.json` 保存地址，必须先单独启动 Server。Server 默认将 `nexum.sqlite` 放在相对于启动目录的 `./data`，并锁定该数据目录。同一个监听器还承载 HTTP 桥接与事件流。仅绑定回环地址不能证明 Server 属于 Desktop：其他本地进程可先占用固定端口或调用 RPC。HTTP 临时文件及其校验元数据位于目标文件旁，遵循 [ADR 0004](0004-cross-restart-http-resume.zh-CN.md)。
+M1 托管切片之前，Desktop 是 TCP JSON-RPC 客户端，默认连接 `127.0.0.1:39100`，在 `settings.json` 保存地址，必须先单独启动 Server。Server 默认将 `nexum.sqlite` 放在相对于启动目录的 `./data`，并锁定该数据目录。同一个监听器还承载 HTTP 桥接与事件流。仅绑定回环地址不能证明 Server 属于 Desktop：其他本地进程可先占用固定端口或调用 RPC。HTTP 临时文件及其校验元数据位于目标文件旁，遵循 [ADR 0004](0004-cross-restart-http-resume.zh-CN.md)。
 
 M1 要让 macOS App 在打开后粘贴 HTTP(S) URL 就能下载。Nexum 尚未发布，因此 M1 不需要迁移早期开发构建或单独启动的 CLI Server 数据。已有开发数据不能被删除，也不能被静默接管。
 
@@ -38,14 +38,22 @@ M1 要让 macOS App 在打开后粘贴 HTTP(S) URL 就能下载。Nexum 尚未�
 
 ### 首个实现切片：Server 托管启动协议
 
-2026 年 10 月 11 日，Server 增加专用 `--managed` 入口，仅接受显式的绝对 `--data-dir` 和可选的正整数 `--max-connections`。托管入口拒绝外部配置、固定端口、TLS 及命令行鉴权参数；手动启动 Server 的原有路径仍保留。当前 Desktop 尚未调用此入口。
+2026 年 10 月 11 日，Server 增加专用 `--managed` 入口，仅接受显式的绝对 `--data-dir` 和可选的正整数 `--max-connections`。托管入口拒绝外部配置、固定端口、TLS 及命令行鉴权参数；手动启动 Server 的原有路径仍保留。Desktop 管理者已在后续切片中接入此入口。
 
-- `nexum_protocol::managed` 定义私有管道帧：4 字节大端长度加 JSON，单帧上限 4096 字节。stdin 首帧为 `type=start`，携带控制版本 `1`、Server 包版本、RPC 版本和用 64 个十六进制字符表示的 32 字节 Bearer 密钥。Server 校验后才创建数据目录、打开数据库和监听；5 秒未收到完整启动帧即失败。密钥的随机生成仍由后续 Desktop 管理者负责。
-- stdout 只写一条就绪帧，包含控制／Server／RPC 版本、子进程 PID 和 `listener.local_addr()` 得到的实际回环端点。密钥不在其中；日志走 stderr，帧解析错误不回显输入。后续 Desktop 仍须校验包内二进制 SHA-256、就绪消息并执行带鉴权的探活。
+- `nexum_protocol::managed` 定义私有管道帧：4 字节大端长度加 JSON，单帧上限 4096 字节。stdin 首帧为 `type=start`，携带控制版本 `1`、Server 包版本、RPC 版本和用 64 个十六进制字符表示的 32 字节 Bearer 密钥。Server 校验后才创建数据目录、打开数据库和监听；5 秒未收到完整启动帧即失败。Desktop 管理者现已在每次启动时随机生成密钥。
+- stdout 只写一条就绪帧，包含控制／Server／RPC 版本、子进程 PID 和 `listener.local_addr()` 得到的实际回环端点。密钥不在其中；日志走 stderr，帧解析错误不回显输入。下述 Desktop 切片已校验包内二进制 SHA-256、就绪消息并执行带鉴权的探活。
 - 启动后 `type=shutdown`（控制版本 `1`）、stdin EOF 或非法控制帧会结束子进程。监听循环每 25 ms 检查控制通道；不等待阻塞中的 RPC、事件或 HTTP Worker，也不调用删除／取消任务来清除部分文件。进程退出依赖现有事务持久化和跨重启恢复；这不是传输完成前的全量刷新保证。数据目录锁由共享 Server 状态持有，直到保有数据库的 Worker 随进程退出。
 - 隔离进程测试覆盖随机端点、TCP/HTTP/事件鉴权、错误和超时启动、重复数据目录、就绪输出脱敏、关闭／EOF 后的锁释放及停顿传输的续传与目标保护。测试用独立临时目录与 HTTP fixture，不接管开发 Server 数据。
 
-本切片不包含 App 打包、进程管理者、设置模式、默认数据目录选择或原生界面接线，M1 仍未通过验收。下一切片将 Tauri 后端接入这个协议。
+首个切片仅实现 Server 协议；下述 Desktop 切片已接入它。M1 仍需完成最终验收。
+
+### 第二个实现切片：Desktop 托管接线
+
+2026 年 10 月 11 日，`managed_server.rs` 接入有限启动探活、拥有句柄的关闭、三次退避重启及手动重试。设置默认托管，外部模式显示地址与 Keychain。具体 RPC／事件命令从设置和管理者解析当前路由，不接受前端地址；事件重连重新解析端点，并要求完整快照。托管状态只包含状态、代次和诊断，不包含端点或令牌。
+
+构建预先生成目标架构 Server，将本机临时签名后的文件作为资源放到 `Contents/Resources/nexum-server`，并把 SHA-256 嵌入 Desktop。release 构建缺少匹配资源即失败；运行时缺失、改变、不兼容或启动失败显示重建／重试提示，不回退到 PATH 或固定端口。托管数据目录使用稳定的 `app_data_dir()/server/`。关闭窗口隐藏 App，明确退出停止子进程；Dock 重新打开界面。
+
+新增下载在 Rust 中校验 HTTP(S) URL、安全名称和目录，生成随机 ID，绕开已有任务、完整文件、稳定部分文件及 sidecar 分配名称；不创建最终文件。默认使用系统 Downloads，可为单项或设置中的默认位置改选目录。此切片保留既有 Server 恢复规则，尚未解决完整文件发布后、Completed 持久化前的崩溃窗口，也不替代全新用户、升级和实际旁白朗读验收。实际构建与原生检查见[发布流程](../RELEASE.zh-CN.md)。
 
 ## 验收与验证边界
 

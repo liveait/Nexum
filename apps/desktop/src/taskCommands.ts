@@ -2,29 +2,28 @@ type Invoke = <T>(command: string, args: Record<string, unknown>) => Promise<T>;
 
 export type TaskCommand = "task_queue" | "task_pause" | "task_resume" | "task_remove";
 
+interface CreatedDownload {
+  id: string;
+  destination?: string;
+}
+
 export type AddDownloadResult =
-  | { id: string; queued: true }
-  | { id: string; queued: false; error: unknown };
+  | { id: string; destination?: string; queued: true }
+  | { id: string; destination?: string; queued: false; error: unknown };
 
-export function invokeTaskCommand(invoke: Invoke, command: TaskCommand, server: string, taskId: string): Promise<boolean> {
-  return invoke<boolean>(command, { server, taskId });
+export function invokeTaskCommand(invoke: Invoke, command: TaskCommand, taskId: string): Promise<boolean> {
+  return invoke<boolean>(command, { taskId });
 }
 
-function generateTaskId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `download-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-export async function addDownload(invoke: Invoke, server: string, source: string, destination: string): Promise<AddDownloadResult> {
-  const id = generateTaskId();
-  await invoke("task_create", { server, id, source, destination });
+/** The backend chooses the connection, task ID and collision-safe destination. */
+export async function addDownload(invoke: Invoke, source: string, filename: string, directory: string): Promise<AddDownloadResult> {
+  const created = await invoke<CreatedDownload>("task_create", { source, filename, directory });
+  if (!created || typeof created.id !== "string" || !created.id) throw new Error("The download could not be created. Try again.");
+  const { id, destination } = created;
   try {
-    await invokeTaskCommand(invoke, "task_queue", server, id);
-    return { id, queued: true };
+    await invokeTaskCommand(invoke, "task_queue", id);
+    return { id, destination, queued: true };
   } catch (error) {
-    return { id, queued: false, error };
+    return { id, destination, queued: false, error };
   }
 }

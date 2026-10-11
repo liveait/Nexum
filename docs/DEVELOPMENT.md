@@ -68,11 +68,12 @@ To enable the Server TLS listener, set both `tls_cert_path` and `tls_key_path` i
 
 ### Managed Server protocol tests
 
-`--managed` is a private App-child entry point requiring an absolute data directory and a startup frame on stdin. Neither `--auth-token` nor an external configuration file can supply its secret. It is not wired into the Desktop yet. See [ADR 0006](decisions/0006-managed-macos-server.md#first-implementation-slice-managed-server-bootstrap) for control frames, readiness, startup waiting, and exit boundaries. Run the isolated protocol and process tests:
+`--managed` is a private App-child entry point requiring an absolute data directory and a startup frame on stdin. Neither `--auth-token` nor an external configuration file can supply its secret. The Desktop now calls it through the owned-child supervisor; its token remains backend-only. See [ADR 0006](decisions/0006-managed-macos-server.md#first-implementation-slice-managed-server-bootstrap) for control frames, readiness, startup waiting, and exit boundaries. Run the isolated protocol and process tests:
 
 ```bash
 cargo test --locked -p nexum-protocol managed::tests
 cargo test --locked -p nexum-server --test managed
+cargo test --locked -p nexum-desktop --lib managed_server::tests
 ```
 
 The process tests create and clean their own temporary data/download directories without stopping an existing development Server.
@@ -105,7 +106,7 @@ cargo run -p nexum-cli -- auth set ApiKey replace-with-a-secret
 cargo run -p nexum-cli -- auth clear
 ```
 
-`auth set` accepts only `Bearer` or `ApiKey` and rejects an empty token. `auth clear` clears both credential field values in the CLI config. The CLI may attach the saved credential to a verified `tls://` connection; for a bare plaintext address it first checks that the connected peer is loopback and refuses to send credentials otherwise. On macOS, first save a loopback or `tls://` Server address in Desktop Settings. Under General, select `Bearer` or `ApiKey`, enter the matching secret, and save it. The Tauri backend keeps both values in Keychain under a transport-scoped account, sends them with ordinary RPC and `events.subscribe`, and returns only the configured scheme to React when reading Keychain state. Saving or clearing the credential restarts the event subscription and refreshes the task snapshot. The secret field is write-only; clearing removes the Keychain item. Plaintext credentials remain loopback-only; verified TLS credentials may use any configured Server address. The Browser extension still has no credential setting. Desktop on other platforms can connect without authentication, but saving and clearing credentials are unsupported. The Browser extension still has no credential setting.
+`auth set` accepts only `Bearer` or `ApiKey` and rejects an empty token. `auth clear` clears both credential field values in the CLI config. The CLI may attach the saved credential to a verified `tls://` connection; for a bare plaintext address it first checks that the connected peer is loopback and refuses to send credentials otherwise. On macOS, first select External under Desktop General settings and save a loopback or `tls://` Server address. Under General, select `Bearer` or `ApiKey`, enter the matching secret, and save it. The Tauri backend keeps both values in Keychain under a transport-scoped account, sends them with ordinary RPC and `events.subscribe`, and returns only the configured scheme to React when reading Keychain state. Saving or clearing the credential restarts the event subscription and refreshes the task snapshot. The secret field is write-only; clearing removes the Keychain item. Plaintext credentials remain loopback-only; verified TLS credentials may use any configured Server address. The Browser extension still has no credential setting. Desktop on other platforms can connect without authentication, but saving and clearing credentials are unsupported. The Browser extension still has no credential setting.
 
 ## RPC Rate Limiting
 
@@ -131,15 +132,15 @@ Start the Vite frontend from `apps/desktop`:
 ```bash
 cd apps/desktop
 pnpm install --frozen-lockfile
-pnpm dev
+pnpm exec tauri dev
 ```
 
-Vite uses port `1420`. The frontend calls Tauri commands, Keychain-backed credential commands on macOS, and the Tauri dialog plugin, so testing the full application requires a running Nexum server and a native Tauri window. Keep Vite running and start `pnpm exec tauri dev` from `apps/desktop` in another terminal. The Desktop package pins pnpm 11.25.0 and `@tauri-apps/cli` 2.11.5; use `pnpm exec` rather than a globally installed or floating CLI. `pnpm build` runs the TypeScript compiler and Vite build. To create a local macOS debug app, run `pnpm exec tauri build --debug --bundles app` from `apps/desktop`; the bundle is written to `target/debug/bundle/macos/Nexum.app` at the repository root. For the release app, run `pnpm exec tauri build --bundles app` to produce `target/release/bundle/macos/Nexum.app`. Keep the Tauri JavaScript and Rust package minor versions aligned when updating dependencies.
+Vite uses port `1420`; browser preview alone cannot exercise Tauri commands. From `apps/desktop`, use `pnpm exec tauri dev`: its hook prepares an explicit target-architecture Server and starts Vite, then opens the native window. A separate Server is needed only when Settings selects External. `pnpm exec tauri build --bundles app` runs the Server preparation hook and frontend build, then creates `target/release/bundle/macos/Nexum.app`. Add `--debug` for a debug bundle. The hook signs the staged macOS Server before hashing, and `build.rs` embeds its hash and checks its target/package version. A plain debug workspace check may have no staged Server; a release build requires it. Use the pinned CLI and frozen pnpm lockfile. Verify the finished bundle with `node scripts/verify-desktop-bundle.mjs target/release/bundle/macos/Nexum.app` from the repository root. Do not re-sign the nested Server after hashing; a distribution signature requires preparing and hashing that final signed executable before compiling Desktop.
 
 For local bundle validation after a release build, explicitly apply and verify an ad-hoc signature from `apps/desktop`:
 
 ```bash
-codesign --force --deep --sign - ../../target/release/bundle/macos/Nexum.app
+codesign --force --sign - ../../target/release/bundle/macos/Nexum.app
 codesign --verify --deep --strict ../../target/release/bundle/macos/Nexum.app
 ```
 
