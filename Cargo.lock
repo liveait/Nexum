@@ -2081,6 +2081,8 @@ dependencies = [
 name = "nexum-desktop"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
+ "libc",
  "nexum-protocol",
  "percent-encoding",
  "rcgen",
@@ -2091,6 +2093,7 @@ dependencies = [
  "security-framework-sys",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

@@ -4,6 +4,55 @@ export type LanguagePreference = "system" | "en" | "zh-CN";
 export type Locale = Exclude<LanguagePreference, "system">;
 
 const zhCN = {
+  "This Mac": "这台 Mac",
+  "Download service": "下载服务",
+  "Download location": "下载运行位置",
+  "This Mac (recommended)": "这台 Mac（推荐）",
+  "External Server": "外部 Server",
+  "Nexum starts its local download service automatically. Downloads continue when you close the window and stop when you quit Nexum.": "Nexum 会自动启动本地下载服务。关闭窗口后下载继续，退出 Nexum 时停止。",
+  "Connect to a Server you run separately. Switching modes keeps each service's downloads.": "连接独立运行的 Server。切换模式会保留各自的下载任务。",
+  "Default download folder": "默认下载文件夹",
+  "System Downloads folder": "系统下载文件夹",
+  "New downloads use this folder. You can choose another folder for an individual download.": "新下载使用此文件夹。也可以为单次下载另选文件夹。",
+  "Use system Downloads folder": "使用系统下载文件夹",
+  "Uses your default download folder.": "使用你设置的默认下载文件夹。",
+  "If a name is already in use, Nexum adds a number to keep existing files safe.": "如果文件名已被使用，Nexum 会添加数字后缀，保留现有文件。",
+  "Preparing downloads on this Mac": "正在准备这台 Mac 的下载服务",
+  "Check the external Server in Settings": "请在设置中检查外部 Server",
+  "Preparing downloads on this Mac…": "正在准备这台 Mac 的下载服务…",
+  "Restoring the local download service…": "正在恢复本地下载服务…",
+  "The local download service could not start.": "本地下载服务未能启动。",
+  "Retry to start downloads. If this keeps happening, reopen or reinstall Nexum.": "请重试启动下载服务。如果问题持续，请重新打开或重新安装 Nexum。",
+  "Retry download service": "重试启动下载服务",
+  "The download could not be created. Try again.": "未能创建下载，请重试。",
+  "Could not start the local service supervisor.": "未能启动本地下载服务管理程序。",
+  "Local service state is unavailable.": "本地下载服务状态不可用。",
+  "Local service supervisor is unavailable.": "本地下载服务管理程序不可用。",
+  "Local service shutdown timed out.": "关闭本地下载服务超时。",
+  "Local service is stopped.": "本地下载服务已停止。",
+  "Local service is not ready. Check Settings to retry.": "本地下载服务尚未就绪，请重试。",
+  "The local service stopped repeatedly. Open Settings and retry.": "本地下载服务多次异常停止，请重试。",
+  "The local service stopped unexpectedly and is restarting.": "本地下载服务意外停止，正在重新启动。",
+  "The bundled local service and its data directory must use absolute paths.": "本地下载服务的路径配置无效，请重新安装 Nexum。",
+  "The App is missing its bundled local service verification data. Rebuild or reinstall Nexum.": "App 缺少本地下载服务的校验信息，请重新构建或安装 Nexum。",
+  "The bundled local service has changed. Rebuild or reinstall Nexum.": "App 内的本地下载服务已被修改，请重新构建或安装 Nexum。",
+  "The bundled local service is missing or unreadable. Rebuild or reinstall Nexum.": "App 内的本地下载服务缺失或无法读取，请重新构建或安装 Nexum。",
+  "Cannot inspect the bundled local service.": "无法检查 App 内的本地下载服务。",
+  "The bundled local service is not a regular executable file.": "App 内的本地下载服务文件无效，请重新安装 Nexum。",
+  "Cannot verify the bundled local service.": "无法校验 App 内的本地下载服务。",
+  "Cannot generate a secure local service credential.": "无法安全启动本地下载服务，请重试。",
+  "The bundled local service returned an incompatible startup response.": "App 内的本地下载服务版本不兼容，请重新安装 Nexum。",
+  "Cannot launch the bundled local service. Rebuild or reinstall Nexum.": "无法启动 App 内的本地下载服务，请重新构建或安装 Nexum。",
+  "Local service readiness pipe is unavailable.": "无法获取本地下载服务的启动状态，请重试。",
+  "Local service control pipe is unavailable.": "无法控制本地下载服务，请重试。",
+  "Cannot initialize the bundled local service.": "无法初始化 App 内的本地下载服务。",
+  "Cannot read local service startup.": "无法读取本地下载服务的启动状态。",
+  "Local service startup was cancelled.": "本地下载服务启动已取消。",
+  "Local service startup timed out. Open Settings and retry.": "本地下载服务启动超时，请重试。",
+  "The bundled local service returned an invalid startup response.": "本地下载服务的启动响应无效，请重新安装 Nexum。",
+  "Cannot start the local service. Another Nexum instance may already be using its data directory; close it and retry.": "无法启动本地下载服务。另一个 Nexum 实例可能正在使用其数据目录，请关闭后重试。",
+  "The bundled local service stopped during startup.": "App 内的本地下载服务在启动过程中停止，请重试。",
+  "The bundled local service uses an incompatible RPC protocol.": "App 内的本地下载服务版本不兼容，请重新安装 Nexum。",
   "Dashboard": "概览",
   "Downloads": "下载",
   "Trackers": "Tracker",
@@ -216,6 +265,10 @@ const zhCN = {
 } as const;
 
 export type MessageKey = keyof typeof zhCN;
+export function isMessageKey(value: string): value is MessageKey {
+  return Object.prototype.hasOwnProperty.call(zhCN, value);
+}
+
 export type Translate = (key: MessageKey, values?: Record<string, string | number>) => string;
 
 export function resolveLocale(preference: LanguagePreference): Locale {

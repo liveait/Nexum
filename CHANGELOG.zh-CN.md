@@ -6,6 +6,8 @@
 
 ### 新增
 
+- **Desktop 托管 Server**：随包可执行文件校验、私有鉴权启动、稳定 App 数据、有限子进程管理、托管／外部设置、后端生成任务 ID 和不冲突目标。关闭窗口保留下载，退出停止拥有的子进程。M1 崩溃窗口对账和最终发布验收仍待完成。
+
 - **Core**：任务生命周期、Scheduler、Resolver 集成与事件收集。SQLite 存储和重启恢复现已接入运行中的 Server；恢复时会将原先下载中、暂停或重试中的任务归一为 `Queued` 并持久化。
 - **Engine**：内存与 HTTP 适配器。HTTP 适配器跟随重定向，将响应暂存到 `.part` 文件，在完整下载后重命名到目标路径，在每个响应块写入后报告进度，并为 Server Worker 提供协作式暂停/取消控制。Server 自有的传输路径现在会保留稳定的隐藏部分文件和原子 JSON sidecar，并在重启后仅续传校验器匹配的 `206 Partial Content` 响应。通用同步 Adapter 仍不提供暂停/恢复能力。
 - **Protocol**：JSON-RPC 2.0 任务与服务器信息方法、版本标识、凭据字段、事件封装和缓冲类型，以及面向订阅客户端的 `events.event` 通知。`task.get` 和 `task.list` 返回的 `TaskView` 包含持久化进度，以及表示最近一次传输错误的 `error` 字段。Protocol 定义了认证失败错误 `-32001`；Server 会在 RPC 分发和事件订阅前校验配置的 Bearer 或 ApiKey 凭据。

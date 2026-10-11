@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-仓库目前没有自动发布工作流，当前检出也没有版本标签。`.github/workflows/ci.yml` 在推送和 Pull Request 上执行 Rust 格式、检查、测试和 Clippy。新增的 macOS job 安装 pnpm 11.25.0 和 Node.js 22，使用冻结锁文件安装 Desktop 依赖，构建前端及 macOS `.app`，并检查 App 中的语言声明。CI 仍不构建 Browser 扩展，不进行分发签名或公证，也不会发布 GitHub Release。各包与应用清单目前声明 `0.1.0`，而变更日志仍将该版本标为 TBD。
+仓库目前没有自动发布工作流，当前检出也没有版本标签。`.github/workflows/ci.yml` 在推送和 Pull Request 上执行 Rust 格式、检查、测试和 Clippy。新增的 macOS job 安装 pnpm 11.25.0 和 Node.js 22，使用冻结锁文件安装 Desktop 依赖，构建前端及 macOS `.app`，并检查语言声明、包内 Server 的哈希／版本／架构及嵌套签名，以及本机临时签名的 App 签名。CI 仍不构建 Browser 扩展，不进行分发签名或公证，也不会发布 GitHub Release。各包与应用清单目前声明 `0.1.0`，而变更日志仍将该版本标为 TBD。
 
 `Cargo.lock` 和 `apps/desktop/pnpm-lock.yaml` 已纳入 Git。Desktop 固定 pnpm 11.25.0 和项目内 Tauri CLI 2.11.5，构建时应使用冻结锁文件。Browser 扩展仍没有已跟踪的锁文件，全新检出可能解析到不同的前端依赖版本。构建候选版本前，应让两个已跟踪的锁文件与对应清单保持同步。
 
@@ -16,9 +16,9 @@
 4. 使用 pnpm 11.25.0，在 `apps/desktop` 运行 `pnpm install --frozen-lockfile && pnpm build`。macOS CI job 会执行这两条命令。在 `apps/extension` 运行 `pnpm install && pnpm lint && pnpm build`；Desktop 锁文件和 CI job 均不覆盖扩展。
 5. 运行 `cargo build --locked --release -p nexum-server -p nexum-cli` 构建 Rust 命令行产物；可执行文件为 `target/release/nexum-server` 和 `target/release/nexum-cli`。在 `apps/desktop` 执行 `pnpm exec tauri build --bundles app`，通过项目内固定版本的 Tauri CLI 构建 macOS App，产物位于仓库根目录的 `target/release/bundle/macos/Nexum.app`。其他平台或安装包目标需分别构建和验收。
 6. 打包扩展时包含根目录 `manifest.json`、`icons/` 和生成的 `dist/`。清单同时引用后两处的文件，仅有 `dist/` 无法作为扩展加载。
-7. 使用本地 Server 对可执行文件和原生桌面包进行冒烟测试。通过 HTTP 提供一个已知文件，创建任务并将其 URL 加入队列；自动派发的 Worker 阻塞期间查询 `task.get` 或 `task.list`，确认能看到中间字节数；`task.start` 仍可作为排队 HTTP 任务的可选手动 kick。Worker 完成后核对目标文件字节和已持久化的 `Completed` 状态。确认失败传输保留已有目标文件，并通过任务 `error` 字段返回错误；在重试预算未耗尽时自动重试，并在预算耗尽后使用同一 `--data-dir` 重启 Server 仍保留最终错误。使用分块本地 fixture 验证活跃任务的 `task.pause` 会等待 `Paused`，`task.resume` 会继续同一个 Worker，`task.remove` 会取消 Worker，最多等待 30 秒后删除任务并保留原有目标文件。记录阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时；删除超时会返回错误，Worker 退出后可以重试。验证没有 ETag 或 Last-Modified 的响应在中断后会从零开始，并确认成功、取消和 `task.remove` 会删除部分文件及 sidecar。确认 Server 会拒绝数据目录内和重叠的目标。自动化 TLS 测试在运行时生成证书，覆盖 TCP RPC、HTTPS `/jsonrpc` `OPTIONS`/`POST`、Browser 扩展 CORS 允许/拒绝、TCP/HTTPS 上的配置鉴权、带鉴权的 `events.subscribe`、明文拒绝、启动时拒绝不完整或无效的证书/私钥材料，以及握手时拒绝不受信任或主机名不匹配的证书。CLI 和 Desktop 测试覆盖连接失败后的凭据门控；CLI 测试还验证 TLS 失败后不会重试明文。关闭认证时，从 `apps/extension` 加载 Browser 扩展，发送已知 HTTP 链接，确认不带 scheme 的地址使用 HTTP `/jsonrpc` 桥接；启用 TLS 的 Server 上保存 `tls://host:port`，确认扩展使用 HTTPS，浏览器拒绝不受信任的证书，且不会重试 HTTP。验证网页 `Origin` 被拒绝，而扩展 Origin 在 HTTP 和 HTTPS 上都能收到 CORS 头。
+7. 在默认托管模式下启动原生 App，不另开终端 Server；粘贴 HTTP(S) URL，检查系统 Downloads 或所选目录、可编辑文件名、同名文件分配，以及退出／重开后的任务与文件。检查关闭窗口后台下载、Dock 重开、有限崩溃恢复和手动重试。另验外部模式的地址／Keychain，并确认切换和退出不停止外部 Server。然后使用本地 Server 对独立 CLI／Server 流程进行冒烟测试。通过 HTTP 提供一个已知文件，创建任务并将其 URL 加入队列；自动派发的 Worker 阻塞期间查询 `task.get` 或 `task.list`，确认能看到中间字节数；`task.start` 仍可作为排队 HTTP 任务的可选手动 kick。Worker 完成后核对目标文件字节和已持久化的 `Completed` 状态。确认失败传输保留已有目标文件，并通过任务 `error` 字段返回错误；在重试预算未耗尽时自动重试，并在预算耗尽后使用同一 `--data-dir` 重启 Server 仍保留最终错误。使用分块本地 fixture 验证活跃任务的 `task.pause` 会等待 `Paused`，`task.resume` 会继续同一个 Worker，`task.remove` 会取消 Worker，最多等待 30 秒后删除任务并保留原有目标文件。记录阻塞中的响应读取可能让 `task.pause` 等到 30 分钟 HTTP 超时；删除超时会返回错误，Worker 退出后可以重试。验证没有 ETag 或 Last-Modified 的响应在中断后会从零开始，并确认成功、取消和 `task.remove` 会删除部分文件及 sidecar。确认 Server 会拒绝数据目录内和重叠的目标。自动化 TLS 测试在运行时生成证书，覆盖 TCP RPC、HTTPS `/jsonrpc` `OPTIONS`/`POST`、Browser 扩展 CORS 允许/拒绝、TCP/HTTPS 上的配置鉴权、带鉴权的 `events.subscribe`、明文拒绝、启动时拒绝不完整或无效的证书/私钥材料，以及握手时拒绝不受信任或主机名不匹配的证书。CLI 和 Desktop 测试覆盖连接失败后的凭据门控；CLI 测试还验证 TLS 失败后不会重试明文。关闭认证时，从 `apps/extension` 加载 Browser 扩展，发送已知 HTTP 链接，确认不带 scheme 的地址使用 HTTP `/jsonrpc` 桥接；启用 TLS 的 Server 上保存 `tls://host:port`，确认扩展使用 HTTPS，浏览器拒绝不受信任的证书，且不会重试 HTTP。验证网页 `Origin` 被拒绝，而扩展 Origin 在 HTTP 和 HTTPS 上都能收到 CORS 头。
 8. 在 macOS 原生 Desktop 构建中验证键盘和可访问性行为：`⌘N` 打开 Add Download 并聚焦 Source URL；Tab 和 Shift+Tab 保持在 Sheet 内；Escape 关闭并恢复焦点。`⌘F` 打开或聚焦 Downloads 搜索，Escape 关闭搜索并恢复焦点。使用 Enter/Space 选择任务，并用上/下方向键及 Home/End 在可见任务间移动。通过 VoiceOver 检查任务操作、状态和 Inspector 进度；再启用 macOS“减少动态效果”，确认过渡和不确定进度动画停止。
-9. 在该原生 macOS Desktop 构建中保持应用打开，切换 macOS“浅色”和“深色”外观。检查两种模式下的侧边栏、Downloads 任务行及状态徽标、Inspector、设置卡片与输入框、Add Download Sheet 和键盘焦点环，并保存截图以供视觉比较。在“设置 → 外观”依次选择“跟随系统”、English 和“简体中文”，确认可见标签、提示、任务状态、校验消息、通知和 VoiceOver 名称即时切换；重启应用后确认语言选择保留。在 `Nexum.app/Contents/Info.plist` 中确认 `CFBundleLocalizations` 包含 `en` 和 `zh-Hans`。选择“跟随系统”时，在 macOS“语言与地区 → 应用程序”中分别将 Nexum 设为“简体中文”和 English，每次更改后重启应用并确认界面语言；验收后恢复原有的应用语言设置。确认 Server 和操作系统诊断原文不变，切换语言也不会改变任务协议值或请求。缺少 `language` 字段的旧设置应以“跟随系统”加载。
+9. 在该原生 macOS Desktop 构建中保持应用打开，切换 macOS“浅色”和“深色”外观。检查两种模式下的侧边栏、Downloads 任务行及状态徽标、Inspector、设置卡片与输入框、Add Download Sheet 和键盘焦点环，并保存截图以供视觉比较。在“设置 → 外观”依次选择“跟随系统”、English 和“简体中文”，确认可见标签、提示、任务状态、校验消息、通知和 VoiceOver 名称即时切换；重启应用后确认语言选择保留。在 `Nexum.app/Contents/Info.plist` 中确认 `CFBundleLocalizations` 包含 `en` 和 `zh-Hans`。选择“跟随系统”时，在 macOS“语言与地区 → 应用程序”中分别将 Nexum 设为“简体中文”和 English，每次更改后重启应用并确认界面语言；验收后恢复原有的应用语言设置。确认 Server 和操作系统诊断原文不变，切换语言也不会改变任务协议值或请求。
 10. 验证实际产物后，人工创建版本标签和 GitHub Release；在发布说明中记录目标平台及尚未完成的集成。
 
 ### 本地 release 构建证据
@@ -27,7 +27,7 @@
 
 此前主检出目录的 release App 已显示已完成的 1 MB HTTP 下载，并验证了“跟随系统”下的 macOS 应用专属 English 覆盖：重启后，界面及任务、进度辅助功能名称切换为英文；移除覆盖并重启后恢复简体中文。该语言检查期间，应用的 `settings.json` 哈希未变化。此前隔离 worktree 的检查显示了已完成的已知和未知大小任务，确认测试通知可打开关联任务，并在启用“减弱动态效果”检查添加下载 Sheet 后恢复系统偏好。那些测试任务、文件和通知均已在检查后移除。
 
-#### 最新 release 候选产物：原生验收
+#### 10 月 10 日 release 候选产物：原生验收
 
 2026 年 10 月 10 日，以源码提交 `1df5eab8411081e0177037029025f6e2e81fdfcc` 使用固定 Tauri CLI 重新构建 release App，添加本机临时签名后通过 `codesign --verify --deep --strict`。[release 截图摘要](assets/native-macos/release-2026-10-10/release-capture-summary.json)记录二进制及前端哈希、截图时间、像素尺寸和图像哈希，用于识别下列检查所用的候选产物。分发签名与公证仍是独立的发布要求。
 
@@ -37,6 +37,25 @@
 - **动态效果采样**：关闭“减弱动态效果”时，未知大小任务在间隔 33.623 秒的两帧中均为 Paused；开启时，任务在间隔 68.773 秒的两帧中仍为 Downloading。每组的列表及 Inspector 进度轨道像素均一致。这只确认采样时刻的像素相同，不能证明两帧之间持续没有动态效果。[Desktop CSS](../apps/desktop/src/App.css)只为活跃的不确定进度设置动画，并在 `prefers-reduced-motion: reduce` 下关闭该动画；这项源码检查补充了原生采样证据。
 - **恢复与剩余检查**：Server 设置已恢复为 `127.0.0.1:39100`，刷新间隔为 5 秒，语言为 `system`，并从设置文件确认。浅色外观和原窗口尺寸已恢复，原已知文件任务已选中，搜索已关闭，Inspector 保持可见。“减弱动态效果”和“旁白”恢复为关闭，旁白字幕偏好保持原值。工具无法采集旁白音频，两次尝试访问其原生字幕窗口均超时，尚未确认实际朗读内容。M0 仍待该朗读检查。
 - **隔离 fixture 清理**：三个 QA 任务均成功移除，隔离任务列表为空。只停止了本轮独立的 39112 端口 Server 和 39113 端口 HTTP fixture；两个端口均已释放，其临时数据/下载目录已删除。原 39100 端口 Server 保持运行，清理前后两个原任务的状态、字节数和错误字段均一致，原已知文件下载仍保留。
+
+#### 托管 Server 原生验收
+
+2026 年 10 月 11 日，Desktop 托管 Server 切片构建为原生 release App，包含 `aarch64-apple-darwin` Server，两者版本均为 `0.1.0`，使用本机临时签名。App 与嵌套 Server 均通过严格签名检查；打包检查验证可执行权限、架构、版本和 SHA-256。[托管截图摘要](assets/native-macos/managed-2026-10-11/managed-capture-summary.json)通过源码文件及产物哈希识别基线 `4acbb162384dbf12bc6019b66ea4def86991ba13` 上的实现，并区分生命周期候选产物与修复快捷键依赖后重新构建的最终产物。
+
+- **下载**：原生添加下载 Sheet 探测 `https://codeload.github.com/liveait/omlx/zip/refs/heads/main`，正确建议 `omlx-main.zip`。系统下载目录已有较早的部分文件和 sidecar，后端因此分配 `omlx-main (1).zip`。完整文件为 52,830,371 字节，ZIP 全部条目通过 CRC 校验。持久化任务为 Completed，字节数与文件一致，`total_bytes=null`；任务行及 Inspector 都暴露 100%。完成任务和文件保留供查看，原有部分文件及 sidecar 的哈希未变化。
+- **生命周期**：关闭窗口后 App 及拥有的 Server 继续运行，下载继续；退出停止两者，重开恢复完成任务。确认实际子进程的可执行文件与父进程关系后，终止该子进程，0.374 秒内出现替代进程；App 持续运行并恢复完整任务快照。这只检查一次意外退出，不代表已原生验收重启预算耗尽。
+- **外部模式**：切换到隔离的独立 Server 后，界面用其空任务列表替换托管快照，并停止 App 拥有的子进程；外部地址与 Keychain 控件显示。独立 Server 在 App 退出／重开以及切回托管后均保持运行。切回后托管完成任务恢复，清理时只停止独立 fixture。
+- **默认目录及最终重建**：原生目录选择器选中临时文件夹，保存后正确持久化。该检查发现 `⌘N` 闭包读取旧设置，现已让快捷键和目录重置 effect 跟踪当前目录及本机／远程模式。前端测试及 TypeScript/Vite 构建通过，随后重建 release App 并通过签名／打包检查。最终 App 保存目录后首次 `⌘N` 即使用所选目录，重置后首次 `⌘N` 使用系统下载目录；重开也恢复完成任务及 100% 进度。
+- **检查与恢复**：Rust 格式、workspace check、276 项 workspace 测试及禁止警告的 Clippy 均通过。Desktop 库有 29 项测试，其中 12 项覆盖托管生命周期／资源；binary 有 8 项测试，前端有 13 项。最终设置为托管，外部地址 `127.0.0.1:39100`、刷新 5 秒、语言 `system`，默认下载目录无自定义值。外部 fixture 目录已清理、端口已释放；App 停留在下载页面并显示 Inspector。
+- **边界**：本机临时签名不代表分发签名、公证或 Gatekeeper 放行。M0 的 VoiceOver 实际朗读仍未确认；M1 的完整文件／持久化状态崩溃对账以及全新用户／升级最终验收仍待完成。
+
+| 原生界面状态 | 截图 |
+| --- | --- |
+| 已连接的托管设置 | [查看](assets/native-macos/managed-2026-10-11/settings-managed.png) |
+| 外部地址及 Keychain 控件 | [查看](assets/native-macos/managed-2026-10-11/settings-external.png) |
+| 最终 App 的 codeload 完成任务与 Inspector | [查看](assets/native-macos/managed-2026-10-11/download-completed.png) |
+
+三张图片均为浅色、简体中文，尺寸为 2400 × 1602 像素。设置截图拍摄于快捷键最终修复前；完成任务截图使用最终 App。下载图片中的两处本机路径已替换为明确标注脱敏的 `~/Downloads` 路径。未测量窗口 point 边界，这些截图不能作为新一轮明暗配对或 VoiceOver 朗读证据。
 
 ### macOS 原生界面截图留证
 

@@ -16,7 +16,7 @@ The desktop app should make the common local workflow understandable at a glance
 4. Pause, resume, retry, or remove it safely.
 5. Inspect the destination and the latest error when a task needs attention.
 
-The first desktop release is a client for a separately running Server. It does not start a Server process automatically and it does not present unsupported Magnet or local-file sources as if they were ready.
+Desktop defaults to an App-managed bundled Server, with an explicit External option under General settings. Unsupported Magnet and local-file sources remain unavailable.
 
 ## 2. Design decisions
 
@@ -100,14 +100,14 @@ The current Inspector presents the selected task in this order:
 1. State and progress.
 2. Source URL.
 3. Destination path.
-4. Server address.
+4. Connection label: This Mac for Managed, saved Server address for External.
 5. Last error with a copy action.
 
 The Inspector is read-only for task metadata. Row actions currently provide the task commands; native reveal and destructive confirmation are planned.
 
 ### 3.3 Empty, loading, and error states
 
-- **No connection:** keep the task surface available, show the unavailable state in the footer/banner, and direct the user to Settings for the Server address.
+- **No connection:** keep the task surface available, show the unavailable state in the footer/banner, and show local service startup/recovery or Retry guidance in Managed mode; External directs the user to its address and credential settings.
 - **Connected with no tasks:** show Add Download as the primary action.
 - **Loading:** keep the existing list visible for refreshes of the same Server and credential context. When either changes, hide the old task list, selection, last-update time, and in-flight row actions immediately; show tasks only after the new context's snapshot succeeds. A late response from the previous context cannot restore its rows or trigger a row action against the new Server.
 - **Request failed:** keep the last successful list, mark it stale, and show a recoverable error banner with Retry. Do not replace a useful list with an empty state after a transient error.
@@ -120,24 +120,24 @@ The sheet has one focused flow:
 
 1. A taller Source URL text area soft-wraps long links. It accepts one HTTP/HTTPS URL; a hard line break is an error.
 2. Show an immediate editable suggestion from the decoded last URL path segment, then briefly probe HTTP response headers for `Content-Disposition` (preferring a valid UTF-8 `filename*`, then `filename`). If the header has no safe name, use the final redirected URL path when available. The probe uses HEAD and, when needed, a headers-only GET with a one-byte Range request; it never reads the response body. It has a short overall timeout and failures keep the path suggestion. Disable submission while an unedited name is being checked so a quick submit cannot save a misleading path basename such as `main` from a GitHub codeload URL. A manual edit takes precedence immediately; later probes and URL changes cannot replace it. Ignore stale results after editing the URL or closing the sheet.
-3. With a loopback Server, each new sheet defaults to this Mac's system Downloads directory. The native directory picker can choose another folder for this task. With a remote Server, enter an absolute folder path on the Server host. Show the resulting full path before submission.
+3. In Managed or loopback External mode, a new sheet uses the saved default folder or this Mac's system Downloads directory. The native directory picker can choose another folder for this task. With a remote Server, enter an absolute folder path on the Server host. Show the resulting full path before submission.
 4. Advanced disclosure for future headers, priority, and bandwidth policy; hidden until those server features exist.
 5. Cancel and Add Download buttons.
 
 Submit creates the task and immediately queues it. The sheet closes only after both RPC calls succeed. Retrying queueing without creating a duplicate after a partial failure remains planned.
 
-The current Server RPC requires an explicit task ID and destination. Desktop generates a unique ID internally for each new task and sends it to `task.create` and `task.queue`; the user supplies the source and can edit the file name or folder. The name rejects empty, dot, path-separator, and control-character values. Before creating a task, Desktop checks local file existence only for a loopback Server, and checks task destinations for either Server type; a collision requires another name. A remote Server's filesystem cannot be inspected from this Mac. The transfer engine also commits without replacing an existing destination because a preflight check alone cannot prevent a later race.
+The Server RPC requires an ID and destination; the Desktop Rust backend generates the ID, validates the HTTP(S) URL, single safe filename and folder, and chooses the destination. Managed mode defaults to system Downloads or the saved default folder, permits a native per-task folder override, and allocates a numbered filename around task reservations, final files, partial files and sidecars. A remote External folder belongs to the Server host, including absolute POSIX, Windows drive and UNC paths; the Mac does not inspect that filesystem. Allocation does not create a final file; the Engine retains no-clobber commit protection against later races.
 
 ## 5. Settings
 
 Settings is a dedicated page with grouped sections. It is not a second task workflow:
 
-- **Server:** address (default `127.0.0.1:39100`), Connect/Test, last connection result, and protocol version.
+- **Connection:** Managed (default) starts the bundled service automatically and shows starting, running, recovering or failed status with Retry. External exposes the saved address (default `127.0.0.1:39100`) and Keychain controls. The managed endpoint and credential are not shown. Default download folder selection and Reset to Downloads are saved with the settings.
 - **Authentication:** in General settings for the active saved Server, show a `Bearer`/`ApiKey` scheme selector, write-only secret field, configured-scheme status, and Save/Clear actions. Save the scheme and secret together in macOS Keychain under that Server address; never read the secret back into React. Saving, clearing, or changing the active Server restarts the event subscription and refreshes the task snapshot. Enable credential storage for loopback plaintext addresses and explicit `tls://` addresses. Plaintext credentials remain loopback-only; the TLS client validates the server name and system root chain before sending a credential.
 - **Updates:** Automatic uses event refreshes and a five-second idle or one-second active polling fallback when the stream is disconnected; Manual disables that polling fallback.
 - **Appearance:** the shell follows the system light/dark appearance. A System/English/Simplified Chinese language selector saves immediately and persists with the Server address and refresh policy. Manual theme and accent-color choices remain planned.
 - **Notifications:** the session Activity Center shows task actions, completion, failure, and retry events. Its cards use the available content width instead of leaving an unused right column. The sidebar badge counts unread entries and clears when the page opens. Entries for tasks still present on the current Server open Downloads, clear filters and search, select the task, scroll its row into view, focus it, and show the Inspector. Removed or unavailable tasks have no dead navigation action. Each entry can be cleared, and Clear all removes the session list. Only the newest 30 entries are retained in memory; they are not persisted across app restarts. Delivery preferences and mute controls remain planned.
-- A note that the Server is a separate process in the first release.
+- Managed mode explains that downloads continue when the window closes and stop when the App quits; External mode leaves that Server running.
 
 Persist the address, refresh policy, and language preference in the macOS application support directory through Tauri commands. Keep credentials only in macOS Keychain. The Tauri backend attaches the credential to ordinary RPC calls and the dedicated `events.subscribe` request, and reports Keychain failures without revealing the secret. Desktop on other platforms can connect without authentication, but credential Save and Clear are unsupported.
 

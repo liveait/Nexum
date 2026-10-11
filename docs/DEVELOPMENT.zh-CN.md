@@ -68,11 +68,12 @@ Server 将任务元数据和进度保存到 `--data-dir` 下的 `nexum.sqlite`�
 
 ### 托管 Server 协议测试
 
-`--managed` 是 App 子进程的私有启动入口，要求绝对数据目录和 stdin 启动帧，不能通过 `--auth-token` 或外部配置文件提供密钥。它当前尚未接入 Desktop。控制帧、就绪响应、启动等待和退出边界见 [ADR 0006](decisions/0006-managed-macos-server.zh-CN.md#首个实现切片server-托管启动协议)。运行隔离的协议与进程测试：
+`--managed` 是 App 子进程的私有启动入口，要求绝对数据目录和 stdin 启动帧，不能通过 `--auth-token` 或外部配置文件提供密钥。Desktop 已通过拥有句柄的子进程管理者调用此入口；令牌只由后端持有。控制帧、就绪响应、启动等待和退出边界见 [ADR 0006](decisions/0006-managed-macos-server.zh-CN.md#首个实现切片server-托管启动协议)。运行隔离的协议与进程测试：
 
 ```bash
 cargo test --locked -p nexum-protocol managed::tests
 cargo test --locked -p nexum-server --test managed
+cargo test --locked -p nexum-desktop --lib managed_server::tests
 ```
 
 进程测试自动创建并清理临时数据和下载目录，不需要停止现有的开发 Server。
@@ -105,7 +106,7 @@ cargo run -p nexum-cli -- auth set ApiKey replace-with-a-secret
 cargo run -p nexum-cli -- auth clear
 ```
 
-`auth set` 只接受 `Bearer` 或 `ApiKey`，并拒绝空 token。`auth clear` 会将 CLI 配置中的两个凭据字段值清空。CLI 可在已验证的 `tls://` 连接上附加已保存凭据；对于不带 scheme 的明文地址，CLI 会先确认实际 peer 为回环地址，否则拒绝发送凭据。在 macOS 上，先到 Desktop 设置保存回环或 `tls://` Server 地址，再在“通用”中选择 `Bearer` 或 `ApiKey`、输入匹配的 secret 并保存。Tauri 后端按包含传输身份的账户将 scheme 与 secret 保存到 Keychain，为普通 RPC 和 `events.subscribe` 附加凭据；查询 Keychain 配置状态时只把已配置的 scheme 返回给 React。保存或清除凭据会重启事件订阅并刷新 Task 快照。secret 输入框只写；清除操作会删除 Keychain 条目。明文凭据仍只允许回环地址，已校验的 TLS 凭据可以用于配置的 Server 地址。其他平台的 Desktop 可以无认证连接，但不支持保存和清除凭据。Browser Extension 仍没有凭据设置。
+`auth set` 只接受 `Bearer` 或 `ApiKey`，并拒绝空 token。`auth clear` 会将 CLI 配置中的两个凭据字段值清空。CLI 可在已验证的 `tls://` 连接上附加已保存凭据；对于不带 scheme 的明文地址，CLI 会先确认实际 peer 为回环地址，否则拒绝发送凭据。在 macOS 上，先到 Desktop 通用设置选择外部模式并保存回环或 `tls://` Server 地址，再在“通用”中选择 `Bearer` 或 `ApiKey`、输入匹配的 secret 并保存。Tauri 后端按包含传输身份的账户将 scheme 与 secret 保存到 Keychain，为普通 RPC 和 `events.subscribe` 附加凭据；查询 Keychain 配置状态时只把已配置的 scheme 返回给 React。保存或清除凭据会重启事件订阅并刷新 Task 快照。secret 输入框只写；清除操作会删除 Keychain 条目。明文凭据仍只允许回环地址，已校验的 TLS 凭据可以用于配置的 Server 地址。其他平台的 Desktop 可以无认证连接，但不支持保存和清除凭据。Browser Extension 仍没有凭据设置。
 
 ## RPC 限流
 
@@ -131,15 +132,15 @@ cargo run -p nexum-server -- --rate-limit-rps 10 --rate-limit-burst 20
 ```bash
 cd apps/desktop
 pnpm install --frozen-lockfile
-pnpm dev
+pnpm exec tauri dev
 ```
 
-Vite 使用 `1420` 端口。前端调用 Tauri 命令、macOS 上基于 Keychain 的凭据命令和 Tauri dialog plugin，因此测试完整应用还需要运行中的 Nexum Server 和原生 Tauri 窗口。保持 Vite 运行，并在另一个终端从 `apps/desktop` 执行 `pnpm exec tauri dev`。Desktop 包固定 pnpm 11.25.0 和 `@tauri-apps/cli` 2.11.5；应通过 `pnpm exec` 使用项目内 CLI，避免全局或浮动版本。`pnpm build` 会执行 TypeScript 编译和 Vite 构建。在 `apps/desktop` 执行 `pnpm exec tauri build --debug --bundles app` 可打包本地 macOS debug App，产物位于仓库根目录的 `target/debug/bundle/macos/Nexum.app`。执行 `pnpm exec tauri build --bundles app` 可生成 `target/release/bundle/macos/Nexum.app`。更新依赖时应让 Tauri 的 JavaScript 与 Rust 包保持相同次版本。
+Vite 使用 `1420` 端口；浏览器预览不能代替 Tauri 命令验收。从 `apps/desktop` 执行 `pnpm exec tauri dev`：Hook 会准备显式目标架构的 Server、启动 Vite，再打开原生窗口。只有在设置中选择外部模式时才需要单独启动 Server。`pnpm exec tauri build --bundles app` 会准备 Server 并构建前端，生成 `target/release/bundle/macos/Nexum.app`；添加 `--debug` 可生成 debug 包。Hook 在计算哈希前为暂存 macOS Server 签名，`build.rs` 嵌入哈希并检查架构／包版本。普通 debug Workspace 检查允许没有暂存 Server；release 构建必须有匹配资源。使用固定 CLI 和 frozen pnpm 锁文件。在仓库根目录执行 `node scripts/verify-desktop-bundle.mjs target/release/bundle/macos/Nexum.app` 检查最终包。计算哈希后不能再签嵌套 Server；分发签名须先准备最终已签名的可执行文件，再计算哈希和编译 Desktop。
 
 本机构建 release App 后，如需验证完整包，可在 `apps/desktop` 显式添加并检查临时签名：
 
 ```bash
-codesign --force --deep --sign - ../../target/release/bundle/macos/Nexum.app
+codesign --force --sign - ../../target/release/bundle/macos/Nexum.app
 codesign --verify --deep --strict ../../target/release/bundle/macos/Nexum.app
 ```
 

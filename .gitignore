@@ -2,6 +2,7 @@
 /data/
 apps/desktop/dist/
 apps/desktop/node_modules/
+apps/desktop/src-tauri/resources/
 **/*.rs.bk
 .DS_Store
 .idea/

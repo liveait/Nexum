@@ -4,7 +4,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { downloadDir, join } from "@tauri-apps/api/path";
 import { open } from "@tauri-apps/plugin-dialog";
 import { hasHardLineBreak, isHttpSource, isValidFileName, suggestedFileName } from "./downloadDraft";
-import { resolveLocale, translate, TranslationProvider, useTranslation, type LanguagePreference, type Locale, type MessageKey, type Translate } from "./i18n";
+import { isMessageKey, resolveLocale, translate, TranslationProvider, useTranslation, type LanguagePreference, type Locale, type MessageKey, type Translate } from "./i18n";
+import { isConnectionReady, type ConnectionMode, type ManagedConnectionStatus } from "./connectionState";
 import { addDownload, invokeTaskCommand, type TaskCommand } from "./taskCommands";
 import { valueForContext, type ContextValue, type TaskContext } from "./taskContext";
 import { taskDisplayName } from "./taskPresentation";
@@ -33,6 +34,8 @@ const EMPTY_TASKS: TaskItem[] = [];
 const EMPTY_TASK_ACTIONS: Record<string, TaskCommand | "start"> = {};
 
 interface DesktopSettings {
+  mode: ConnectionMode;
+  download_directory: string | null;
   server: string;
   refresh_interval_secs: number;
   language: LanguagePreference;
@@ -180,8 +183,9 @@ function formatUpdatedAt(value: number | null, t: Translate): string {
 }
 
 function errorMessage(error: unknown, t: Translate): string {
-  if (error instanceof Error) return error.message;
-  return typeof error === "string" ? error : t("The operation failed");
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : null;
+  if (message && isMessageKey(message)) return t(message);
+  return message ?? t("The operation failed");
 }
 
 function taskStateLabel(state: TaskState, t: Translate): string {
@@ -265,13 +269,23 @@ export default function App() {
   const sectionRef = useRef(section);
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>("home");
-  const [server, setServer] = useState(DEFAULT_SERVER);
+  const [mode, setMode] = useState<ConnectionMode>("managed");
+  const [modeDraft, setModeDraft] = useState<ConnectionMode>("managed");
+  const [externalServer, setExternalServer] = useState(DEFAULT_SERVER);
+  const server = mode === "managed" ? "managed" : externalServer;
+  const [connectionStatus, setConnectionStatus] = useState<ManagedConnectionStatus | null>(null);
+  const connectionGeneration = connectionStatus?.generation ?? 0;
+  const [retryingServer, setRetryingServer] = useState(false);
+  const [downloadDirectory, setDownloadDirectory] = useState<string | null>(null);
+  const [downloadDirectoryDraft, setDownloadDirectoryDraft] = useState<string | null>(null);
+  const [defaultDirectoryPicking, setDefaultDirectoryPicking] = useState(false);
   const [serverDraft, setServerDraft] = useState(DEFAULT_SERVER);
   const [refreshSeconds, setRefreshSeconds] = useState(5);
-  const savedSettings = useRef({ server: DEFAULT_SERVER, refresh_interval_secs: 5 });
+  const savedSettings = useRef({ mode: "managed" as ConnectionMode, server: DEFAULT_SERVER, refresh_interval_secs: 5, download_directory: null as string | null });
   const [language, setLanguage] = useState<LanguagePreference>("system");
   const savedLanguage = useRef<LanguagePreference>("system");
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const canConnect = !settingsBusy && isConnectionReady(mode, connectionStatus);
   const settingsSaveInFlight = useRef(false);
   const [systemLocale, setSystemLocale] = useState<Locale>(() => resolveLocale("system"));
   const effectiveLocale = language === "system" ? systemLocale : language;
@@ -305,7 +319,7 @@ export default function App() {
   const [addLoading, setAddLoading] = useState(false);
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
-  const localServer = isLocalServerAddress(server);
+  const localServer = mode === "managed" || isLocalServerAddress(externalServer);
   const remoteFinalPath = localServer ? null : serverDestination(newDirectory, newFileName);
   const destinationPreview = localServer ? finalPath : remoteFinalPath;
   const addDialogRef = useRef<HTMLElement>(null);
@@ -318,9 +332,9 @@ export default function App() {
   const searchReturnFocus = useRef<HTMLElement | null>(null);
   const eventRefreshTimer = useRef<number | null>(null);
   const streamTransition = useRef<Promise<void>>(Promise.resolve());
-  const snapshotContext = useRef<TaskContext>({ server, credentialRevision });
-  if (snapshotContext.current.server !== server || snapshotContext.current.credentialRevision !== credentialRevision) {
-    snapshotContext.current = { server, credentialRevision };
+  const snapshotContext = useRef<TaskContext>({ server, credentialRevision, connectionGeneration });
+  if (snapshotContext.current.server !== server || snapshotContext.current.credentialRevision !== credentialRevision || snapshotContext.current.connectionGeneration !== connectionGeneration) {
+    snapshotContext.current = { server, credentialRevision, connectionGeneration };
   }
   const renderedContext = snapshotContext.current;
   const currentSnapshot = valueForContext(taskSnapshot, renderedContext);
@@ -369,7 +383,7 @@ export default function App() {
 
   const refreshTasks = async (address = server, options: { silent?: boolean } = {}): Promise<void> => {
     const context = snapshotContext.current;
-    if (address !== context.server) return;
+    if (address !== context.server || !canConnect) return;
     const isCurrent = () => snapshotContext.current === context;
     const silent = options.silent ?? false;
     if (!address.trim()) {
@@ -384,7 +398,7 @@ export default function App() {
       setConnection("connecting");
     }
     try {
-      const result = await invoke<TaskItem[]>("task_list", { server: address });
+      const result = await invoke<TaskItem[]>("task_list", {});
       if (!isCurrent()) return;
       if (!silent) setError("");
       setTaskSnapshot({ context, value: { items: result, updatedAt: Date.now() } });
@@ -407,23 +421,70 @@ export default function App() {
     }
   };
 
+  const acceptSettings = (settings: DesktopSettings) => {
+    const address = settings.server.trim() || DEFAULT_SERVER;
+    setExternalServer(address);
+    setMode(settings.mode);
+    setModeDraft(settings.mode);
+    setDownloadDirectory(settings.download_directory);
+    setDownloadDirectoryDraft(settings.download_directory);
+    setServerDraft(address);
+    setRefreshSeconds(settings.refresh_interval_secs);
+    savedSettings.current = { mode: settings.mode, server: address, refresh_interval_secs: settings.refresh_interval_secs, download_directory: settings.download_directory };
+    savedLanguage.current = settings.language;
+    setLanguage(settings.language);
+  };
+
   useEffect(() => {
     let mounted = true;
     void invoke<DesktopSettings>("load_settings")
-      .then((settings) => {
-        if (!mounted) return;
-        const address = settings.server.trim() || DEFAULT_SERVER;
-        setServer(address);
-        setServerDraft(address);
-        setRefreshSeconds(settings.refresh_interval_secs);
-        savedSettings.current = { server: address, refresh_interval_secs: settings.refresh_interval_secs };
-        savedLanguage.current = settings.language ?? "system";
-        setLanguage(savedLanguage.current);
-      })
+      .then((settings) => { if (mounted) acceptSettings(settings); })
       .catch((caught) => { if (mounted) setError(errorMessage(caught, tRef.current)); })
       .finally(() => { if (mounted) setSettingsReady(true); });
     return () => { mounted = false; };
   }, []);
+
+  useEffect(() => {
+    if (!settingsReady) return undefined;
+    let active = true;
+    let pending = false;
+    const update = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const status = await invoke<ManagedConnectionStatus>("connection_status", {});
+        if (active) setConnectionStatus(status);
+      } catch (caught) {
+        if (active) {
+          setConnectionStatus(null);
+          setError(errorMessage(caught, tRef.current));
+        }
+      } finally { pending = false; }
+    };
+    void update();
+    const timer = window.setInterval(() => void update(), 1_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [settingsReady, mode, externalServer]);
+
+  useEffect(() => {
+    if (!canConnect) {
+      setConnection(mode === "managed" && connectionStatus?.state !== "failed" && connectionStatus?.state !== "stopped" ? "connecting" : "disconnected");
+      setEventStreamConnected(false);
+      setLoading(false);
+    }
+  }, [canConnect, mode, connectionStatus?.state]);
+
+  const retryManagedServer = async (): Promise<void> => {
+    if (retryingServer || mode !== "managed") return;
+    setRetryingServer(true);
+    setError("");
+    try {
+      await invoke("retry_managed_server", {});
+      setConnectionStatus(await invoke<ManagedConnectionStatus>("connection_status", {}));
+    } catch (caught) {
+      setError(errorMessage(caught, t));
+    } finally { setRetryingServer(false); }
+  };
 
   useLayoutEffect(() => {
     document.documentElement.lang = effectiveLocale;
@@ -436,7 +497,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!settingsReady || !server.trim()) return undefined;
+    if (!settingsReady || !canConnect) return undefined;
     let active = true;
     let eventUnlisten: UnlistenFn | undefined;
     let statusUnlisten: UnlistenFn | undefined;
@@ -463,7 +524,7 @@ export default function App() {
       const message = name ? localMessage(eventMessage.named, { name }) : localMessage(eventMessage.generic);
       const noticeId = pushNotification(message, eventMessage.tone, taskId ?? undefined);
       if (!taskId || name) return;
-      void invoke<TaskItem>("task_get", { server, taskId }).then((resolvedTask) => {
+      void invoke<TaskItem>("task_get", { taskId }).then((resolvedTask) => {
         if (!active || snapshotContext.current !== renderedContext || resolvedTask.id !== taskId) return;
         const resolvedName = taskDisplayName(resolvedTask);
         if (!resolvedName) return;
@@ -505,7 +566,7 @@ export default function App() {
         statusUnlisten = removeStatus;
         return queueStreamTransition(async () => {
           if (!active) return;
-          const generation = await invoke<number>("start_event_stream", { server });
+          const generation = await invoke<number>("start_event_stream", {});
           streamGeneration = generation;
           if (active) {
             for (const item of pendingStreamPayloads.splice(0)) handleStreamPayload(item);
@@ -530,26 +591,26 @@ export default function App() {
     };
     // Event subscriptions follow the active server and its Keychain credential.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server, settingsReady, credentialRevision]);
+  }, [server, settingsReady, credentialRevision, connectionGeneration, canConnect]);
 
   useEffect(() => {
-    if (settingsReady) void refreshTasks();
+    if (settingsReady && canConnect) void refreshTasks();
     // Refresh the full snapshot when the active server or its credential changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [server, settingsReady, credentialRevision]);
+  }, [server, settingsReady, credentialRevision, connectionGeneration, canConnect]);
 
   const activeDownload = tasks.some((task) => task.state === "Downloading");
   const pollingSeconds = refreshSeconds > 0 && activeDownload ? 1 : refreshSeconds;
 
   useEffect(() => {
-    if (!settingsReady || eventStreamConnected || pollingSeconds <= 0) return undefined;
+    if (!settingsReady || !canConnect || eventStreamConnected || pollingSeconds <= 0) return undefined;
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void refreshTasks(server, { silent: true });
     }, pollingSeconds * 1000);
     return () => window.clearInterval(timer);
     // Keep fallback polling on the active server and credential revision.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connection, eventStreamConnected, pollingSeconds, server, settingsReady, credentialRevision]);
+  }, [connection, eventStreamConnected, pollingSeconds, server, settingsReady, credentialRevision, connectionGeneration, canConnect]);
 
   const counts = useMemo(() => DOWNLOAD_FILTERS.reduce<Record<TaskFilter, number>>((result, item) => {
     result[item.id] = tasks.filter((task) => matchesFilter(task, item.id)).length;
@@ -574,9 +635,9 @@ export default function App() {
   }, [section, notificationTargetId, visibleTasks]);
 
   useEffect(() => {
-    setNewDirectory("");
+    setNewDirectory(localServer ? downloadDirectory ?? "" : "");
     setFinalPath("");
-  }, [server]);
+  }, [server, localServer, downloadDirectory]);
 
   useEffect(() => {
     if (!showAdd || !localServer || newDirectory) return undefined;
@@ -638,7 +699,7 @@ export default function App() {
     addReturnFocus.current = trigger ?? (active instanceof HTMLElement && active.tabIndex >= 0 ? active : sidebarAddRef.current);
     setAddError("");
     setNewSource("");
-    setNewDirectory("");
+    setNewDirectory(localServer ? downloadDirectory ?? "" : "");
     setNewFileName("");
     setFileNameEdited(false);
     setNameProbePending(false);
@@ -711,9 +772,9 @@ export default function App() {
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-    // Shortcuts use the currently visible workspace and modal state.
+    // Shortcuts use the current workspace, modal state, and download defaults.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [section, searchOpen, showAdd]);
+  }, [section, searchOpen, showAdd, localServer, downloadDirectory]);
 
   const selectSection = (next: Section) => {
     sectionRef.current = next;
@@ -736,18 +797,26 @@ export default function App() {
   const applyServer = async () => {
     if (settingsSaveInFlight.current || !settingsReady) return;
     const nextServer = serverDraft.trim();
-    if (!nextServer) {
+    if (modeDraft === "external" && !nextServer) {
       pushNotification(localMessage("Enter a Server address first."), "error");
       return;
     }
     settingsSaveInFlight.current = true;
     setSettingsBusy(true);
+    setCredentialRevision((current) => current + 1);
+    setConnectionStatus(null);
     try {
-      await invoke("save_settings", { settings: { server: nextServer, refresh_interval_secs: refreshSeconds, language: savedLanguage.current } });
-      savedSettings.current = { server: nextServer, refresh_interval_secs: refreshSeconds };
-      setServer(nextServer);
+      const next = { mode: modeDraft, server: nextServer || DEFAULT_SERVER, refresh_interval_secs: refreshSeconds, download_directory: downloadDirectoryDraft };
+      await invoke("save_settings", { settings: { ...next, language: savedLanguage.current } });
+      acceptSettings(await invoke<DesktopSettings>("load_settings"));
+      setConnectionStatus(await invoke<ManagedConnectionStatus>("connection_status", {}));
       pushNotification(localMessage("Settings saved"), "success");
     } catch (caught) {
+      // A lifecycle error can occur after the backend has saved the new mode.
+      try {
+        acceptSettings(await invoke<DesktopSettings>("load_settings"));
+        setConnectionStatus(await invoke<ManagedConnectionStatus>("connection_status", {}));
+      } catch { /* Keep the original actionable save error. */ }
       pushNotification({ raw: errorMessage(caught, t) }, "error");
     } finally {
       settingsSaveInFlight.current = false;
@@ -775,7 +844,7 @@ export default function App() {
 
   const runTaskCommand = async (id: string, command: TaskCommand, successMessage: MessageKey): Promise<void> => {
     const context = renderedContext;
-    if (snapshotContext.current !== context) return;
+    if (snapshotContext.current !== context || !canConnect) return;
     const task = tasksRef.current.find((item) => item.id === id);
     if (!task) return;
     const name = taskDisplayName(task);
@@ -783,7 +852,7 @@ export default function App() {
     setNotice(null);
     setError("");
     try {
-      await invokeTaskCommand(invoke, command, server, id);
+      await invokeTaskCommand(invoke, command, id);
       if (snapshotContext.current !== context) return;
       pushNotification(taskActionMessage(successMessage, name), "success", command === "task_remove" ? undefined : id);
       await refreshTasks();
@@ -802,12 +871,12 @@ export default function App() {
 
   const startNextTask = async (taskId?: string): Promise<void> => {
     const context = renderedContext;
-    if (snapshotContext.current !== context) return;
+    if (snapshotContext.current !== context || !canConnect) return;
     if (taskId && !tasksRef.current.some((task) => task.id === taskId)) return;
     const actionKey = taskId ?? selectedId ?? "__next__";
     setTaskActions((current) => ({ context, value: { ...(valueForContext(current, context) ?? EMPTY_TASK_ACTIONS), [actionKey]: "start" } }));
     try {
-      const startedId = await invoke<string>("task_start", { server });
+      const startedId = await invoke<string>("task_start", {});
       if (snapshotContext.current !== context) return;
       const startedTask = tasksRef.current.find((task) => task.id === startedId);
       const name = startedTask ? taskDisplayName(startedTask) : null;
@@ -845,9 +914,19 @@ export default function App() {
     }
   };
 
+  const chooseDefaultDirectory = async (): Promise<void> => {
+    setDefaultDirectoryPicking(true);
+    try {
+      const directory = await open({ title: t("Choose download folder"), directory: true, multiple: false, defaultPath: downloadDirectoryDraft || undefined });
+      if (typeof directory === "string") setDownloadDirectoryDraft(directory);
+    } catch (caught) {
+      pushNotification({ raw: errorMessage(caught, t) }, "error");
+    } finally { setDefaultDirectoryPicking(false); }
+  };
+
   const createAndQueue = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (nameProbePending) return;
+    if (nameProbePending || !canConnect) return;
     if (hasHardLineBreak(newSource)) {
       setAddError(t("Enter one URL without line breaks."));
       return;
@@ -871,21 +950,9 @@ export default function App() {
     setAddLoading(true);
     setAddError("");
     try {
-      const destination = localServer ? await join(newDirectory, newFileName) : serverDestination(newDirectory, newFileName);
-      if (!destination) {
-        setAddError(t("Enter an absolute folder path on the Server host."));
-        return;
-      }
-      if (localServer && await invoke<boolean>("destination_exists", { path: destination })) {
-        setAddError(t("A file already exists at this destination. Choose another file name."));
-        return;
-      }
-      const currentTasks = await invoke<TaskItem[]>("task_list", { server });
-      if (currentTasks.some((task) => task.destination === destination)) {
-        setAddError(t("A download task already uses this destination. Choose another file name."));
-        return;
-      }
-      const result = await addDownload(invoke, server, newSource.trim(), destination);
+      const context = renderedContext;
+      const result = await addDownload(invoke, newSource.trim(), newFileName, newDirectory.trim());
+      if (snapshotContext.current !== context) return;
       if (!result.queued) {
         setAddError(t("Task created, but queueing failed: {error}", { error: errorMessage(result.error, t) }));
         await refreshTasks();
@@ -894,7 +961,7 @@ export default function App() {
       nameProbeVersion.current += 1;
       setNewSource(""); setNewFileName(""); setFileNameEdited(false); setNameProbePending(false); setShowAdd(false);
       selectSection("downloads");
-      pushNotification(localMessage("{name} added and queued", { name: newFileName }), "success", result.id);
+      pushNotification(localMessage("{name} added and queued", { name: result.destination ? taskDisplayName({ destination: result.destination, source: newSource }) ?? newFileName : newFileName }), "success", result.id);
       await refreshTasks();
     } catch (caught) {
       setAddError(errorMessage(caught, t));
@@ -957,6 +1024,7 @@ export default function App() {
       </aside>
 
       <section className="workspace" inert={showAdd}>
+        {mode === "managed" && !canConnect && <ManagedServerStatus status={connectionStatus} busy={retryingServer} onRetry={() => void retryManagedServer()} /> }
         {section === "downloads" && (
           <DownloadsView
             tasks={tasks}
@@ -967,7 +1035,8 @@ export default function App() {
             actionByTask={actionByTask}
             connection={connection}
             eventStreamConnected={eventStreamConnected}
-            server={server}
+            canConnect={canConnect}
+            server={mode === "managed" ? t("This Mac") : server}
             loading={loading}
             error={error}
             notice={notice}
@@ -993,11 +1062,11 @@ export default function App() {
             onStart={(id) => void startNextTask(id)}
           />
         )}
-        {section === "dashboard" && <DashboardView tasks={tasks} connection={connection} onAdd={openAdd} onDownloads={() => selectSection("downloads")} />}
+        {section === "dashboard" && <DashboardView tasks={tasks} connection={connection} mode={mode} onAdd={openAdd} onDownloads={() => selectSection("downloads")} />}
         {section === "trackers" && <UnavailableView icon="trackers" title={t("Trackers")} description={t("Tracker discovery and health checks will appear here when the BitTorrent engine is connected.")} />}
         {section === "plugins" && <UnavailableView icon="plugins" title={t("Plugins")} description={t("The plugin manager is currently a runtime foundation. Executable providers and a plugin catalog are planned.")} />}
         {section === "notifications" && <NotificationsView notifications={notifications} locale={effectiveLocale} server={server} tasks={tasks} onDownloads={() => selectSection("downloads")} onOpenTask={openNotificationTask} onClear={(id) => setNotifications((current) => current.filter((item) => item.id !== id))} onClearAll={() => setNotifications([])} />}
-        {section === "settings" && <SettingsView category={settingsCategory} server={server} serverDraft={serverDraft} settingsReady={settingsReady} settingsBusy={settingsBusy} connection={connection} refreshSeconds={refreshSeconds} language={language} onCategory={setSettingsCategory} onServerChange={setServerDraft} onRefreshSecondsChange={setRefreshSeconds} onLanguageChange={(next) => void changeLanguage(next)} onApply={() => void applyServer()} onCredentialChanged={() => setCredentialRevision((current) => current + 1)} />}
+        {section === "settings" && <SettingsView category={settingsCategory} mode={mode} modeDraft={modeDraft} server={externalServer} serverDraft={serverDraft} settingsReady={settingsReady} settingsBusy={settingsBusy} connection={connection} refreshSeconds={refreshSeconds} language={language} downloadDirectoryDraft={downloadDirectoryDraft} defaultDirectoryPicking={defaultDirectoryPicking} onCategory={setSettingsCategory} onModeChange={setModeDraft} onServerChange={setServerDraft} onRefreshSecondsChange={setRefreshSeconds} onLanguageChange={(next) => void changeLanguage(next)} onDownloadDirectoryChange={setDownloadDirectoryDraft} onChooseDefaultDirectory={() => void chooseDefaultDirectory()} onApply={() => void applyServer()} onCredentialChanged={() => setCredentialRevision((current) => current + 1)} />}
       </section>
 
       <div className="sr-only" role="alert">{renderStatus(error, t)}</div>
@@ -1007,6 +1076,7 @@ export default function App() {
         <div className="modal-backdrop" role="presentation" onMouseDown={closeAdd}>
           <section ref={addDialogRef} className="modal" role="dialog" aria-modal="true" aria-labelledby="add-download-title" onKeyDown={handleAddDialogKeyDown} onMouseDown={(event) => event.stopPropagation()}>
             <div className="modal-header"><div><span className="eyebrow">{t("New task")}</span><h2 id="add-download-title">{t("Add Download")}</h2></div><button className="close-button" onClick={closeAdd} disabled={addLoading || destinationPicking} aria-label={t("Close Add Download")}>×</button></div>
+            {mode === "managed" && !canConnect && <ManagedServerStatus status={connectionStatus} busy={retryingServer} onRetry={() => void retryManagedServer()} />}
             <form onSubmit={createAndQueue}>
               <label htmlFor="add-source">{t("Source URL")}</label>
               <textarea id="add-source" ref={addSourceRef} className="source-url-input" value={newSource} onChange={(event) => changeSource(event.target.value)} placeholder="https://example.com/file.zip" rows={3} wrap="soft" aria-describedby="add-source-help" required />
@@ -1020,10 +1090,11 @@ export default function App() {
               ) : (
                 <input id="add-directory" className="server-directory-input" value={newDirectory} onChange={(event) => setNewDirectory(event.target.value)} placeholder={t("Enter an absolute folder path on the Server host.")} aria-describedby="add-directory-help add-final-path" aria-invalid={Boolean(newDirectory.trim()) && !isAbsoluteServerFolder(newDirectory)} autoComplete="off" spellCheck={false} required />
               )}
-              <p id="add-directory-help" className="add-field-help">{localServer ? t("Defaults to this Mac's Downloads folder.") : t("The Server at {server} writes downloads to this folder on its own filesystem.", { server })}</p>
+              <p id="add-directory-help" className="add-field-help">{localServer ? t(downloadDirectory ? "Uses your default download folder." : "Defaults to this Mac's Downloads folder.") : t("The Server at {server} writes downloads to this folder on its own filesystem.", { server })}</p>
+              <p className="add-field-help">{t("If a name is already in use, Nexum adds a number to keep existing files safe.")}</p>
               <p id="add-final-path" className="add-final-path">{t("Destination")}: <output>{destinationPreview || t(localServer ? "Choose a folder and file name" : "Enter a Server folder and file name")}</output></p>
               {addError && <p className="form-error" role="alert">{addError}</p>}
-              <div className="modal-actions"><button type="button" className="button" onClick={closeAdd} disabled={addLoading || destinationPicking}>{t("Cancel")}</button><button type="submit" className="button primary" disabled={addLoading || destinationPicking || nameProbePending || !newSource.trim() || !newDirectory || !newFileName}>{addLoading ? t("Adding…") : nameProbePending ? t("Checking name…") : t("Add and Queue")}</button></div>
+              <div className="modal-actions"><button type="button" className="button" onClick={closeAdd} disabled={addLoading || destinationPicking}>{t("Cancel")}</button><button type="submit" className="button primary" disabled={!canConnect || addLoading || destinationPicking || nameProbePending || !newSource.trim() || !newDirectory || !newFileName}>{addLoading ? t("Adding…") : nameProbePending ? t("Checking name…") : t("Add and Queue")}</button></div>
             </form>
           </section>
         </div>
@@ -1033,8 +1104,18 @@ export default function App() {
   );
 }
 
+function ManagedServerStatus({ status, busy, onRetry }: { status: ManagedConnectionStatus | null; busy: boolean; onRetry: () => void }) {
+  const t = useTranslation();
+  const failed = status?.state === "failed" || status?.state === "stopped";
+  const message = failed ? "The local download service could not start." : status?.state === "restarting" ? "Restoring the local download service…" : "Preparing downloads on this Mac…";
+  return <div className={`managed-service-status ${failed ? "error" : ""}`} role={failed ? "alert" : "status"}>
+    <div><strong>{t(message)}</strong>{failed && <p>{status?.error ? errorMessage(status.error, t) : t("Retry to start downloads. If this keeps happening, reopen or reinstall Nexum.")}</p>}</div>
+    {failed && <button type="button" className="button" onClick={onRetry} disabled={busy}>{busy ? t("Starting…") : t("Retry download service")}</button>}
+  </div>;
+}
+
 function DownloadsView({
-  tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, eventStreamConnected, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
+  tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, eventStreamConnected, canConnect, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
   searchInputRef, searchToggleRef, onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onDismissNotice, onDismissError, onAdd, onPause, onResume, onRemove, onQueue, onStart,
 }: {
   tasks: TaskItem[];
@@ -1045,6 +1126,7 @@ function DownloadsView({
   actionByTask: Record<string, TaskCommand | "start">;
   connection: ConnectionState;
   eventStreamConnected: boolean;
+  canConnect: boolean;
   server: string;
   loading: boolean;
   error: string | LocalizedMessage;
@@ -1088,7 +1170,7 @@ function DownloadsView({
             <section className="task-list" aria-label={t("Downloads")}>
               {visibleTasks.map((task) => (
                 <Fragment key={task.id}>
-                  <TaskRow task={task} selected={selectedTask?.id === task.id} action={actionByTask[task.id]} onSelect={() => onSelect(task.id)} onPause={() => onPause(task.id)} onResume={() => onResume(task.id)} onRemove={() => onRemove(task.id)} onQueue={() => onQueue(task.id)} onStart={() => onStart(task.id)} />
+                  <TaskRow task={task} disabled={!canConnect} selected={selectedTask?.id === task.id} action={actionByTask[task.id]} onSelect={() => onSelect(task.id)} onPause={() => onPause(task.id)} onResume={() => onResume(task.id)} onRemove={() => onRemove(task.id)} onQueue={() => onQueue(task.id)} onStart={() => onStart(task.id)} />
                   {showInspector && selectedTask?.id === task.id && <TaskInspector task={task} server={server} className="narrow-inspector" />}
                 </Fragment>
               ))}
@@ -1104,7 +1186,7 @@ function DownloadsView({
   );
 }
 
-function TaskRow({ task, selected, action, onSelect, onPause, onResume, onRemove, onQueue, onStart }: { task: TaskItem; selected: boolean; action?: TaskCommand | "start"; onSelect: () => void; onPause: () => void; onResume: () => void; onRemove: () => void; onQueue: () => void; onStart: () => void }) {
+function TaskRow({ task, selected, disabled, action, onSelect, onPause, onResume, onRemove, onQueue, onStart }: { task: TaskItem; selected: boolean; disabled: boolean; action?: TaskCommand | "start"; onSelect: () => void; onPause: () => void; onResume: () => void; onRemove: () => void; onQueue: () => void; onStart: () => void }) {
   const t = useTranslation();
   const progress = taskProgress(task);
   const name = taskDisplayName(task) ?? t("Download");
@@ -1128,7 +1210,7 @@ function TaskRow({ task, selected, action, onSelect, onPause, onResume, onRemove
     </button>
     <div className="task-row-footer">
       <div className="task-row-meta"><span>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</span><span className="task-destination" title={task.destination}>{task.destination}</span></div>
-      <div className="task-row-actions">{task.state === "Downloading" && <button className="row-action" disabled={Boolean(action)} onClick={onPause} aria-label={t("Pause {name}", { name })}>{action === "task_pause" ? t("Pausing…") : t("Pause")}</button>}{task.state === "Paused" && <button className="row-action" disabled={Boolean(action)} onClick={onResume} aria-label={t("Resume {name}", { name })}>{action === "task_resume" ? t("Resuming…") : t("Resume")}</button>}{task.state === "Queued" && <button className="row-action" disabled={Boolean(action)} onClick={onStart} aria-label={t("Start next queued task")}>{action === "start" ? t("Starting…") : t("Start")}</button>}{task.state === "Created" && <button className="row-action" disabled={Boolean(action)} onClick={onQueue} aria-label={t("Queue {name}", { name })}>{action === "task_queue" ? t("Queueing…") : t("Queue")}</button>}<button className="row-action danger-text" disabled={Boolean(action)} onClick={onRemove} aria-label={t("Remove {name}", { name })}>{action === "task_remove" ? t("Removing…") : t("Remove")}</button></div>
+      <div className="task-row-actions">{task.state === "Downloading" && <button className="row-action" disabled={disabled || Boolean(action)} onClick={onPause} aria-label={t("Pause {name}", { name })}>{action === "task_pause" ? t("Pausing…") : t("Pause")}</button>}{task.state === "Paused" && <button className="row-action" disabled={disabled || Boolean(action)} onClick={onResume} aria-label={t("Resume {name}", { name })}>{action === "task_resume" ? t("Resuming…") : t("Resume")}</button>}{task.state === "Queued" && <button className="row-action" disabled={disabled || Boolean(action)} onClick={onStart} aria-label={t("Start next queued task")}>{action === "start" ? t("Starting…") : t("Start")}</button>}{task.state === "Created" && <button className="row-action" disabled={disabled || Boolean(action)} onClick={onQueue} aria-label={t("Queue {name}", { name })}>{action === "task_queue" ? t("Queueing…") : t("Queue")}</button>}<button className="row-action danger-text" disabled={disabled || Boolean(action)} onClick={onRemove} aria-label={t("Remove {name}", { name })}>{action === "task_remove" ? t("Removing…") : t("Remove")}</button></div>
     </div>
     {task.error && <span className="task-error">{task.error}</span>}
   </article>;
@@ -1147,12 +1229,12 @@ function EmptyDownloads({ onAdd, hasFilter }: { onAdd: (trigger?: HTMLElement) =
   return <div className="empty-state"><div className="empty-art" aria-hidden="true"><div className="art-block art-one" /><div className="art-block art-two" /><div className="art-block art-three" /><div className="art-block art-four" /></div><h2>{hasFilter ? t("No matching downloads") : t("No downloads yet")}</h2><p>{hasFilter ? t("Try another filter or search term.") : t("Press + to add one")}</p>{hasFilter && <button className="button" onClick={(event) => onAdd(event.currentTarget)}>{t("Add Download")}</button>}</div>;
 }
 
-function DashboardView({ tasks, connection, onAdd, onDownloads }: { tasks: TaskItem[]; connection: ConnectionState; onAdd: (trigger?: HTMLElement) => void; onDownloads: () => void }) {
+function DashboardView({ tasks, connection, mode, onAdd, onDownloads }: { tasks: TaskItem[]; connection: ConnectionState; mode: ConnectionMode; onAdd: (trigger?: HTMLElement) => void; onDownloads: () => void }) {
   const t = useTranslation();
   const active = tasks.filter((task) => task.state === "Downloading").length;
   const queued = tasks.filter((task) => task.state === "Queued" || task.state === "Retrying").length;
   const completed = tasks.filter((task) => task.state === "Completed").length;
-  return <div className="dashboard-page"><div className="page-heading"><div><span className="eyebrow">{t("Overview")}</span><h1>{t("Dashboard")}</h1><p>{t("Current activity from your Nexum Server.")}</p></div><button className="button primary dashboard-add" onClick={(event) => onAdd(event.currentTarget)}><Icon name="plus" size={16} />{t("Add Download")}</button></div><div className="metric-grid"><MetricCard label={t("All downloads")} value={tasks.length} icon="downloads" /><MetricCard label={t("Active")} value={active} icon="trackers" /><MetricCard label={t("Queued")} value={queued} icon="list" /><MetricCard label={t("Completed")} value={completed} icon="general" /></div><section className="dashboard-card"><div className="dashboard-card-heading"><div><span className="eyebrow">{t("Recent activity")}</span><h2>{tasks.length ? t("Latest downloads") : t("Nothing here yet")}</h2></div><button className="text-button" onClick={onDownloads}>{t("View downloads")}</button></div>{tasks.length ? tasks.slice(0, 5).map((task) => <div className="activity-row" key={task.id}><span className={`status-light ${task.state === "Completed" ? "ready" : "connected"}`} /><strong>{taskDisplayName(task) ?? t("Download")}</strong><span>{taskStateLabel(task.state, t)}</span></div>) : <p className="dashboard-empty">{t("Add an HTTP or HTTPS URL to see it here.")}</p>}</section><div className="dashboard-connection"><span className={`status-light ${connection}`} />{connection === "connected" ? t("Server connected") : t("Start nexum-server to connect")}</div></div>;
+  return <div className="dashboard-page"><div className="page-heading"><div><span className="eyebrow">{t("Overview")}</span><h1>{t("Dashboard")}</h1><p>{t("Current activity from your Nexum Server.")}</p></div><button className="button primary dashboard-add" onClick={(event) => onAdd(event.currentTarget)}><Icon name="plus" size={16} />{t("Add Download")}</button></div><div className="metric-grid"><MetricCard label={t("All downloads")} value={tasks.length} icon="downloads" /><MetricCard label={t("Active")} value={active} icon="trackers" /><MetricCard label={t("Queued")} value={queued} icon="list" /><MetricCard label={t("Completed")} value={completed} icon="general" /></div><section className="dashboard-card"><div className="dashboard-card-heading"><div><span className="eyebrow">{t("Recent activity")}</span><h2>{tasks.length ? t("Latest downloads") : t("Nothing here yet")}</h2></div><button className="text-button" onClick={onDownloads}>{t("View downloads")}</button></div>{tasks.length ? tasks.slice(0, 5).map((task) => <div className="activity-row" key={task.id}><span className={`status-light ${task.state === "Completed" ? "ready" : "connected"}`} /><strong>{taskDisplayName(task) ?? t("Download")}</strong><span>{taskStateLabel(task.state, t)}</span></div>) : <p className="dashboard-empty">{t("Add an HTTP or HTTPS URL to see it here.")}</p>}</section><div className="dashboard-connection"><span className={`status-light ${connection}`} />{connection === "connected" ? t("Server connected") : t(mode === "managed" ? "Preparing downloads on this Mac" : "Check the external Server in Settings")}</div></div>;
 }
 
 function MetricCard({ label, value, icon }: { label: string; value: number; icon: IconName }) {
@@ -1196,8 +1278,10 @@ function NotificationsView({ notifications, locale, server, tasks, onDownloads, 
   </div>;
 }
 
-function SettingsView({ category, server, serverDraft, settingsReady, settingsBusy, connection, refreshSeconds, language, onCategory, onServerChange, onRefreshSecondsChange, onLanguageChange, onApply, onCredentialChanged }: {
+function SettingsView({ category, mode, modeDraft, server, serverDraft, settingsReady, settingsBusy, connection, refreshSeconds, language, downloadDirectoryDraft, defaultDirectoryPicking, onCategory, onModeChange, onServerChange, onRefreshSecondsChange, onLanguageChange, onDownloadDirectoryChange, onChooseDefaultDirectory, onApply, onCredentialChanged }: {
   category: SettingsCategory;
+  mode: ConnectionMode;
+  modeDraft: ConnectionMode;
   server: string;
   serverDraft: string;
   settingsReady: boolean;
@@ -1205,7 +1289,12 @@ function SettingsView({ category, server, serverDraft, settingsReady, settingsBu
   connection: ConnectionState;
   refreshSeconds: number;
   language: LanguagePreference;
+  downloadDirectoryDraft: string | null;
+  defaultDirectoryPicking: boolean;
   onCategory: (category: SettingsCategory) => void;
+  onModeChange: (value: ConnectionMode) => void;
+  onDownloadDirectoryChange: (value: string | null) => void;
+  onChooseDefaultDirectory: () => void;
   onServerChange: (value: string) => void;
   onRefreshSecondsChange: (value: number) => void;
   onLanguageChange: (value: LanguagePreference) => void;
@@ -1232,14 +1321,23 @@ function SettingsView({ category, server, serverDraft, settingsReady, settingsBu
     const card = SETTINGS_CARDS.find((item) => item.id === category);
     if (category === "general") return <SettingsDetail title={t(card?.label ?? "General")} icon="general" onBack={goBack}>
       <div className="settings-card">
-        <div className="settings-card-heading"><div><span className="eyebrow">{t("Connection")}</span><h2>{t("Server")}</h2></div><span className={`status-pill ${connection}`}>{t(connection)}</span></div>
-        <label>{t("Server address")}<input value={serverDraft} onChange={(event) => onServerChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onApply(); }} placeholder={DEFAULT_SERVER} disabled={settingsBusy} /></label>
-        <p className="field-help">{t("The Server runs as a separate process. The saved address is kept in the Mac application support directory.")}</p>
-        <button className="button primary" onClick={onApply} disabled={settingsBusy || !settingsReady}>{t("Save and test connection")}</button>
+        <div className="settings-card-heading"><div><span className="eyebrow">{t("Connection")}</span><h2>{t("Download service")}</h2></div><span className={`status-pill ${connection}`}>{t(connection)}</span></div>
+        <label>{t("Download location")}<select value={modeDraft} onChange={(event) => onModeChange(event.target.value as ConnectionMode)} disabled={settingsBusy || !settingsReady}><option value="managed">{t("This Mac (recommended)")}</option><option value="external">{t("External Server")}</option></select></label>
+        {modeDraft === "managed" ? <p className="field-help">{t("Nexum starts its local download service automatically. Downloads continue when you close the window and stop when you quit Nexum.")}</p> : <>
+          <label>{t("Server address")}<input value={serverDraft} onChange={(event) => onServerChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onApply(); }} placeholder={DEFAULT_SERVER} disabled={settingsBusy} /></label>
+          <p className="field-help">{t("Connect to a Server you run separately. Switching modes keeps each service's downloads.")}</p>
+        </>}
+        <button className="button primary" onClick={onApply} disabled={settingsBusy || !settingsReady}>{t("Save settings")}</button>
       </div>
-      <CredentialSettings key={server} server={server} serverDraft={serverDraft} settingsReady={settingsReady} onCredentialChanged={onCredentialChanged} />
+      {mode === "external" && modeDraft === "external" && <CredentialSettings key={server} server={server} serverDraft={serverDraft} settingsReady={settingsReady && !settingsBusy} onCredentialChanged={onCredentialChanged} />}
     </SettingsDetail>;
     if (category === "downloads") return <SettingsDetail title={t(card?.label ?? "Downloads")} icon="downloads" onBack={goBack}>
+      {(mode === "managed" || isLocalServerAddress(server)) && <div className="settings-card">
+        <span className="eyebrow">{t("Save folder")}</span><h2>{t("Default download folder")}</h2>
+        <label htmlFor="default-download-folder">{t("Save folder")}</label><div className="input-with-action"><input id="default-download-folder" readOnly value={downloadDirectoryDraft ?? ""} title={downloadDirectoryDraft ?? ""} placeholder={t("System Downloads folder")} /><button type="button" className="button chooser-button" onClick={onChooseDefaultDirectory} disabled={settingsBusy || defaultDirectoryPicking}>{defaultDirectoryPicking ? t("Choosing…") : t("Choose…")}</button></div>
+        <p className="field-help">{t("New downloads use this folder. You can choose another folder for an individual download.")}</p>
+        {downloadDirectoryDraft && <button className="text-button" onClick={() => onDownloadDirectoryChange(null)} disabled={settingsBusy || defaultDirectoryPicking}>{t("Use system Downloads folder")}</button>}
+      </div>}
       <div className="settings-card"><span className="eyebrow">{t("Updates")}</span><h2>{t("Refresh policy")}</h2><p className="field-help">{t("Idle tasks refresh every five seconds. Active downloads refresh every second.")}</p><select value={refreshSeconds} onChange={(event) => onRefreshSecondsChange(Number(event.target.value))} aria-label={t("Refresh policy")} disabled={settingsBusy}><option value={0}>{t("Manual")}</option><option value={5}>{t("Automatic")}</option></select><button className="button primary settings-save" onClick={onApply} disabled={settingsBusy || !settingsReady}>{t("Save settings")}</button></div>
     </SettingsDetail>;
     if (category === "appearance") return <SettingsDetail title={t(card?.label ?? "Appearance")} icon="appearance" onBack={goBack}>
@@ -1297,7 +1395,7 @@ function CredentialSettings({ server, serverDraft, settingsReady, onCredentialCh
 
     let active = true;
     setStatusLoading(true);
-    void invoke<string | null>("credential_status", { server })
+    void invoke<string | null>("credential_status", {})
       .then((savedScheme) => {
         if (!active) return;
         if (savedScheme !== null && savedScheme !== "Bearer" && savedScheme !== "ApiKey") {
@@ -1333,7 +1431,7 @@ function CredentialSettings({ server, serverDraft, settingsReady, onCredentialCh
     setBusy(true);
     setFeedback(null);
     try {
-      await invoke<void>("save_credential", { server, scheme, secret });
+      await invoke<void>("save_credential", { scheme, secret });
       if (currentServer.current === server) {
         setConfiguredScheme(scheme);
         setStatusFailed(false);
@@ -1354,7 +1452,7 @@ function CredentialSettings({ server, serverDraft, settingsReady, onCredentialCh
     setFeedback(null);
     clearSecretInput();
     try {
-      await invoke<void>("clear_credential", { server });
+      await invoke<void>("clear_credential", {});
       if (currentServer.current === server) {
         setConfiguredScheme(null);
         setStatusFailed(false);

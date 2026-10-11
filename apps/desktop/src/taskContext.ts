@@ -1,6 +1,7 @@
 export interface TaskContext {
   server: string;
   credentialRevision: number;
+  connectionGeneration?: number;
 }
 
 export interface ContextValue<T> {
@@ -8,7 +9,7 @@ export interface ContextValue<T> {
   value: T;
 }
 
-/** Context objects are replaced on every Server or credential change. */
+/** Context objects are replaced on every connection, process generation or credential change. */
 export function valueForContext<T>(scoped: ContextValue<T> | null, context: TaskContext): T | null {
   return scoped?.context === context ? scoped.value : null;
 }

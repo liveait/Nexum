@@ -1,0 +1,23 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { spawnSync } from "node:child_process";
+
+const app = resolve(process.argv[2] || "target/release/bundle/macos/Nexum.app");
+const resources = join(app, "Contents", "Resources");
+const executable = join(resources, "nexum-server");
+const metadata = JSON.parse(readFileSync(join(resources, "nexum-server-build.json"), "utf8"));
+assert.notEqual(statSync(executable).mode & 0o111, 0, "bundled Server must be executable");
+assert.equal(createHash("sha256").update(readFileSync(executable)).digest("hex"), metadata.sha256, "packaging changed the Server digest");
+const version = spawnSync("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleShortVersionString", join(app, "Contents", "Info.plist")], { encoding: "utf8" });
+assert.equal(version.status, 0, "read App version");
+assert.equal(metadata.server_version, version.stdout.trim(), "App and Server versions differ");
+const signature = spawnSync("/usr/bin/codesign", ["--verify", "--strict", executable], { encoding: "utf8" });
+assert.equal(signature.status, 0, signature.stderr);
+const bundledArchitectures = spawnSync("/usr/bin/lipo", ["-archs", executable], { encoding: "utf8" });
+const desktopArchitectures = spawnSync("/usr/bin/lipo", ["-archs", join(app, "Contents", "MacOS", "nexum-desktop")], { encoding: "utf8" });
+assert.equal(bundledArchitectures.status, 0, bundledArchitectures.stderr);
+assert.equal(desktopArchitectures.status, 0, desktopArchitectures.stderr);
+assert.equal(bundledArchitectures.stdout.trim(), desktopArchitectures.stdout.trim(), "App and Server architectures differ");
+console.log(`Verified bundled Server ${metadata.server_version}, ${metadata.target}, SHA-256 ${metadata.sha256}.`);

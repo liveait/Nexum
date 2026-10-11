@@ -2,6 +2,8 @@
 
 #[path = "credential_store.rs"]
 mod credential_store;
+#[path = "managed_server.rs"]
+pub mod managed_server;
 
 pub use credential_store::{clear_credential, credential_status, save_credential};
 
@@ -13,7 +15,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(test)]
 use std::net::SocketAddr;
-use std::net::{IpAddr, TcpStream};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,6 +25,108 @@ use tauri::{AppHandle, Emitter};
 enum ClientTransport {
     Plain(TcpStream),
     Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
+
+/// A backend-owned destination and authentication policy. Managed credentials
+/// deliberately have no serialization or Debug implementation.
+#[derive(Clone)]
+pub struct RpcRoute {
+    server: String,
+    authentication: RouteAuthentication,
+}
+
+#[derive(Clone)]
+enum RouteAuthentication {
+    External,
+    Managed(String),
+}
+
+impl RpcRoute {
+    pub fn external(server: String) -> Self {
+        Self {
+            server,
+            authentication: RouteAuthentication::External,
+        }
+    }
+
+    pub fn managed(endpoint: String, token: String) -> Result<Self, String> {
+        let address: std::net::SocketAddr = endpoint
+            .parse()
+            .map_err(|_| "invalid local service endpoint".to_owned())?;
+        if address.ip() != IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) || address.port() == 0 {
+            return Err("invalid local service endpoint".to_owned());
+        }
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid local service credential".to_owned());
+        }
+        Ok(Self {
+            server: address.to_string(),
+            authentication: RouteAuthentication::Managed(token),
+        })
+    }
+
+    fn credential(&self) -> Result<Option<Credential>, String> {
+        match &self.authentication {
+            RouteAuthentication::External => credential_store::credential_for_request(&self.server),
+            RouteAuthentication::Managed(token) => Ok(Some(Credential::Bearer {
+                token: token.clone(),
+            })),
+        }
+    }
+
+    pub fn call(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout_ms: u64,
+    ) -> Result<Value, String> {
+        call_rpc_with(
+            &self.server,
+            method,
+            params,
+            timeout_ms,
+            connect_transport,
+            |_| self.credential(),
+        )
+        .into_result()
+        .map_err(|error| self.sanitize_error(error))
+    }
+
+    fn event_stream(&self, stop: &AtomicBool) -> Result<BufReader<ClientTransport>, String> {
+        connect_event_stream_with(&self.server, stop, connect_transport, |_| self.credential())
+            .map_err(|error| self.sanitize_error(error))
+    }
+
+    fn sanitize_error(&self, error: String) -> String {
+        match &self.authentication {
+            RouteAuthentication::External => error,
+            RouteAuthentication::Managed(token) => error.replace(token, "<redacted>"),
+        }
+    }
+}
+
+pub type RouteResolver = Arc<dyn Fn() -> Result<RpcRoute, String> + Send + Sync>;
+
+fn connect_with_timeout(authority: &str, timeout: Duration) -> Result<TcpStream, String> {
+    let addresses = authority
+        .to_socket_addrs()
+        .map_err(|error| format!("resolve: {error}"))?;
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_error = None;
+    for address in addresses {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(&address, remaining) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.map_or_else(
+        || "connect: no reachable server address".to_owned(),
+        |error| format!("connect: {error}"),
+    ))
 }
 
 impl Read for ClientTransport {
@@ -180,8 +284,7 @@ where
     let parsed = parse_transport_address(address)?;
     let (authority, server_name) = match parsed {
         TransportAddress::Plain { authority } => {
-            let stream =
-                TcpStream::connect(&authority).map_err(|error| format!("connect: {error}"))?;
+            let stream = connect_with_timeout(&authority, timeout)?;
             stream
                 .set_read_timeout(Some(timeout))
                 .map_err(|error| format!("read timeout: {error}"))?;
@@ -200,7 +303,7 @@ where
         } => (authority, server_name),
     };
 
-    let stream = TcpStream::connect(&authority).map_err(|error| format!("connect: {error}"))?;
+    let stream = connect_with_timeout(&authority, timeout)?;
     stream
         .set_read_timeout(Some(timeout))
         .map_err(|error| format!("read timeout: {error}"))?;
@@ -330,6 +433,20 @@ impl SubscriptionControl {
 
 impl EventSubscriptionManager {
     pub fn start(&self, app: AppHandle, server: String) -> u64 {
+        let address = server.clone();
+        self.start_resolved(
+            app,
+            server,
+            Arc::new(move || Ok(RpcRoute::external(address.clone()))),
+        )
+    }
+
+    pub fn start_resolved(
+        &self,
+        app: AppHandle,
+        public_label: String,
+        resolver: RouteResolver,
+    ) -> u64 {
         let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let control = Arc::new(SubscriptionControl::default());
         let previous = self
@@ -346,7 +463,7 @@ impl EventSubscriptionManager {
 
         std::thread::Builder::new()
             .name("nexum-events".to_owned())
-            .spawn(move || run_event_subscription(app, server, generation, control))
+            .spawn(move || run_event_subscription(app, public_label, generation, control, resolver))
             .expect("could not start desktop event subscription");
         generation
     }
@@ -375,10 +492,11 @@ fn run_event_subscription(
     server: String,
     generation: u64,
     control: Arc<SubscriptionControl>,
+    resolver: RouteResolver,
 ) {
     let mut retry_delay = EVENT_CONNECT_RETRY_MIN;
     while !control.stopped.load(Ordering::Acquire) {
-        match connect_event_stream(&server, &control.stopped) {
+        match resolver().and_then(|route| route.event_stream(&control.stopped)) {
             Ok(mut reader) => {
                 retry_delay = EVENT_CONNECT_RETRY_MIN;
                 if !control.emit_if_active(
@@ -389,7 +507,9 @@ fn run_event_subscription(
                         generation,
                         connected: true,
                         error: None,
-                        resync_required: false,
+                        // Every reconnection may have missed events, including
+                        // a managed child restart with a new sequence counter.
+                        resync_required: true,
                     },
                 ) {
                     return;
@@ -474,18 +594,6 @@ fn run_event_subscription(
         }
         retry_delay = std::cmp::min(retry_delay.saturating_mul(2), EVENT_CONNECT_RETRY_MAX);
     }
-}
-
-fn connect_event_stream(
-    server: &str,
-    stop: &AtomicBool,
-) -> Result<BufReader<ClientTransport>, String> {
-    connect_event_stream_with(
-        server,
-        stop,
-        connect_transport,
-        credential_store::credential_for_request,
-    )
 }
 
 fn connect_event_stream_with<C, F>(

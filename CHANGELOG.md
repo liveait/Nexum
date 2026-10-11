@@ -6,6 +6,8 @@ All notable changes to Nexum will be documented here.
 
 ### Added
 
+- **Desktop managed Server**: bundled executable verification, private authenticated startup, stable App storage, bounded child supervision, Managed/External settings, backend-generated IDs and collision-safe destinations. Closing the window keeps downloads running; Quit stops the owned child. M1 crash-window reconciliation and final release acceptance remain open.
+
 - **Core**: task lifecycle, scheduler, resolver integration, and event collection. SQLite storage and restart recovery now support the running server; recovery persists the normalized `Queued` state of previously downloading, paused, or retrying tasks.
 - **Engine**: in-memory and HTTP adapters. The HTTP adapter follows redirects, stages the response in a `.part` file, renames a complete download into place, reports progress after each written response chunk, and exposes cooperative pause/cancel control for server workers. The server-owned path now keeps a stable hidden partial file and atomic JSON sidecar, and resumes only a validator-matched `206 Partial Content` response after restart. The generic synchronous adapter remains without pause/resume capability.
 - **Protocol**: JSON-RPC 2.0 task and server-info methods, a version identifier, credential fields, event envelope/buffer types, and `events.event` notifications for subscribed clients. `TaskView`, returned by `task.get` and `task.list`, includes persisted progress and an `error` field for the most recent transfer error. The protocol defines `-32001` for authentication failures; the server validates configured Bearer or ApiKey credentials before RPC dispatch and event subscription.

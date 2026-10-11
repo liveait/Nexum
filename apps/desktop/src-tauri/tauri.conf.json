@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.nexum.desktop",
   "build": {
+    "beforeDevCommand": "node ../../scripts/prepare-desktop-server.mjs --dev && pnpm dev",
+    "beforeBuildCommand": "node ../../scripts/prepare-desktop-server.mjs && pnpm build",
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420"
   },
@@ -24,6 +26,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "resources/": ""
+    },
     "icon": [
       "icons/icon.png",
       "icons/icon.icns",

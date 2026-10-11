@@ -26,3 +26,10 @@ test("a credential change and a return to the same address require a fresh snaps
   assert.equal(valueForContext(oldTasks, returnedToAddress), null);
   assert.deepEqual(valueForContext({ context: returnedToAddress, value: [{ id: "fresh-task" }] }, returnedToAddress), [{ id: "fresh-task" }]);
 });
+
+test("a restarted managed child requires a fresh task snapshot even with the same context label", () => {
+  const firstChild = { server: "managed", credentialRevision: 0, connectionGeneration: 1 };
+  const restartedChild = { server: "managed", credentialRevision: 0, connectionGeneration: 2 };
+  const snapshot = { context: firstChild, value: [{ id: "paused-before-crash" }] };
+  assert.equal(valueForContext(snapshot, restartedChild), null);
+});

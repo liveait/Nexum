@@ -83,3 +83,6 @@ jobs:
           test -f "$plist_path"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleLocalizations:0' "$plist_path")" = en
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleLocalizations:1' "$plist_path")" = zh-Hans
+          codesign --force --sign - "$app_path"
+          codesign --verify --deep --strict "$app_path"
+          node scripts/verify-desktop-bundle.mjs "$app_path"
