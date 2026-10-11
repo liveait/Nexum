@@ -53,7 +53,7 @@ M1 要让 macOS App 在打开后粘贴 HTTP(S) URL 就能下载。Nexum 尚未�
 
 构建预先生成目标架构 Server，将本机临时签名后的文件作为资源放到 `Contents/Resources/nexum-server`，并把 SHA-256 嵌入 Desktop。release 构建缺少匹配资源即失败；运行时缺失、改变、不兼容或启动失败显示重建／重试提示，不回退到 PATH 或固定端口。托管数据目录使用稳定的 `app_data_dir()/server/`。关闭窗口隐藏 App，明确退出停止子进程；Dock 重新打开界面。
 
-新增下载在 Rust 中校验 HTTP(S) URL、安全名称和目录，生成随机 ID，绕开已有任务、完整文件、稳定部分文件及 sidecar 分配名称；不创建最终文件。默认使用系统 Downloads，可为单项或设置中的默认位置改选目录。此切片保留既有 Server 恢复规则，尚未解决完整文件发布后、Completed 持久化前的崩溃窗口，也不替代全新用户、升级和实际旁白朗读验收。实际构建与原生检查见[发布流程](../RELEASE.zh-CN.md)。
+新增下载在 Rust 中校验 HTTP(S) URL、安全名称和目录，生成随机 ID，绕开已有任务、完整文件、稳定部分文件及 sidecar 分配名称；不创建最终文件。默认使用系统 Downloads，可为单项或设置中的默认位置改选目录。此切片保留了既有 Server 恢复规则，后续 [ADR 0007](0007-http-completion-reconciliation.zh-CN.md) 切片增加完整文件／Completed 对账；全新用户、升级和实际旁白朗读验收仍待完成。实际构建与原生检查见[发布流程](../RELEASE.zh-CN.md)。
 
 ## 验收与验证边界
 

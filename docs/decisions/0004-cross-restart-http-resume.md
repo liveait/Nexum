@@ -24,7 +24,7 @@ The destination-side name makes recovery deterministic without adding a schema m
 - Recovery can resume eligible HTTP/HTTPS work from a verified byte offset after a server restart.
 - Servers that do not provide a stable `ETag` or `Last-Modified` still restart from byte zero after interruption.
 - The sidecar and partial file must remain beside the destination and are subject to the same destination ownership and cleanup rules.
-- If the process exits after the complete file is published at its destination but before `Completed` is persisted, recovery currently requeues the task and then reports that the destination exists. The complete file remains intact; reconciliation of this commit window is required before claiming crash recovery as complete.
+- [ADR 0007](0007-http-completion-reconciliation.md) extends the Server-owned path with private completion receipts before publication, atomic progress/Completed persistence, and identity/digest reconciliation after readiness. It supersedes the original limitation where a complete published file became a destination conflict after restart. Incomplete responses still follow the validator rules above; receipt-owned staging cleanup waits for durable completion and checks identity.
 - Cross-host resume, multipart responses, and resumable magnet or local-file transfers remain outside this decision.
 
 ## Alternatives Considered

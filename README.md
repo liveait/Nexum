@@ -15,6 +15,8 @@ The macOS Tauri app defaults to an App-managed, bundled Server: the Rust backend
 
 The server can enforce Bearer or ApiKey authentication when `require_auth` is enabled and can apply optional, process-wide RPC rate limiting. Server TLS is available when paired PEM certificate and private-key paths are configured. The CLI and macOS Desktop can select TLS with a `tls://host:port` address, validate the server name and system root chain, and only send credentials after the handshake succeeds. The Browser extension maps the same `tls://host:port` spelling to browser HTTPS and uses the browser's normal trust store; it still has no credential setting. Executable plugins and real media processing are not active in the running server. The CLI saves credentials in its config file; the macOS Desktop saves a credential for each plaintext loopback or TLS Server address in Keychain and can connect to an authenticated Server. See [Architecture](docs/ARCHITECTURE.md) for the code-level boundaries and current call paths, and the [Development Plan](docs/DEVELOPMENT_PLAN.md) for remaining integration work.
 
+HTTP completion receipts reconcile fully received files after a process restart, including the window between publication and SQLite completion. File identity and SHA-256 must match; unrelated destinations are preserved. See [ADR 0007](docs/decisions/0007-http-completion-reconciliation.md). M0 actual VoiceOver speech and M1 final clean-user/upgrade acceptance remain open.
+
 ## Run the local task flow
 
 Requirements: Rust with edition 2024 support (Rust 1.85 or newer) and Cargo. From the repository root, start the server in one terminal:

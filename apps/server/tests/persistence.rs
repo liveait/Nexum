@@ -1,6 +1,10 @@
 use nexum_core::nexum_domain::TaskId;
+use nexum_core::nexum_domain::{Destination, DownloadSource, Progress};
+use nexum_core::nexum_engine::{
+    CompletionContext, HttpEngine, HttpTransferControl, completion_receipt_path,
+};
 use nexum_core::nexum_storage::{SqliteRepository, TaskRepository};
-use nexum_core::nexum_task::TaskState;
+use nexum_core::nexum_task::{DownloadTask, TaskState};
 use nexum_protocol::Credential;
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -450,6 +454,78 @@ struct HttpFixture {
     worker: JoinHandle<()>,
 }
 
+struct CompletionFixture {
+    source: String,
+    destination: PathBuf,
+    partial: PathBuf,
+    context: CompletionContext,
+    progress: Progress,
+    body: &'static [u8],
+}
+
+impl CompletionFixture {
+    // Create the actual engine receipt from a response with no validator and
+    // no Content-Length. The HTTP listener exits before Server is started, so
+    // successful recovery proves it did not issue another network request.
+    fn published(dir: &TestDir, id: &str, body: &'static [u8]) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = format!("http://{}/complete", listener.local_addr().unwrap());
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            stream.write_all(body).unwrap();
+        });
+        let destination = fs::canonicalize(dir.output_path(id).parent().unwrap())
+            .unwrap()
+            .join(id);
+        let partial = destination.with_file_name(format!(".{id}.nexum.part"));
+        let context = CompletionContext::new(id, dir.path());
+        let progress = HttpEngine::new()
+            .download_to_resumable_with_completion(
+                &source,
+                destination.to_str().unwrap(),
+                &partial,
+                &context,
+                &HttpTransferControl::new(),
+                |_| Ok(()),
+            )
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(progress.total_bytes, None);
+        assert!(completion_receipt_path(&context).exists());
+        Self {
+            source,
+            destination,
+            partial,
+            context,
+            progress,
+            body,
+        }
+    }
+
+    fn seed_task(&self, dir: &TestDir, id: &str, state: TaskState) {
+        let mut repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+        let mut task = DownloadTask::new(
+            id,
+            DownloadSource::new(&self.source),
+            Destination::new(self.destination.to_string_lossy()),
+        );
+        task.state = state;
+        task.progress = self.progress.clone();
+        task.last_error =
+            (state == TaskState::Failed).then(|| "completion save interrupted".to_owned());
+        repository.insert(task.into()).unwrap();
+    }
+}
+
 impl HttpFixture {
     fn new(body: &'static [u8]) -> Self {
         Self::with_status("200 OK", body)
@@ -477,6 +553,15 @@ impl HttpFixture {
                 let mut method = [0u8; 3];
                 stream.read_exact(&mut method).unwrap();
                 assert_eq!(&method, b"GET");
+                // Consume the full request before closing the fixture socket;
+                // unread request bytes can otherwise cause a TCP reset that
+                // races delivery of this deliberately short response.
+                let mut request = method.to_vec();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
                 write!(
                     stream,
                     "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -741,6 +826,385 @@ fn queued_http_tasks_dispatch_after_server_restart() {
     fixture.finish();
     restarted.wait_for_state("recovered-http", "Completed");
     assert_eq!(fs::read(destination).unwrap(), b"recovered response");
+}
+
+#[test]
+fn completion_reconciles_published_unknown_length_response_without_network() {
+    let _test_guard = server_test_guard();
+    for state in [TaskState::Downloading, TaskState::Failed] {
+        let dir = TestDir::new();
+        let id = "published-completion";
+        let fixture =
+            CompletionFixture::published(&dir, id, b"complete response without a validator");
+        fixture.seed_task(&dir, id, state);
+        let mut server = ServerProcess::start(dir.path());
+        server.wait_for_state(id, "Completed");
+        let task = server.call("task.get", Some(json!({"id": id})));
+        assert_eq!(task["downloaded_bytes"], fixture.body.len());
+        assert_eq!(task["total_bytes"], Value::Null);
+        assert_eq!(task["error"], Value::Null);
+        assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+        assert!(!completion_receipt_path(&fixture.context).exists());
+        server.stop();
+        let repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+        let stored = repository.get(&TaskId::from(id)).unwrap().unwrap();
+        assert_eq!(stored.state, TaskState::Completed);
+        assert_eq!(stored.progress.downloaded_bytes, fixture.body.len() as u64);
+        assert_eq!(stored.progress.total_bytes, None);
+    }
+}
+
+#[test]
+fn completion_republishes_proven_partial_without_network() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let id = "unpublished-completion";
+    let fixture = CompletionFixture::published(&dir, id, b"complete unpublished response");
+    // Moving the published inode back to staging constructs the exact durable
+    // journal + complete staging boundary before the no-clobber publication.
+    fs::rename(&fixture.destination, &fixture.partial).unwrap();
+    fixture.seed_task(&dir, id, TaskState::Downloading);
+    let server = ServerProcess::start(dir.path());
+    server.wait_for_state(id, "Completed");
+    assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+    assert!(!fixture.partial.exists());
+    assert!(!completion_receipt_path(&fixture.context).exists());
+}
+
+#[test]
+fn completion_sqlite_failure_survives_process_termination_and_restart() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let fixture = HttpFixture::new(b"published before the completion database save");
+    let id = "completion-save-failure";
+    let destination = dir.output_path(id);
+    let context = CompletionContext::new(id, dir.path());
+    let mut server = ServerProcess::start(dir.path());
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": id,
+            "source": fixture.source,
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    let connection = rusqlite::Connection::open(dir.path().join("nexum.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_completion BEFORE UPDATE ON tasks
+         WHEN NEW.state = 'completed' BEGIN SELECT RAISE(FAIL, 'completion save refused'); END;",
+        )
+        .unwrap();
+    server.call("task.queue", Some(json!({"id": id})));
+    fixture.wait_until_connected();
+    fixture.finish();
+    server.wait_for_state(id, "Failed");
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"published before the completion database save"
+    );
+    assert!(completion_receipt_path(&context).exists());
+    server.stop();
+    connection
+        .execute_batch("DROP TRIGGER reject_completion")
+        .unwrap();
+    drop(connection);
+    let restarted = ServerProcess::start(dir.path());
+    restarted.wait_for_state(id, "Completed");
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"published before the completion database save"
+    );
+    assert!(!completion_receipt_path(&context).exists());
+}
+
+#[test]
+fn completion_receipt_survives_when_neither_terminal_state_can_be_saved() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let fixture = HttpFixture::new(b"complete response despite both terminal saves failing");
+    let id = "terminal-save-failure";
+    let destination = dir.output_path(id);
+    let context = CompletionContext::new(id, dir.path());
+    let mut server = ServerProcess::start(dir.path());
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": id,
+            "source": fixture.source,
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    let connection = rusqlite::Connection::open(dir.path().join("nexum.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_terminal BEFORE UPDATE ON tasks
+         WHEN NEW.state IN ('completed', 'failed')
+         BEGIN SELECT RAISE(FAIL, 'terminal save refused'); END;",
+        )
+        .unwrap();
+    server.call("task.queue", Some(json!({"id": id})));
+    fixture.wait_until_connected();
+    fixture.finish();
+    for _ in 0..100 {
+        if destination.exists() && completion_receipt_path(&context).exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"complete response despite both terminal saves failing"
+    );
+    assert!(completion_receipt_path(&context).exists());
+    assert_eq!(server.task_state(id), "Downloading");
+    server.stop();
+    connection
+        .execute_batch("DROP TRIGGER reject_terminal")
+        .unwrap();
+    drop(connection);
+    let restarted = ServerProcess::start(dir.path());
+    restarted.wait_for_state(id, "Completed");
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"complete response despite both terminal saves failing"
+    );
+    assert!(!completion_receipt_path(&context).exists());
+}
+
+#[test]
+fn completion_malformed_receipt_reports_failure_and_preserves_download() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let id = "malformed-completion";
+    let fixture =
+        CompletionFixture::published(&dir, id, b"published data must survive malformed metadata");
+    let receipt = completion_receipt_path(&fixture.context);
+    fs::write(&receipt, b"not a completion journal").unwrap();
+    fixture.seed_task(&dir, id, TaskState::Downloading);
+    let server = ServerProcess::start(dir.path());
+    server.wait_for_state(id, "Failed");
+    let task = server.call("task.get", Some(json!({"id": id})));
+    assert!(
+        task["error"]
+            .as_str()
+            .unwrap()
+            .contains("completion reconciliation")
+    );
+    assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+    assert_eq!(fs::read(&receipt).unwrap(), b"not a completion journal");
+}
+
+#[test]
+fn completion_startup_cleans_durable_completed_hardlink_residue() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let id = "completed-residue";
+    let fixture =
+        CompletionFixture::published(&dir, id, b"completed response with hardlink residue");
+    fs::hard_link(&fixture.destination, &fixture.partial).unwrap();
+    fixture.seed_task(&dir, id, TaskState::Completed);
+    let server = ServerProcess::start(dir.path());
+    assert_eq!(server.task_state(id), "Completed");
+    assert!(!fixture.partial.exists());
+    assert!(!completion_receipt_path(&fixture.context).exists());
+    assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+}
+
+#[test]
+fn completion_rejects_same_bytes_in_a_replacement_destination() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let id = "replacement-completion";
+    let fixture = CompletionFixture::published(&dir, id, b"identical bytes are insufficient proof");
+    let original = dir.output_path("original-proof-inode");
+    fs::rename(&fixture.destination, &original).unwrap();
+    fs::write(&fixture.destination, fixture.body).unwrap();
+    fixture.seed_task(&dir, id, TaskState::Failed);
+    let server = ServerProcess::start(dir.path());
+    server.wait_for_state(id, "Failed");
+    assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+    assert_eq!(fs::read(original).unwrap(), fixture.body);
+    assert!(completion_receipt_path(&fixture.context).exists());
+    let task = server.call("task.get", Some(json!({"id": id})));
+    assert!(
+        task["error"]
+            .as_str()
+            .unwrap()
+            .contains("completion reconciliation")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn completion_recovery_reports_symlink_destination_instead_of_leaving_it_queued() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let id = "symlink-completion";
+    let fixture = CompletionFixture::published(&dir, id, b"never follow the replacement link");
+    let original = dir.output_path("original-proof-inode");
+    fs::rename(&fixture.destination, &original).unwrap();
+    std::os::unix::fs::symlink(&original, &fixture.destination).unwrap();
+    fixture.seed_task(&dir, id, TaskState::Failed);
+    let server = ServerProcess::start(dir.path());
+    server.wait_for_state(id, "Failed");
+    let task = server.call("task.get", Some(json!({"id": id})));
+    assert!(
+        task["error"]
+            .as_str()
+            .unwrap()
+            .contains("completion reconciliation")
+    );
+    assert!(
+        fs::symlink_metadata(&fixture.destination)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(original).unwrap(), fixture.body);
+}
+
+#[test]
+fn completion_removal_preserves_replaced_partial_and_reuse_discards_old_receipt() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let id = "reused-completion";
+    let fixture = CompletionFixture::published(&dir, id, b"old completed response");
+    let foreign = b"a user replacement staging file";
+    fs::write(&fixture.partial, foreign).unwrap();
+    fixture.seed_task(&dir, id, TaskState::Completed);
+    let server = ServerProcess::start(dir.path());
+    assert!(completion_receipt_path(&fixture.context).exists());
+    let response = server.request("task.remove", Some(json!({"id": id})));
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("task removed")
+    );
+    assert_eq!(fs::read(&fixture.partial).unwrap(), foreign);
+    assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+    assert!(completion_receipt_path(&fixture.context).exists());
+    assert!(
+        server
+            .request("task.get", Some(json!({"id": id})))
+            .get("error")
+            .is_some()
+    );
+    let replacement = dir.output_path("new-task-destination");
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": id,
+            "source": fixture.source,
+            "destination": replacement.to_string_lossy(),
+        })),
+    );
+    assert_eq!(server.task_state(id), "Created");
+    assert!(!completion_receipt_path(&fixture.context).exists());
+    assert_eq!(fs::read(&fixture.partial).unwrap(), foreign);
+    assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+}
+
+#[test]
+fn completion_orphan_cleanup_failure_blocks_task_id_reuse() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let id = "blocked-reuse";
+    let context = CompletionContext::new(id, dir.path());
+    let receipt = completion_receipt_path(&context);
+    fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+    // A directory at the receipt filename makes remove_file fail on every
+    // platform, without root-user permission exceptions or production hooks.
+    fs::create_dir(&receipt).unwrap();
+    let server = ServerProcess::start(dir.path());
+    let response = server.request(
+        "task.create",
+        Some(json!({
+            "id": id,
+            "source": "http://127.0.0.1:1/unreachable",
+            "destination": dir.output_path(id).to_string_lossy(),
+        })),
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("clear completion receipt")
+    );
+    assert!(
+        server
+            .request("task.get", Some(json!({"id": id})))
+            .get("error")
+            .is_some()
+    );
+    assert!(receipt.is_dir());
+}
+
+#[test]
+fn completion_removal_cleanup_failure_still_dispatches_next_queued_download() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let server = ServerProcess::start(dir.path());
+    let mut fixtures = Vec::new();
+    // Default scheduling has three slots; hold all three at the HTTP body so
+    // the fourth task can advance only after an active task is removed.
+    for index in 0..4 {
+        let fixture = HttpFixture::new(b"body held at a transfer boundary");
+        let id = format!("cleanup-dispatch-{index}");
+        server.call(
+            "task.create",
+            Some(json!({
+                "id": id,
+                "source": fixture.source,
+                "destination": dir.output_path(&id).to_string_lossy(),
+            })),
+        );
+        server.call("task.queue", Some(json!({"id": id})));
+        if index < 3 {
+            fixture.wait_until_connected();
+        }
+        fixtures.push(fixture);
+    }
+    assert_eq!(server.task_state("cleanup-dispatch-3"), "Queued");
+    let context = CompletionContext::new("cleanup-dispatch-0", dir.path());
+    let receipt = completion_receipt_path(&context);
+    fs::create_dir_all(&receipt).unwrap();
+    let mut remove_stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    remove_stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    writeln!(remove_stream, "{}", json!({
+        "jsonrpc": "2.0", "id": 1, "method": "task.remove", "params": {"id": "cleanup-dispatch-0"},
+    })).unwrap();
+    // request_pause observes the cancellation flag and returns immediately.
+    // This makes cancellation deterministic before releasing the HTTP body.
+    let pause_response = server.request("task.pause", Some(json!({"id": "cleanup-dispatch-0"})));
+    assert!(
+        pause_response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cancelled")
+    );
+    fixtures.remove(0).finish();
+    let mut response = String::new();
+    BufReader::new(remove_stream)
+        .read_line(&mut response)
+        .unwrap();
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("task removed")
+    );
+    assert!(receipt.is_dir());
+    fixtures[2].wait_until_connected();
+    assert_eq!(server.task_state("cleanup-dispatch-3"), "Downloading");
+    for fixture in fixtures {
+        fixture.finish();
+    }
+    server.wait_for_state("cleanup-dispatch-3", "Completed");
 }
 
 #[test]

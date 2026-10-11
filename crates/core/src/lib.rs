@@ -377,6 +377,23 @@ impl<R: TaskRepository> Core<R> {
         })
     }
 
+    /// Persists final progress and Completed as one repository update.
+    ///
+    /// The scheduler slot, task state, and events remain unchanged if storage
+    /// rejects the completed snapshot.
+    pub fn complete_task(
+        &mut self,
+        id: &TaskId,
+        progress: nexum_domain::Progress,
+    ) -> Result<(), CoreError> {
+        self.commit_task_change(id, |tasks, scheduler| {
+            tasks.update_progress(id, progress)?;
+            tasks.set_error(id, None)?;
+            scheduler.mark_finished(tasks, id, TaskState::Completed)?;
+            Ok(())
+        })
+    }
+
     pub fn finish_task_with_error(
         &mut self,
         id: &TaskId,
@@ -467,6 +484,17 @@ impl<R: TaskRepository> Core<R> {
     /// Downloading, Paused, and Retrying tasks are recovered as Queued so
     /// restart never falsely reports an active transfer.
     pub fn recover(&mut self) -> Result<usize, CoreError> {
+        self.recover_with_pending_completion(|_| false)
+    }
+
+    /// Also queues failed tasks whose owner reports pending completion work.
+    ///
+    /// This hook only selects candidates. The owner must verify its completion
+    /// evidence after claiming the task, before marking it Completed.
+    pub fn recover_with_pending_completion(
+        &mut self,
+        mut has_pending_completion: impl FnMut(&StoredTask) -> bool,
+    ) -> Result<usize, CoreError> {
         let stored_tasks = self.repository.list()?;
         let mut restored = 0;
 
@@ -481,7 +509,8 @@ impl<R: TaskRepository> Core<R> {
                     | TaskState::Downloading
                     | TaskState::Paused
                     | TaskState::Retrying
-            );
+            ) || (stored.state == TaskState::Failed
+                && has_pending_completion(&stored));
             if queued {
                 let original = stored.clone();
                 stored.state = TaskState::Queued;
@@ -721,6 +750,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pending_completion_recovery_only_adds_selected_failed_tasks() {
+        let mut repository = InMemoryRepository::new();
+        let (source, destination) = task_source();
+        for (id, state) in [
+            ("pending", TaskState::Failed),
+            ("other-failed", TaskState::Failed),
+            ("created", TaskState::Created),
+            ("completed", TaskState::Completed),
+        ] {
+            let mut task = DownloadTask::new(id, source.clone(), destination.clone());
+            task.state = state;
+            task.progress.speed_bytes_per_second = 99;
+            task.progress.eta_seconds = Some(2);
+            repository.insert(task.into()).unwrap();
+        }
+        let mut core = Core::with_repository(config(), repository).unwrap();
+        let mut inspected = Vec::new();
+        core.recover_with_pending_completion(|task| {
+            inspected.push(task.id.clone());
+            task.id.as_str() == "pending"
+        })
+        .unwrap();
+        inspected.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        assert_eq!(
+            inspected,
+            vec![TaskId::from("other-failed"), TaskId::from("pending")]
+        );
+        let pending = core.tasks.get(&TaskId::from("pending")).unwrap();
+        assert_eq!(pending.state, TaskState::Queued);
+        assert_eq!(pending.progress.speed_bytes_per_second, 0);
+        assert_eq!(pending.progress.eta_seconds, None);
+        assert_eq!(core.scheduler.queued_len(), 1);
+        assert_eq!(
+            core.repository
+                .get(&TaskId::from("pending"))
+                .unwrap()
+                .unwrap()
+                .state,
+            TaskState::Queued
+        );
+        assert_eq!(
+            core.tasks.get(&TaskId::from("other-failed")).unwrap().state,
+            TaskState::Failed
+        );
+        assert_eq!(
+            core.tasks.get(&TaskId::from("created")).unwrap().state,
+            TaskState::Created
+        );
+        assert_eq!(
+            core.tasks.get(&TaskId::from("completed")).unwrap().state,
+            TaskState::Completed
+        );
+    }
+
     #[derive(Default)]
     struct WriteFailureRepository {
         inner: InMemoryRepository,
@@ -756,6 +840,53 @@ mod tests {
                 self.inner.remove(id)
             }
         }
+    }
+
+    #[test]
+    fn completion_progress_and_state_commit_together_or_roll_back() {
+        let mut core = Core::with_repository(config(), WriteFailureRepository::default()).unwrap();
+        let (source, destination) = task_source();
+        let id = TaskId::from("atomic-completed");
+        core.create_task(id.clone(), source, destination).unwrap();
+        core.queue_task(&id, Priority::NORMAL).unwrap();
+        core.claim_next().unwrap();
+        core.update_progress(&id, Progress::new(10, None)).unwrap();
+        core.drain_task_events();
+        core.drain_scheduler_events();
+        core.repository.fail_updates = true;
+        assert!(matches!(
+            core.complete_task(&id, Progress::new(42, None)),
+            Err(CoreError::Storage(_))
+        ));
+        let task = core.tasks.get(&id).unwrap();
+        assert_eq!(task.state, TaskState::Downloading);
+        assert_eq!(task.progress.downloaded_bytes, 10);
+        let stored = core.repository.get(&id).unwrap().unwrap();
+        assert_eq!(stored.state, TaskState::Downloading);
+        assert_eq!(stored.progress.downloaded_bytes, 10);
+        assert_eq!(core.scheduler.active_len(), 1);
+        assert!(core.drain_task_events().is_empty());
+        assert!(core.drain_scheduler_events().is_empty());
+        core.repository.fail_updates = false;
+        core.complete_task(&id, Progress::new(42, None)).unwrap();
+        assert_eq!(core.tasks.get(&id).unwrap().state, TaskState::Completed);
+        assert_eq!(
+            core.repository
+                .get(&id)
+                .unwrap()
+                .unwrap()
+                .progress
+                .downloaded_bytes,
+            42
+        );
+        assert_eq!(core.scheduler.active_len(), 0);
+
+        let id = TaskId::from("invalid-completion");
+        let (source, destination) = task_source();
+        core.create_task(id.clone(), source, destination).unwrap();
+        assert!(core.complete_task(&id, Progress::new(42, None)).is_err());
+        assert_eq!(core.tasks.get(&id).unwrap().state, TaskState::Created);
+        assert_eq!(core.tasks.get(&id).unwrap().progress.downloaded_bytes, 0);
     }
 
     #[test]
