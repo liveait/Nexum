@@ -14,6 +14,7 @@ The recorded decisions are:
 - [0004: Validated Cross-Restart HTTP Resume](0004-cross-restart-http-resume.md)
 - [0005: Staged TLS Transport](0005-tls-transport.md)
 - [0006: App-Managed Local Server for macOS](0006-managed-macos-server.md)
+- [0007: Reconcile HTTP File Publication and Task Completion](0007-http-completion-reconciliation.md)
 
 ADR 0002 supersedes ADR 0001's temporary decision to dispatch retries manually. New decisions should use the next numbered filename.
 

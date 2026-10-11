@@ -53,7 +53,7 @@ On October 11, 2026, `managed_server.rs` wires bounded readiness/probing, handle
 
 The build stages the target-architecture Server, applies its local ad-hoc signature before hashing, bundles it as `Contents/Resources/nexum-server`, and embeds SHA-256 in Desktop. A release build without matching resources fails; missing, changed, incompatible, or failed executables produce rebuild/retry guidance without PATH or fixed-port fallback. Managed storage uses stable `app_data_dir()/server/`. Closing the window hides the app, Quit stops its child, and Dock reopen restores the window.
 
-Rust validates the HTTP(S) URL, safe filename and folder, generates random IDs, and allocates around task destinations, complete files, stable partials, and sidecars without creating a final file. System Downloads is the default, with per-task and saved default-folder selection. This slice retains existing Server recovery; complete-file publication before Completed persistence remains open, as do final clean-user, upgrade, and actual VoiceOver speech checks. See [Release Process](../RELEASE.md) for artifact and native evidence.
+Rust validates the HTTP(S) URL, safe filename and folder, generates random IDs, and allocates around task destinations, complete files, stable partials, and sidecars without creating a final file. System Downloads is the default, with per-task and saved default-folder selection. This slice retained existing Server recovery. The subsequent [ADR 0007](0007-http-completion-reconciliation.md) slice adds complete-file/Completed reconciliation; final clean-user, upgrade, and actual VoiceOver speech checks remain open. See [Release Process](../RELEASE.md) for artifact and native evidence.
 
 ## Acceptance and verification boundary
 

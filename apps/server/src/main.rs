@@ -6,8 +6,9 @@ use nexum_core::{
     Core,
     nexum_domain::TaskId,
     nexum_engine::{
-        EngineError, HttpEngine, HttpTransferControl, remove_resumable_files,
-        resumable_partial_progress,
+        CompletionContext, EngineError, HttpEngine, HttpTransferControl,
+        cleanup_completion_partial, clear_completion, completion_receipt_path,
+        has_pending_completion, remove_resumable_files, resumable_partial_progress,
     },
     nexum_resolver::ResolveKind,
     nexum_scheduler::SchedulerConfig,
@@ -291,6 +292,7 @@ struct HttpTransfer {
     destination: String,
     destination_path: PathBuf,
     partial_path: PathBuf,
+    completion_context: CompletionContext,
     control: HttpTransferControl,
     completion: Arc<HttpWorkerCompletion>,
     latest_progress: Arc<Mutex<nexum_core::nexum_domain::Progress>>,
@@ -545,10 +547,11 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
     let latest_progress = Arc::clone(&transfer.latest_progress);
     let control = transfer.control.clone();
     let mut progress_reporter = ProgressReporter::default();
-    let result = HttpEngine::new().download_to_resumable_with_control(
+    let result = HttpEngine::new().download_to_resumable_with_completion(
         &transfer.source,
         &transfer.destination,
         &transfer.partial_path,
+        &transfer.completion_context,
         &control,
         move |progress| {
             *latest_progress
@@ -594,10 +597,7 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
         } else {
             match result {
                 Ok(progress) => {
-                    let finish_result = state
-                        .core
-                        .update_progress(&transfer.id, progress)
-                        .and_then(|()| state.core.finish_task(&transfer.id, TaskState::Completed));
+                    let finish_result = state.core.complete_task(&transfer.id, progress);
                     if let Err(error) = finish_result {
                         outcome = HttpWorkerOutcome::Failed;
                         eprintln!("task {} completion failed: {error:?}", transfer.id);
@@ -611,6 +611,17 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
                                 transfer.id
                             );
                         }
+                    } else if let Err(error) = cleanup_completion_partial(
+                        &transfer.completion_context,
+                        &transfer.source,
+                        &transfer.destination,
+                        &transfer.partial_path,
+                    )
+                    .and_then(|()| clear_completion(&transfer.completion_context))
+                    {
+                        // Completed is already durable. Keep the receipt if
+                        // cleanup failed so a later owner can retry safely.
+                        eprintln!("task {} completion cleanup failed: {error}", transfer.id);
                     }
                 }
                 Err(error) => {
@@ -640,6 +651,24 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
 }
 
 fn checked_destination(destination: &str, data_dir: &Path) -> io::Result<PathBuf> {
+    let path = normalized_destination(destination, data_dir)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "download destination cannot be a symbolic link",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(path)
+}
+
+// Canonicalize only the parent. Pending completion work must reach the worker
+// even when a conflicting symlink or special file now occupies the leaf.
+fn normalized_destination(destination: &str, data_dir: &Path) -> io::Result<PathBuf> {
     let destination = Path::new(destination);
     if !matches!(
         destination.components().next_back(),
@@ -666,17 +695,6 @@ fn checked_destination(destination: &str, data_dir: &Path) -> io::Result<PathBuf
             "download destination cannot be inside the server data directory",
         ));
     }
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "download destination cannot be a symbolic link",
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
     if path.to_str().is_none() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -693,6 +711,19 @@ fn reply_error(request: &RpcRequest, error: RpcErrorObject) -> Option<RpcRespons
         .map(|id| RpcResponse::error(Some(id), error))
 }
 
+fn transfer_destination(
+    task: &nexum_core::nexum_task::DownloadTask,
+    data_dir: &Path,
+) -> io::Result<PathBuf> {
+    let context = CompletionContext::new(task.id.clone(), data_dir);
+    match std::fs::symlink_metadata(completion_receipt_path(&context)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            checked_destination(task.destination.as_str(), data_dir)
+        }
+        _ => normalized_destination(task.destination.as_str(), data_dir),
+    }
+}
+
 fn claim_next_http_transfer(
     state: &mut ServerState,
 ) -> Result<Option<HttpTransfer>, RpcErrorObject> {
@@ -704,7 +735,7 @@ fn claim_next_http_transfer(
                 matches!(
                     state.core.resolve_source(task.source.as_str()),
                     Ok(result) if matches!(result.kind, ResolveKind::Http | ResolveKind::Https)
-                ) && checked_destination(task.destination.as_str(), &state.data_dir)
+                ) && transfer_destination(task, &state.data_dir)
                     .is_ok_and(|path| !state.active_destinations.contains(&path))
             })
         })
@@ -719,7 +750,7 @@ fn claim_next_http_transfer(
         .expect("queued task exists")
         .clone();
     let source = task.source.as_str().to_owned();
-    let destination_path = checked_destination(task.destination.as_str(), &state.data_dir)
+    let destination_path = transfer_destination(&task, &state.data_dir)
         .expect("matching queued task has a permitted destination");
     let destination = destination_path
         .to_str()
@@ -742,15 +773,19 @@ fn claim_next_http_transfer(
         )));
     }
     let active_destination = destination_path.clone();
+    let mut latest_progress = resume_progress.unwrap_or_else(|| task.progress.clone());
+    latest_progress.speed_bytes_per_second = 0;
+    latest_progress.eta_seconds = None;
     let transfer = HttpTransfer {
         id: id.clone(),
         source,
         destination,
         destination_path,
         partial_path,
+        completion_context: CompletionContext::new(id.clone(), &state.data_dir),
         control: HttpTransferControl::new(),
         completion: Arc::new(HttpWorkerCompletion::default()),
-        latest_progress: Arc::new(Mutex::new(resume_progress.unwrap_or_default())),
+        latest_progress: Arc::new(Mutex::new(latest_progress)),
         remove_requested: Arc::new(AtomicBool::new(false)),
     };
     state.active_http.insert(id, transfer.clone());
@@ -1009,22 +1044,68 @@ fn remove_active_http_task(
         }
     }
 
+    let mut cleanup_error = None;
     let result = {
         let mut locked = state.lock().expect("server state mutex poisoned");
         if let Some(active) = locked.active_http.get(id).cloned() {
-            destination_path = Some(active.destination_path.clone());
             Some(active)
         } else {
             match locked.core.remove_task(id) {
                 Ok(task) => {
                     if destination_path.is_none() {
                         destination_path =
-                            checked_destination(task.destination.as_str(), &locked.data_dir).ok();
+                            normalized_destination(task.destination.as_str(), &locked.data_dir)
+                                .ok();
                     }
                     if partial_path.is_none()
                         && let Some(path) = destination_path.as_ref()
                     {
                         partial_path = Some(resumable_partial_path(path));
+                    }
+                    let context = CompletionContext::new(id.clone(), &locked.data_dir);
+                    if let Some(path) = destination_path.as_ref() {
+                        locked.active_destinations.remove(path);
+                    }
+                    let cleanup_result = (|| {
+                        let has_receipt =
+                            match std::fs::symlink_metadata(completion_receipt_path(&context)) {
+                                Ok(_) => true,
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                                Err(error) => {
+                                    return Err(EngineError::Failed(format!(
+                                        "completion receipt could not be inspected: {error}"
+                                    )));
+                                }
+                            };
+                        if has_receipt {
+                            if let (Some(destination), Some(partial)) =
+                                (&destination_path, &partial_path)
+                            {
+                                cleanup_completion_partial(
+                                    &context,
+                                    task.source.as_str(),
+                                    destination
+                                        .to_str()
+                                        .expect("normalized destination is UTF-8"),
+                                    partial,
+                                )?;
+                            }
+                            clear_completion(&context)?;
+                        } else {
+                            clear_completion(&context)?;
+                            if let Some(path) = partial_path.as_ref() {
+                                remove_resumable_files(path);
+                            }
+                        }
+                        Ok(())
+                    })();
+                    if let Err(error) = cleanup_result {
+                        // The database removal is durable. Retain the receipt
+                        // on cleanup failure, and still dispatch queued work
+                        // after releasing the cancelled task's scheduler slot.
+                        cleanup_error = Some(RpcErrorObject::internal_error(format!(
+                            "task removed, but completion cleanup failed: {error}"
+                        )));
                     }
                     None
                 }
@@ -1041,15 +1122,11 @@ fn remove_active_http_task(
         return remove_active_http_task(state, request, id);
     }
 
-    if let Some(path) = destination_path {
-        let mut locked = state.lock().expect("server state mutex poisoned");
-        locked.active_destinations.remove(&path);
-    }
-    if let Some(path) = partial_path {
-        remove_resumable_files(path);
-    }
     dispatch_available_http_tasks(state);
-    reply_bool(request, true)
+    match cleanup_error {
+        Some(error) => reply_error(request, error),
+        None => reply_bool(request, true),
+    }
 }
 
 fn dispatch_server_request(
@@ -1096,6 +1173,18 @@ fn dispatch_server_request(
 
     let response = {
         let mut locked = state.lock().expect("server state mutex poisoned");
+        if request.method == "task.create"
+            && let Some(id) = request_task_id(request)
+            && locked.core.tasks.get(&id).is_none()
+            && let Err(error) = clear_completion(&CompletionContext::new(id, &locked.data_dir))
+        {
+            return reply_error(
+                request,
+                RpcErrorObject::internal_error(format!(
+                    "could not clear completion receipt before creating task: {error}"
+                )),
+            );
+        }
         RpcDispatcher::dispatch(&mut locked.core, request)
     };
 
@@ -1805,8 +1894,64 @@ fn open_core(data_dir: &Path) -> io::Result<ServerCore> {
         .map_err(|error| io::Error::other(format!("{}: {error}", database_path.display())))?;
     let mut core = Core::with_repository(SchedulerConfig::default(), repository)
         .map_err(|error| io::Error::other(error.to_string()))?;
-    core.recover()
-        .map_err(|error| io::Error::other(format!("task recovery failed: {error:?}")))?;
+    core.recover_with_pending_completion(|task| {
+        let context = CompletionContext::new(task.id.clone(), data_dir);
+        let Ok(destination) = normalized_destination(task.destination.as_str(), data_dir) else {
+            return false;
+        };
+        let partial = resumable_partial_path(&destination);
+        match has_pending_completion(
+            &context,
+            task.source.as_str(),
+            destination
+                .to_str()
+                .expect("normalized destination is UTF-8"),
+            &partial,
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                eprintln!(
+                    "task {} completion receipt could not be inspected: {error}",
+                    task.id
+                );
+                false
+            }
+        }
+    })
+    .map_err(|error| io::Error::other(format!("task recovery failed: {error:?}")))?;
+    // These tasks already have a durable Completed snapshot. Cleanup compares
+    // staging identity and only hashes a small validator sidecar at startup.
+    for task in core.tasks.list() {
+        if task.state != TaskState::Completed {
+            continue;
+        }
+        let context = CompletionContext::new(task.id.clone(), data_dir);
+        let Ok(destination) = normalized_destination(task.destination.as_str(), data_dir) else {
+            continue;
+        };
+        if matches!(
+            has_pending_completion(
+                &context,
+                task.source.as_str(),
+                destination
+                    .to_str()
+                    .expect("normalized destination is UTF-8"),
+                resumable_partial_path(&destination),
+            ),
+            Ok(true)
+        ) && let Err(error) = cleanup_completion_partial(
+            &context,
+            task.source.as_str(),
+            destination
+                .to_str()
+                .expect("normalized destination is UTF-8"),
+            resumable_partial_path(&destination),
+        )
+        .and_then(|()| clear_completion(&context))
+        {
+            eprintln!("task {} completed receipt cleanup failed: {error}", task.id);
+        }
+    }
     Ok(core)
 }
 

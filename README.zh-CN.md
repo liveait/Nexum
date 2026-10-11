@@ -15,6 +15,8 @@ macOS Tauri App 默认托管随包 Server：Rust 后端校验可执行文件，�
 
 Server 可以在启用 `require_auth` 时执行 Bearer 或 ApiKey 认证，也可以启用可选的进程级 RPC 限流。配置成对的 PEM 证书和私钥路径后，Server 可以启用 TLS。CLI 和 macOS Desktop 都可使用 `tls://host:port` 地址选择 TLS，校验 Server 名称和系统根证书链，并且只在握手成功后发送凭据。Browser Extension 会将同样的 `tls://host:port` 映射到浏览器 HTTPS，并使用浏览器正常的信任库；它仍没有凭据设置。可执行插件和真实媒体处理尚未接入运行中的 Server。CLI 会将凭据保存在配置文件中；macOS Desktop 会按明文回环或 TLS Server 地址将凭据保存到 Keychain，并可连接要求认证的 Server。代码边界与调用路径见[架构设计](docs/ARCHITECTURE.zh-CN.md)，后续集成工作见[开发计划](docs/DEVELOPMENT_PLAN.zh-CN.md)。
 
+HTTP 完成凭证可在进程重启后对账完整响应，包括文件发布与 SQLite 完成保存之间的窗口。须同时匹配文件身份和 SHA-256，保留无关目标文件。详见 [ADR 0007](docs/decisions/0007-http-completion-reconciliation.zh-CN.md)。M0 实际 VoiceOver 朗读和 M1 全新用户／升级最终验收仍待完成。
+
 ## 运行本地任务流程
 
 需要支持 Rust 2024 edition 的 Rust（1.85 或更新版本）及 Cargo。在仓库根目录的一个终端启动 Server：

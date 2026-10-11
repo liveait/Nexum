@@ -13,3 +13,4 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 
 [dev-dependencies]
 rcgen = "0.13"
+rusqlite = { version = "0.37", features = ["bundled"] }

@@ -47,7 +47,7 @@
 - **外部模式**：切换到隔离的独立 Server 后，界面用其空任务列表替换托管快照，并停止 App 拥有的子进程；外部地址与 Keychain 控件显示。独立 Server 在 App 退出／重开以及切回托管后均保持运行。切回后托管完成任务恢复，清理时只停止独立 fixture。
 - **默认目录及最终重建**：原生目录选择器选中临时文件夹，保存后正确持久化。该检查发现 `⌘N` 闭包读取旧设置，现已让快捷键和目录重置 effect 跟踪当前目录及本机／远程模式。前端测试及 TypeScript/Vite 构建通过，随后重建 release App 并通过签名／打包检查。最终 App 保存目录后首次 `⌘N` 即使用所选目录，重置后首次 `⌘N` 使用系统下载目录；重开也恢复完成任务及 100% 进度。
 - **检查与恢复**：Rust 格式、workspace check、276 项 workspace 测试及禁止警告的 Clippy 均通过。Desktop 库有 29 项测试，其中 12 项覆盖托管生命周期／资源；binary 有 8 项测试，前端有 13 项。最终设置为托管，外部地址 `127.0.0.1:39100`、刷新 5 秒、语言 `system`，默认下载目录无自定义值。外部 fixture 目录已清理、端口已释放；App 停留在下载页面并显示 Inspector。
-- **边界**：本机临时签名不代表分发签名、公证或 Gatekeeper 放行。M0 的 VoiceOver 实际朗读仍未确认；M1 的完整文件／持久化状态崩溃对账以及全新用户／升级最终验收仍待完成。
+- **边界**：本机临时签名不代表分发签名、公证或 Gatekeeper 放行。M0 的 VoiceOver 实际朗读仍未确认；此原生产物尚不包含下文的完成对账后续变更；全新用户／升级最终验收仍待完成。
 
 | 原生界面状态 | 截图 |
 | --- | --- |
@@ -56,6 +56,15 @@
 | 最终 App 的 codeload 完成任务与 Inspector | [查看](assets/native-macos/managed-2026-10-11/download-completed.png) |
 
 三张图片均为浅色、简体中文，尺寸为 2400 × 1602 像素。设置截图拍摄于快捷键最终修复前；完成任务截图使用最终 App。下载图片中的两处本机路径已替换为明确标注脱敏的 `~/Downloads` 路径。未测量窗口 point 边界，这些截图不能作为新一轮明暗配对或 VoiceOver 朗读证据。
+
+#### HTTP 完成对账：后端证据
+
+10 月 11 日的 [ADR 0007](decisions/0007-http-completion-reconciliation.zh-CN.md) 后续切片增加私有完成凭证和一次最终进度／Completed 持久化。本轮证据来自独立 engine／Core fixture 与真实 Server 子进程，未重启既有原生 App，也未修改其任务数据库和下载文件。
+
+- **恢复**：本地 HTTP fixture 包括无 validator 且未知长度响应，关闭 HTTP listener 后仍可凭证恢复完成；分别检查发布前暂存文件和已发布目标。SQLite trigger 拒绝 Completed，另一个场景同时拒绝两个终态；终止／重启子进程后恢复相同完整字节及持久化状态。
+- **保护与生命周期**：覆盖内容相同但身份不同、摘要变化、符号链接／FIFO／超大／损坏记录、完成持久化后的 hard-link 残留、被替换暂存文件、删除清理错误、继续派发队列和任务 ID 复用。全量校验在 worker 中配合暂停／取消；启动清理只读取有界元数据和小型 sidecar。
+- **检查**：engine 有 39 项测试，其中新增 16 项凭证场景；Core 有 26 项。Server persistence 有 47 项进程测试，其中 11 项完成对账场景；`cargo fmt --all -- --check`、`cargo check --locked --workspace --all-targets`、全部 305 项 workspace 测试及 `cargo clippy --locked --workspace --all-targets -- -D warnings` 均通过。首次 macOS 执行遇到既有托管管道捕获超时；单独 EOF、串行与再次默认并发托管测试，以及最终默认并发完整 workspace 测试通过，未放宽进程期限。
+- **边界**：这些是后端进程测试，不代表最终原生全新用户／升级验收或 VoiceOver 朗读证据。此前记录的原生 App 尚不包含本次后续变更。Windows 文件身份已实现但未在本机执行；当前 CI 检查 Linux Rust 和 macOS Desktop。硬件掉电保障依赖平台／文件系统同步语义。
 
 ### macOS 原生界面截图留证
 

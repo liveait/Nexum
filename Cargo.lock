@@ -2115,6 +2115,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "windows-sys 0.61.2",
 ]
 
@@ -2179,6 +2180,7 @@ dependencies = [
  "nexum-core",
  "nexum-protocol",
  "rcgen",
+ "rusqlite",
  "rustls",
  "serde_json",
 ]

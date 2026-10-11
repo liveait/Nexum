@@ -12,6 +12,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+mod completion;
+pub use completion::{
+    CompletionContext, cleanup_completion_partial, clear_completion, completion_receipt_path,
+    has_pending_completion, reconcile_completion,
+};
+
 static NEXT_TEMP_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -940,11 +946,55 @@ impl HttpEngine {
             partial_path,
             control,
             &mut on_progress,
+            None,
         );
         if matches!(result, Err(EngineError::Cancelled))
             || (control.is_cancelled() && !control.is_committed())
         {
             remove_resumable_files(partial_path);
+        }
+        control.mark_finished();
+        result
+    }
+
+    /// Downloads with a private completion journal so a complete response can
+    /// be reconciled after a process crash without relying on HTTP validators.
+    /// The caller must retain the receipt until its final task-state update is
+    /// persisted, then clean the proven partial and clear the receipt.
+    pub fn download_to_resumable_with_completion<F>(
+        &self,
+        source: &str,
+        destination: &str,
+        partial_path: impl AsRef<Path>,
+        completion: &CompletionContext,
+        control: &HttpTransferControl,
+        mut on_progress: F,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        let partial = partial_path.as_ref();
+        let result = (|| {
+            if let Some(progress) =
+                reconcile_completion(completion, source, destination, partial, control)?
+            {
+                return Ok(progress);
+            }
+            self.download_to_resumable_inner(
+                source,
+                destination,
+                partial,
+                control,
+                &mut on_progress,
+                Some(completion),
+            )
+        })();
+        // A cancellation after proof creation keeps the complete partial and
+        // journal together. Task deletion owns their subsequent cleanup.
+        if matches!(result, Err(EngineError::Cancelled))
+            && !has_pending_completion(completion, source, destination, partial).unwrap_or(true)
+        {
+            remove_resumable_files(partial);
         }
         control.mark_finished();
         result
@@ -957,6 +1007,7 @@ impl HttpEngine {
         partial_path: &Path,
         control: &HttpTransferControl,
         on_progress: &mut F,
+        completion: Option<&CompletionContext>,
     ) -> Result<Progress, EngineError>
     where
         F: FnMut(Progress) -> Result<(), EngineError>,
@@ -1141,11 +1192,35 @@ impl HttpEngine {
                 )));
             }
             control.check_cancelled()?;
-            control.finish_resumable_download(temporary, Path::new(destination))?;
+            if let Some(completion) = completion {
+                let receipt = completion::prepare_completion(
+                    completion,
+                    source,
+                    destination,
+                    partial_path,
+                    temporary
+                        .file
+                        .as_ref()
+                        .expect("resumable download file is open"),
+                    &Progress::new(downloaded, total),
+                    control,
+                )?;
+                // Keep the owned writer alive through publication and keep
+                // the private receipt until the caller commits Completed.
+                completion::publish_completion(&receipt, control)?;
+            } else {
+                control.finish_resumable_download(temporary, Path::new(destination))?;
+            }
             Ok(Progress::new(downloaded, total))
         })();
 
-        if result.is_err() && (!preserve_partial || matches!(result, Err(EngineError::Cancelled))) {
+        let pending_completion = completion.is_some_and(|completion| {
+            has_pending_completion(completion, source, destination, partial_path).unwrap_or(true)
+        });
+        if result.is_err()
+            && !pending_completion
+            && (!preserve_partial || matches!(result, Err(EngineError::Cancelled)))
+        {
             remove_resumable_files(partial_path);
         }
         result
