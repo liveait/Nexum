@@ -602,8 +602,10 @@ fn managed_parent_that_never_sends_start_is_bounded() {
     assert!(server.child.try_wait().unwrap().is_none());
     assert!(server.stdout.snapshot().is_empty());
     dir.assert_no_storage();
-    // Server listens immediately by design. The 4s elapsed check below
-    // ensures the server waited for the startup frame before exiting.
+    // Server listens immediately by design. Close stdin so the server's
+    // control reader sees EOF and exits; the 4s elapsed check ensures
+    // the server waited for the startup frame before processing closure.
+    server.eof();
     assert!(!server.exit(Duration::from_secs(7)).success());
     assert!(
         started.elapsed() >= Duration::from_secs(4),
