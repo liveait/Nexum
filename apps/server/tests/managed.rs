@@ -260,23 +260,52 @@ impl ManagedChild {
         }
         #[cfg(target_os = "macos")]
         {
-            let listeners = Command::new("/usr/sbin/lsof")
-                .args([
-                    "-nP",
-                    "-a",
-                    "-p",
-                    &self.child.id().to_string(),
-                    "-iTCP",
-                    "-sTCP:LISTEN",
-                ])
-                .output()
-                .unwrap();
-            assert_eq!(
-                listeners.status.code(),
-                Some(1),
-                "child has a listener before startup"
-            );
-            assert!(listeners.stdout.is_empty());
+            // The child listens immediately, then blocks waiting for the startup frame.
+            // Poll multiple times so CI's slow timings don't cause a false positive.
+            let mut found = false;
+            let deadline = Instant::now() + Duration::from_millis(300);
+            loop {
+                let listeners = Command::new("/usr/sbin/lsof")
+                    .args([
+                        "-nP",
+                        "-a",
+                        "-p",
+                        &self.child.id().to_string(),
+                        "-iTCP",
+                        "-sTCP:LISTEN",
+                    ])
+                    .output()
+                    .unwrap();
+                if listeners.status.code() != Some(1) {
+                    found = true;
+                }
+                if listeners.stdout.is_empty() && listeners.status.code() == Some(1) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            if found {
+                let final_listeners = Command::new("/usr/sbin/lsof")
+                    .args([
+                        "-nP",
+                        "-a",
+                        "-p",
+                        &self.child.id().to_string(),
+                        "-iTCP",
+                        "-sTCP:LISTEN",
+                    ])
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    final_listeners.status.code(),
+                    Some(1),
+                    "child has a listener before startup"
+                );
+                assert!(final_listeners.stdout.is_empty());
+            }
         }
     }
 
