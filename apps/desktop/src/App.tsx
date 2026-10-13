@@ -6,7 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { hasHardLineBreak, isHttpSource, isValidFileName, suggestedFileName } from "./downloadDraft";
 import { isMessageKey, resolveLocale, translate, TranslationProvider, useTranslation, type LanguagePreference, type Locale, type MessageKey, type Translate } from "./i18n";
 import { isConnectionReady, type ConnectionMode, type ManagedConnectionStatus } from "./connectionState";
-import { addDownload, invokeTaskCommand, type TaskCommand } from "./taskCommands";
+import { addDownload, invokeTaskCommand, savePartialMetadata, readPartialMetadata, clearPartialMetadata, type TaskCommand, type PartialMetadata } from "./taskCommands";
 import { valueForContext, type ContextValue, type TaskContext } from "./taskContext";
 import { taskDisplayName } from "./taskPresentation";
 import "./App.css";
@@ -319,6 +319,10 @@ export default function App() {
   const [addLoading, setAddLoading] = useState(false);
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
+  const [isFreshInstall, setIsFreshInstall] = useState(false);
+  const [upgradeInfo, setUpgradeInfo] = useState<{ old_version: string; new_version: string } | null>(null);
+  const [partialDownloads, setPartialDownloads] = useState<PartialMetadata[]>([]);
+  const [welcomeOpen, setWelcomeOpen] = useState(false);
   const localServer = mode === "managed" || isLocalServerAddress(externalServer);
   const remoteFinalPath = localServer ? null : serverDestination(newDirectory, newFileName);
   const destinationPreview = localServer ? finalPath : remoteFinalPath;
@@ -443,6 +447,38 @@ export default function App() {
       .finally(() => { if (mounted) setSettingsReady(true); });
     return () => { mounted = false; };
   }, []);
+
+  // Check fresh install, upgrade info, and partial downloads once settings are ready.
+  useEffect(() => {
+    if (!settingsReady) return undefined;
+    let active = true;
+    void invoke<boolean>("check_fresh_install")
+      .then((fresh) => { if (active) setIsFreshInstall(fresh); })
+      .catch(() => undefined);
+    void invoke<{ old_version: string; new_version: string } | null>("get_upgrade_info")
+      .then((info) => { if (active) setUpgradeInfo(info); })
+      .catch(() => undefined);
+    // Check for partial metadata from interrupted downloads.
+    if (currentSnapshot) {
+      const items = currentSnapshot.items;
+      const partials: PartialMetadata[] = [];
+      void Promise.all(
+        items
+          .filter((task: TaskItem) => task.state === "Downloading" || task.state === "Paused")
+          .map(async (task: TaskItem) => {
+            try {
+              const meta = await readPartialMetadata(invoke, task.id);
+              if (meta && active) partials.push(meta);
+            } catch { /* ignore */ }
+          }),
+      ).then(() => {
+        if (active && partials.length > 0) {
+          setPartialDownloads(partials);
+        }
+      });
+    }
+    return () => { active = false; };
+  }, [settingsReady, currentSnapshot, invoke]);
 
   useEffect(() => {
     if (!settingsReady) return undefined;
@@ -855,6 +891,10 @@ export default function App() {
       await invokeTaskCommand(invoke, command, id);
       if (snapshotContext.current !== context) return;
       pushNotification(taskActionMessage(successMessage, name), "success", command === "task_remove" ? undefined : id);
+      // Clear partial metadata when a task is removed (interrupted downloads no longer need recovery).
+      if (command === "task_remove") {
+        void clearPartialMetadata(invoke, id).catch(() => {});
+      }
       await refreshTasks();
     } catch (caught) {
       if (snapshotContext.current !== context) return;
@@ -958,6 +998,10 @@ export default function App() {
         await refreshTasks();
         return;
       }
+      // Save partial metadata for interruption recovery.
+      void savePartialMetadata(invoke, result.id, newSource.trim(), 0, null)
+        .then(() => {})
+        .catch(() => {});
       nameProbeVersion.current += 1;
       setNewSource(""); setNewFileName(""); setFileNameEdited(false); setNameProbePending(false); setShowAdd(false);
       selectSection("downloads");
@@ -1023,7 +1067,23 @@ export default function App() {
         <button className={`nav-item ${section === "settings" ? "selected" : ""}`} onClick={() => selectSection("settings")} aria-current={section === "settings" ? "page" : undefined}><Icon name="settings" size={20} /><span>{t("Settings")}</span></button>
       </aside>
 
-      <section className="workspace" inert={showAdd}>
+      <section className="workspace" inert={showAdd || welcomeOpen}>
+        {isFreshInstall && connection === "connected" && (
+          <WelcomeFlow onDismiss={() => setWelcomeOpen(false)} onFirstDownload={() => openAdd()} />
+        )}
+        {upgradeInfo && (
+          <div className="upgrade-notice" role="status">
+            <span>Upgraded from {upgradeInfo.old_version} to {upgradeInfo.new_version}. Tasks are being restored.</span>
+            <button className="text-button" onClick={() => setUpgradeInfo(null)}>Dismiss</button>
+          </div>
+        )}
+        {partialDownloads.length > 0 && (
+          <div className="partial-notice" role="status">
+            <span>Found {partialDownloads.length} incomplete download{partialDownloads.length > 1 ? "s" : ""} from previous sessions.</span>
+            <button className="text-button" onClick={() => { setPartialDownloads([]); refreshTasks(); }}>Resume & refresh</button>
+            <button className="text-button" onClick={() => setPartialDownloads([])}>Dismiss</button>
+          </div>
+        )}
         {mode === "managed" && !canConnect && <ManagedServerStatus status={connectionStatus} busy={retryingServer} onRetry={() => void retryManagedServer()} /> }
         {section === "downloads" && (
           <DownloadsView
@@ -1486,4 +1546,17 @@ function SettingsDetail({ title, icon, onBack, children }: { title: string; icon
   const backButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { backButton.current?.focus(); }, []);
   return <div className="settings-page"><button ref={backButton} className="back-button" onClick={onBack}>{t("‹ Settings")}</button><div className="settings-detail-heading"><span className="settings-tile-icon"><Icon name={icon} size={27} /></span><div><span className="eyebrow">{t("Settings")}</span><h1>{title}</h1></div></div>{children}</div>;
+}
+
+function WelcomeFlow({ onDismiss, onFirstDownload }: { onDismiss: () => void; onFirstDownload: () => void }) {
+  return (
+    <div className="welcome-flow" role="status">
+      <span className="welcome-flow-title">{`Welcome to Nexum`}</span>
+      <p>{`This is your first time opening the app. Your local download service is starting up.`}</p>
+      <div className="welcome-flow-actions">
+        <button className="button primary" onClick={onFirstDownload}>{`Add your first download`}</button>
+        <button className="button" onClick={onDismiss}>{`Continue to Downloads`}</button>
+      </div>
+    </div>
+  );
 }

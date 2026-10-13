@@ -26,9 +26,9 @@ pub fn validate_source(source: &str) -> Result<String, String> {
         || !source
             .get(..7)
             .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
-            && !source
-                .get(..8)
-                .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+        && !source
+            .get(..8)
+            .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
     {
         return Err("download source must be one HTTP or HTTPS URL".to_owned());
     }

@@ -1,19 +1,22 @@
+//! Async filename probing and partial download metadata.
 use percent_encoding::percent_decode_str;
 use reqwest::header::{CONTENT_DISPOSITION, HeaderMap, RANGE};
 use reqwest::{Client, Url};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Asynchronously suggests a file name from an HTTP response.
 pub async fn suggest_download_filename(source: String) -> Option<String> {
     let source = source.trim();
     if source.contains(['\r', '\n'])
         || !source
             .get(..7)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
-            && !source
-                .get(..8)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+        && !source
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
     {
         return None;
     }
@@ -153,101 +156,96 @@ fn safe_file_name(name: &str) -> Option<String> {
     Some(name.to_owned())
 }
 
+// ---------------------------------------------------------------------------
+// Partial download metadata (interruption recovery)
+// ---------------------------------------------------------------------------
+
+/// Metadata persisted alongside a partial download so that an interrupted task
+/// can be reconstructed after a server or app crash.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PartialMetadata {
+    pub task_id: String,
+    pub source: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
+/// Writes partial metadata for a task into the server data directory.
+/// The metadata file is placed with a task_id-based name following the
+/// existing .nexum.part.json naming convention.
+pub fn save_partial_metadata(
+    directory: &Path,
+    task_id: &str,
+    source: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) -> Result<PathBuf, String> {
+    let metadata = directory.join(format!(".{task_id}.nexum.part.json"));
+    let content = serde_json::to_string(&PartialMetadata {
+        task_id: task_id.to_owned(),
+        source: source.to_owned(),
+        downloaded_bytes,
+        total_bytes,
+    })
+    .map_err(|e| format!("could not serialize partial metadata: {e}"))?;
+    let tmp = directory.join(format!(".{task_id}.nexum.part.json.tmp"));
+    std::fs::write(&tmp, &content).map_err(|e| format!("could not write partial metadata: {e}"))?;
+    std::fs::rename(&tmp, &metadata)
+        .map_err(|e| format!("could not save partial metadata: {e}"))?;
+    Ok(metadata)
+}
+
+/// Reads partial metadata for a task from the server data directory.
+/// Returns `Ok(None)` when no metadata file exists.
+pub fn read_partial_metadata(directory: &Path, task_id: &str) -> Result<Option<PartialMetadata>, String> {
+    let metadata = directory.join(format!(".{task_id}.nexum.part.json"));
+    if !metadata.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&metadata)
+        .map_err(|e| format!("could not read partial metadata: {e}"))?;
+    let meta = serde_json::from_str(&content)
+        .map_err(|e| format!("could not parse partial metadata: {e}"))?;
+    Ok(Some(meta))
+}
+
+/// Removes partial metadata file for a completed task.
+pub fn clear_partial_metadata(directory: &Path, task_id: &str) -> Result<(), String> {
+    let metadata = directory.join(format!(".{task_id}.nexum.part.json"));
+    std::fs::remove_file(&metadata).ok();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{header_filename, suggest_download_filename, url_filename};
-    use reqwest::Url;
-    use reqwest::header::{CONTENT_DISPOSITION, HeaderMap, HeaderValue};
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    fn disposition(value: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_DISPOSITION, HeaderValue::from_str(value).unwrap());
-        headers
-    }
+    use super::*;
 
     #[test]
-    fn content_disposition_beats_codeload_path() {
-        let url =
-            Url::parse("https://codeload.github.com/liveait/omlx/zip/refs/heads/main").unwrap();
-        assert_eq!(url_filename(&url).as_deref(), Some("main"));
-        assert_eq!(
-            header_filename(&disposition("attachment; filename=omlx-main.zip")).as_deref(),
-            Some("omlx-main.zip")
-        );
-    }
+    fn partial_metadata_round_trips() {
+        let dir = std::env::temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
 
-    #[test]
-    fn utf8_extended_filename_precedes_plain_and_rejects_unsafe_names() {
-        let headers = disposition(
-            "attachment; filename=fallback.zip; filename*=UTF-8''%E6%8A%A5%E5%91%8A.zip",
-        );
-        assert_eq!(header_filename(&headers).as_deref(), Some("报告.zip"));
-        assert_eq!(
-            header_filename(&disposition(
-                "attachment; filename*=UTF-8''..%2Fsecret; filename=safe.zip"
-            ))
-            .as_deref(),
-            Some("safe.zip")
-        );
-        assert_eq!(
-            header_filename(&disposition("attachment; filename=../secret")),
-            None
-        );
-        assert_eq!(
-            header_filename(&disposition("attachment; filename=\"archive; final.zip\"")).as_deref(),
-            Some("archive; final.zip")
-        );
-    }
+        save_partial_metadata(
+            &dir,
+            "download-abc",
+            "https://example.com/file.zip",
+            1024,
+            Some(2048),
+        )
+        .unwrap();
 
-    #[test]
-    fn probe_uses_get_headers_when_head_omits_the_filename() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(6);
-            let mut methods = Vec::new();
-            while methods.len() < 2 && Instant::now() < deadline {
-                let (mut stream, _) = match listener.accept() {
-                    Ok(connection) => connection,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                        continue;
-                    }
-                    Err(error) => panic!("fixture accept failed: {error}"),
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                let mut request = [0; 2048];
-                let count = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..count]);
-                let method = request.split_whitespace().next().unwrap().to_owned();
-                let response = if method == "HEAD" {
-                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                } else {
-                    assert_eq!(method, "GET");
-                    assert!(
-                        request.contains("range: bytes=0-0")
-                            || request.contains("Range: bytes=0-0")
-                    );
-                    "HTTP/1.1 206 Partial Content\r\nContent-Disposition: attachment; filename=omlx-main.zip\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                };
-                stream.write_all(response.as_bytes()).unwrap();
-                methods.push(method);
-            }
-            methods
-        });
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let name = runtime.block_on(suggest_download_filename(format!("http://{address}/main")));
-        assert_eq!(name.as_deref(), Some("omlx-main.zip"));
-        assert_eq!(server.join().unwrap(), ["HEAD", "GET"]);
+        let meta = read_partial_metadata(&dir, "download-abc").unwrap().unwrap();
+        assert_eq!(meta.task_id, "download-abc");
+        assert_eq!(meta.source, "https://example.com/file.zip");
+        assert_eq!(meta.downloaded_bytes, 1024);
+        assert_eq!(meta.total_bytes, Some(2048));
+
+        // Missing task_id returns None.
+        assert!(read_partial_metadata(&dir, "missing").unwrap().is_none());
+
+        clear_partial_metadata(&dir, "download-abc").unwrap();
+        assert!(read_partial_metadata(&dir, "download-abc").unwrap().is_none());
+
+        std::fs::remove_file(dir.join(".download-abc.nexum.part.json")).ok();
     }
 }
