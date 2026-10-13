@@ -11,7 +11,7 @@ use nexum_core::{
         has_pending_completion, remove_resumable_files, resumable_partial_progress,
     },
     nexum_resolver::ResolveKind,
-    nexum_scheduler::SchedulerConfig,
+    nexum_scheduler::{BandwidthPolicyKind, SchedulerConfig},
     nexum_storage::SqliteRepository,
     nexum_task::TaskState,
 };
@@ -343,7 +343,10 @@ impl HttpWorkerCompletion {
 
 const PROGRESS_MIN_BYTES: u64 = 1024 * 1024;
 const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
-const HTTP_CONTROL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+// A stalled read breaks on the engine's inactivity timeout (a few seconds) and
+// a cancel is observed at the next read boundary, so a worker that is not going
+// to stop within this window is stuck, not merely slow.
+const HTTP_CONTROL_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn resumable_partial_path(destination: &Path) -> PathBuf {
     let file_name = destination
@@ -386,6 +389,7 @@ pub struct ServerConfig {
     pub auth_scheme: Option<String>,
     pub auth_token: Option<String>,
     pub rate_limit: Option<RateLimit>,
+    pub bandwidth_policy: BandwidthPolicyKind,
     pub tls_cert_path: Option<PathBuf>,
     pub tls_key_path: Option<PathBuf>,
 }
@@ -400,6 +404,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("require_auth", &self.require_auth)
             .field("auth_scheme", &self.auth_scheme)
             .field("rate_limit", &self.rate_limit)
+            .field("bandwidth_policy", &self.bandwidth_policy)
             .field("tls_cert_path", &self.tls_cert_path)
             .field("tls_key_path", &self.tls_key_path)
             .field(
@@ -420,6 +425,7 @@ impl Default for ServerConfig {
             auth_scheme: None,
             auth_token: None,
             rate_limit: None,
+            bandwidth_policy: BandwidthPolicyKind::Unlimited,
             tls_cert_path: None,
             tls_key_path: None,
         }
@@ -447,6 +453,39 @@ fn configured_rate_limit(
     }
 }
 
+/// Parse a `bandwidth` value of the form `unlimited`, `fixed <bytes/sec>`, or
+/// `shared <total bytes/sec>`.
+fn parse_bandwidth_policy(value: &str) -> Result<BandwidthPolicyKind, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Ok(BandwidthPolicyKind::Unlimited);
+    }
+    let (kind, rest) = value
+        .split_once(char::is_whitespace)
+        .ok_or_else(|| {
+            "bandwidth must be `unlimited`, `fixed <bytes/sec>`, or `shared <total bytes/sec>`"
+                .to_owned()
+        })?;
+    let bytes = rest
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("bandwidth {kind} limit must be an integer: {value}"))?;
+    if bytes == 0 {
+        return Err(format!("bandwidth {kind} limit must be positive: {value}"));
+    }
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "fixed" => Ok(BandwidthPolicyKind::Fixed {
+            bytes_per_second: bytes,
+        }),
+        "shared" => Ok(BandwidthPolicyKind::Shared {
+            total_bytes_per_second: bytes,
+        }),
+        other => Err(format!(
+            "bandwidth policy must be `unlimited`, `fixed <bytes/sec>`, or `shared <total bytes/sec>`: {other}"
+        )),
+    }
+}
+
 impl ServerConfig {
     /// Parse a simple key=value config file, falling back to defaults for missing fields.
     pub fn from_file(path: &str) -> Result<Self, String> {
@@ -460,6 +499,7 @@ impl ServerConfig {
         let mut auth_token = None;
         let mut rate_limit_rps = None;
         let mut rate_limit_burst = None;
+        let mut bandwidth_policy = None;
         let mut tls_cert_path = None;
         let mut tls_key_path = None;
         for line in content.lines() {
@@ -497,6 +537,9 @@ impl ServerConfig {
                             "rate_limit_burst must be a positive integer".to_owned()
                         })?);
                     }
+                    "bandwidth" => {
+                        bandwidth_policy = Some(parse_bandwidth_policy(value.trim())?);
+                    }
                     "tls_cert_path" => tls_cert_path = Some(PathBuf::from(value.trim())),
                     "tls_key_path" => tls_key_path = Some(PathBuf::from(value.trim())),
                     key if key.starts_with("rate_limit_") => {
@@ -516,6 +559,7 @@ impl ServerConfig {
             auth_scheme,
             auth_token,
             rate_limit: configured_rate_limit(rate_limit_rps, rate_limit_burst)?,
+            bandwidth_policy: bandwidth_policy.unwrap_or_default(),
             tls_cert_path,
             tls_key_path,
         })
@@ -642,6 +686,12 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
         }
         state.active_http.remove(&transfer.id);
         state.active_destinations.remove(&transfer.destination_path);
+        // Only the non-cancelled path changes the scheduler's active count here
+        // (complete/finish). A cancelled transfer's slot is released by the remove
+        // RPC handler, which refreshes the caps itself.
+        if !cancelled {
+            refresh_http_bandwidth(&*state);
+        }
     }
 
     completion.finish(outcome);
@@ -790,8 +840,23 @@ fn claim_next_http_transfer(
     };
     state.active_http.insert(id, transfer.clone());
     state.active_destinations.insert(active_destination);
+    refresh_http_bandwidth(state);
 
     Ok(Some(transfer))
+}
+
+/// Re-apply the scheduler's per-connection bandwidth cap to every active HTTP
+/// transfer. The scheduler derives the per-task cap from the live active count
+/// (`Scheduler::bandwidth_limit_bytes_per_second`), so this is called whenever
+/// that count changes. A transfer whose cap is unchanged is skipped to avoid
+/// restarting its pacing clock.
+fn refresh_http_bandwidth(state: &ServerState) {
+    let cap = state.core.scheduler.bandwidth_limit_bytes_per_second();
+    for transfer in state.active_http.values() {
+        if transfer.control.bytes_per_second() != cap {
+            transfer.control.set_bytes_per_second(cap);
+        }
+    }
 }
 
 fn spawn_http_transfer(
@@ -966,6 +1031,10 @@ fn pause_active_http_task(
     }
     match result {
         Ok(()) => {
+            {
+                let locked = state.lock().expect("server state mutex poisoned");
+                refresh_http_bandwidth(&*locked);
+            }
             dispatch_available_http_tasks(state);
             reply_bool(request, true)
         }
@@ -1004,13 +1073,21 @@ fn resume_active_http_task(
         }
     };
     match resumed {
-        Ok(true) => match transfer.control.resume() {
-            Ok(()) => reply_bool(request, true),
-            Err(error) => reply_error(
-                request,
-                RpcErrorObject::invalid_params(format!("could not resume HTTP transfer: {error}")),
-            ),
-        },
+        Ok(true) => {
+            // Apply the (possibly lowered) per-task cap before waking the worker,
+            // so it does not run ahead on the pre-resume cap.
+            {
+                let locked = state.lock().expect("server state mutex poisoned");
+                refresh_http_bandwidth(&*locked);
+            }
+            match transfer.control.resume() {
+                Ok(()) => reply_bool(request, true),
+                Err(error) => reply_error(
+                    request,
+                    RpcErrorObject::invalid_params(format!("could not resume HTTP transfer: {error}")),
+                ),
+            }
+        }
         Ok(false) => reply_bool(request, false),
         Err(error) => reply_error(request, error),
     }
@@ -1122,6 +1199,10 @@ fn remove_active_http_task(
         return remove_active_http_task(state, request, id);
     }
 
+    {
+        let locked = state.lock().expect("server state mutex poisoned");
+        refresh_http_bandwidth(&*locked);
+    }
     dispatch_available_http_tasks(state);
     match cleanup_error {
         Some(error) => reply_error(request, error),
@@ -1694,6 +1775,7 @@ fn parse_cli_args(args: &[String]) -> Result<(ServerConfig, PathBuf, bool, bool)
     let mut has_cli_tls_key = false;
     let mut cli_rate_limit_rps = None;
     let mut cli_rate_limit_burst = None;
+    let mut has_cli_bandwidth = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -1786,6 +1868,20 @@ fn parse_cli_args(args: &[String]) -> Result<(ServerConfig, PathBuf, bool, bool)
                         .map_err(|_| "--rate-limit-burst must be a positive integer")?,
                 );
             }
+            "--bandwidth" => {
+                has_cli_bandwidth = true;
+                i += 1;
+                let kind = args.get(i).ok_or("--bandwidth requires a value")?;
+                if kind.eq_ignore_ascii_case("unlimited") {
+                    config.bandwidth_policy = BandwidthPolicyKind::Unlimited;
+                } else {
+                    i += 1;
+                    let limit = args
+                        .get(i)
+                        .ok_or("--bandwidth requires a numeric limit")?;
+                    config.bandwidth_policy = parse_bandwidth_policy(&format!("{kind} {limit}"))?;
+                }
+            }
             "--version" => show_version = true,
             "--help" | "-h" => show_help = true,
             flag if flag.starts_with("--rate-limit-") => {
@@ -1823,6 +1919,9 @@ fn parse_cli_args(args: &[String]) -> Result<(ServerConfig, PathBuf, bool, bool)
         if !has_cli_tls_key {
             config.tls_key_path = file_config.tls_key_path;
         }
+        if !has_cli_bandwidth {
+            config.bandwidth_policy = file_config.bandwidth_policy;
+        }
         if cli_rate_limit_rps.is_none() && cli_rate_limit_burst.is_none() {
             config.rate_limit = file_config.rate_limit;
         }
@@ -1847,6 +1946,7 @@ fn print_usage() {
     eprintln!("  --auth-token TOKEN  Authentication secret");
     eprintln!("  --rate-limit-rps N  Maximum average RPC requests per second (requires burst)");
     eprintln!("  --rate-limit-burst N Maximum RPC burst size (requires rps)");
+    eprintln!("  --bandwidth P       Download bandwidth: `unlimited`, `fixed <bytes/sec>`, or `shared <total bytes/sec>` (default: unlimited)");
     eprintln!("  --tls-cert-path PATH PEM server certificate (enables TLS with key)");
     eprintln!("  --tls-key-path PATH PEM server private key (enables TLS with certificate)");
     eprintln!("  --version           Show server and protocol version");
@@ -1888,12 +1988,21 @@ fn lock_data_dir(data_dir: &Path) -> io::Result<File> {
     Ok(lock_file)
 }
 
-fn open_core(data_dir: &Path) -> io::Result<ServerCore> {
+fn open_core(
+    data_dir: &Path,
+    bandwidth_policy: BandwidthPolicyKind,
+) -> io::Result<ServerCore> {
     let database_path = data_dir.join(DATABASE_FILE);
     let repository = SqliteRepository::open(&database_path)
         .map_err(|error| io::Error::other(format!("{}: {error}", database_path.display())))?;
-    let mut core = Core::with_repository(SchedulerConfig::default(), repository)
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let mut core = Core::with_repository(
+        SchedulerConfig {
+            bandwidth_policy,
+            ..SchedulerConfig::default()
+        },
+        repository,
+    )
+    .map_err(|error| io::Error::other(error.to_string()))?;
     core.recover_with_pending_completion(|task| {
         let context = CompletionContext::new(task.id.clone(), data_dir);
         let Ok(destination) = normalized_destination(task.destination.as_str(), data_dir) else {
@@ -2015,7 +2124,7 @@ fn main() -> io::Result<()> {
 
     let data_dir_lock = lock_data_dir(&config.data_dir)?;
     let state = Arc::new(Mutex::new(ServerState {
-        core: open_core(&config.data_dir)?,
+        core: open_core(&config.data_dir, config.bandwidth_policy)?,
         _data_dir_lock: data_dir_lock,
         data_dir: std::fs::canonicalize(&config.data_dir)?,
         active_http: HashMap::new(),
@@ -2131,6 +2240,88 @@ mod tests {
             "--ignored",
             "value"
         ])));
+    }
+
+    #[test]
+    fn bandwidth_policy_parses_all_forms() {
+        assert_eq!(
+            parse_bandwidth_policy("unlimited").unwrap(),
+            BandwidthPolicyKind::Unlimited
+        );
+        assert_eq!(
+            parse_bandwidth_policy(" UNLIMITED ").unwrap(),
+            BandwidthPolicyKind::Unlimited
+        );
+        assert_eq!(
+            parse_bandwidth_policy("fixed 1000").unwrap(),
+            BandwidthPolicyKind::Fixed { bytes_per_second: 1000 }
+        );
+        assert_eq!(
+            parse_bandwidth_policy("shared 2000").unwrap(),
+            BandwidthPolicyKind::Shared { total_bytes_per_second: 2000 }
+        );
+        assert!(parse_bandwidth_policy("fixed").is_err(), "fixed requires a limit");
+        assert!(parse_bandwidth_policy("fixed 0").is_err(), "a zero limit is rejected");
+        assert!(
+            parse_bandwidth_policy("fixed -5").is_err(),
+            "a negative limit is rejected"
+        );
+        assert!(
+            parse_bandwidth_policy("bogus 5").is_err(),
+            "an unknown policy is rejected"
+        );
+    }
+
+    #[test]
+    fn cli_bandwidth_flag_parses() {
+        let (config, _, _, _) =
+            parse_cli_args(&managed_args(&["--bandwidth", "fixed", "1000"])).unwrap();
+        assert_eq!(
+            config.bandwidth_policy,
+            BandwidthPolicyKind::Fixed { bytes_per_second: 1000 }
+        );
+        let (config, _, _, _) =
+            parse_cli_args(&managed_args(&["--bandwidth", "shared", "2000"])).unwrap();
+        assert_eq!(
+            config.bandwidth_policy,
+            BandwidthPolicyKind::Shared { total_bytes_per_second: 2000 }
+        );
+        let (config, _, _, _) =
+            parse_cli_args(&managed_args(&["--bandwidth", "unlimited"])).unwrap();
+        assert_eq!(config.bandwidth_policy, BandwidthPolicyKind::Unlimited);
+        assert!(
+            parse_cli_args(&managed_args(&["--bandwidth", "fixed"])).is_err(),
+            "fixed requires a limit"
+        );
+        // No flag means unlimited.
+        let (config, _, _, _) = parse_cli_args(&managed_args(&[])).unwrap();
+        assert_eq!(config.bandwidth_policy, BandwidthPolicyKind::Unlimited);
+    }
+
+    #[test]
+    fn config_file_bandwidth_round_trips() {
+        let dir = std::env::temp_dir().join(format!(
+            "nexum-server-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "port = 39999").unwrap();
+        writeln!(file, "bandwidth = shared 5000").unwrap();
+        let config = ServerConfig::from_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(config.port, 39999);
+        assert_eq!(
+            config.bandwidth_policy,
+            BandwidthPolicyKind::Shared {
+                total_bytes_per_second: 5000
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
