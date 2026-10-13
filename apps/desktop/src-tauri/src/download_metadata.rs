@@ -14,9 +14,9 @@ pub async fn suggest_download_filename(source: String) -> Option<String> {
         || !source
             .get(..7)
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
-        && !source
-            .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+            && !source
+                .get(..8)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
     {
         return None;
     }
@@ -197,7 +197,10 @@ pub fn save_partial_metadata(
 
 /// Reads partial metadata for a task from the server data directory.
 /// Returns `Ok(None)` when no metadata file exists.
-pub fn read_partial_metadata(directory: &Path, task_id: &str) -> Result<Option<PartialMetadata>, String> {
+pub fn read_partial_metadata(
+    directory: &Path,
+    task_id: &str,
+) -> Result<Option<PartialMetadata>, String> {
     let metadata = directory.join(format!(".{task_id}.nexum.part.json"));
     if !metadata.exists() {
         return Ok(None);
@@ -234,7 +237,9 @@ mod tests {
         )
         .unwrap();
 
-        let meta = read_partial_metadata(&dir, "download-abc").unwrap().unwrap();
+        let meta = read_partial_metadata(&dir, "download-abc")
+            .unwrap()
+            .unwrap();
         assert_eq!(meta.task_id, "download-abc");
         assert_eq!(meta.source, "https://example.com/file.zip");
         assert_eq!(meta.downloaded_bytes, 1024);
@@ -244,7 +249,11 @@ mod tests {
         assert!(read_partial_metadata(&dir, "missing").unwrap().is_none());
 
         clear_partial_metadata(&dir, "download-abc").unwrap();
-        assert!(read_partial_metadata(&dir, "download-abc").unwrap().is_none());
+        assert!(
+            read_partial_metadata(&dir, "download-abc")
+                .unwrap()
+                .is_none()
+        );
 
         std::fs::remove_file(dir.join(".download-abc.nexum.part.json")).ok();
     }

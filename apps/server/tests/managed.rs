@@ -247,15 +247,6 @@ impl ManagedChild {
         );
     }
 
-    fn assert_no_listener(&self) {
-        // The server design creates a listening socket immediately on spawn,
-        // then blocks on stdin. This check was removed from
-        // managed_parent_that_never_sends_start_is_bounded because the test
-        // verifies a period before startup where the server is designed to
-        // already be listening. The socket content is still verified to not
-        // leak credentials (assert_private_output handles that).
-    }
-
     fn rpc(&self, method: &str, params: Option<Value>, token: Option<&str>) -> Value {
         let mut stream = self.connect();
         writeln!(stream, "{}", rpc_request(method, params, token)).unwrap();
@@ -602,10 +593,9 @@ fn managed_parent_that_never_sends_start_is_bounded() {
     assert!(server.child.try_wait().unwrap().is_none());
     assert!(server.stdout.snapshot().is_empty());
     dir.assert_no_storage();
-    // Server listens immediately by design. Close stdin so the server's
-    // control reader sees EOF and exits; the 4s elapsed check ensures
-    // the server waited for the startup frame before processing closure.
-    server.eof();
+    // No start frame and no EOF: the child's startup deadline (5s) must fire
+    // and it must exit on its own. exit() returns as soon as the child
+    // terminates, so the 7s budget only guards against an unbounded hang.
     assert!(!server.exit(Duration::from_secs(7)).success());
     assert!(
         started.elapsed() >= Duration::from_secs(4),

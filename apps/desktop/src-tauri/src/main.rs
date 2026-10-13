@@ -202,7 +202,10 @@ fn check_fresh_install(app: AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn get_upgrade_info(_app: AppHandle, state: tauri::State<'_, Arc<DesktopRuntime>>) -> Result<Option<Value>, String> {
+fn get_upgrade_info(
+    _app: AppHandle,
+    state: tauri::State<'_, Arc<DesktopRuntime>>,
+) -> Result<Option<Value>, String> {
     let settings = state.settings();
     let current_version = env!("CARGO_PKG_VERSION");
     match settings.last_seen_version {
@@ -483,8 +486,14 @@ fn save_partial_metadata(
     if !server_data_dir.is_dir() {
         return Err("server data directory not found; start a server first".to_owned());
     }
-    download_metadata::save_partial_metadata(&server_data_dir, &task_id, &source, downloaded_bytes, total_bytes)
-        .map(|p| p.to_string_lossy().to_string())
+    download_metadata::save_partial_metadata(
+        &server_data_dir,
+        &task_id,
+        &source,
+        downloaded_bytes,
+        total_bytes,
+    )
+    .map(|p| p.to_string_lossy().to_string())
 }
 
 /// Retrieves partial metadata for a task to reconstruct an interrupted download.
@@ -493,10 +502,7 @@ fn read_partial_metadata(
     app: tauri::AppHandle,
     task_id: String,
 ) -> Result<Option<download_metadata::PartialMetadata>, String> {
-    let server_data_dir = match data_dir(&app) {
-        Ok(d) => d.join("server"),
-        Err(e) => return Err(e),
-    };
+    let server_data_dir = data_dir(&app)?.join("server");
     if !server_data_dir.is_dir() {
         return Ok(None);
     }
@@ -505,14 +511,8 @@ fn read_partial_metadata(
 
 /// Removes partial metadata for a completed task.
 #[tauri::command]
-fn clear_partial_metadata(
-    app: tauri::AppHandle,
-    task_id: String,
-) -> Result<(), String> {
-    let server_data_dir = match data_dir(&app) {
-        Ok(d) => d.join("server"),
-        Err(e) => return Err(e),
-    };
+fn clear_partial_metadata(app: tauri::AppHandle, task_id: String) -> Result<(), String> {
+    let server_data_dir = data_dir(&app)?.join("server");
     if !server_data_dir.is_dir() {
         return Ok(());
     }
