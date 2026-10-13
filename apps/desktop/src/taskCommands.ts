@@ -27,3 +27,31 @@ export async function addDownload(invoke: Invoke, source: string, filename: stri
     return { id, destination, queued: false, error };
   }
 }
+
+/** Saves partial metadata so an interrupted task can be resumed. */
+export async function savePartialMetadata(
+  invoke: Invoke,
+  taskId: string,
+  source: string,
+  downloadedBytes: number,
+  totalBytes: number | null,
+): Promise<string> {
+  return invoke<string>("save_partial_metadata", { taskId, source, downloaded_bytes: downloadedBytes, total_bytes: totalBytes });
+}
+
+/** Reads partial metadata for a task (for interruption recovery). */
+export interface PartialMetadata {
+  task_id: string;
+  source: string;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+}
+
+export async function readPartialMetadata(invoke: Invoke, taskId: string): Promise<PartialMetadata | null> {
+  return invoke<PartialMetadata | null>("read_partial_metadata", { taskId });
+}
+
+/** Removes partial metadata for a completed task. */
+export async function clearPartialMetadata(invoke: Invoke, taskId: string): Promise<void> {
+  return invoke<void>("clear_partial_metadata", { taskId });
+}
