@@ -43,6 +43,14 @@ The order expresses dependencies and priority, not dates. M0–M3 form the first
 - **Work:** Pin build inputs and versions, produce an installer for each claimed architecture, and complete Developer ID signing, notarization, stapling, Gatekeeper, install/upgrade/uninstall, and clean-machine smoke checks. Release workflow and update policy must match the actual support scope.
 - **Acceptance:** A user installs the release artifact and launches it by double-clicking, without development tools or a terminal, then completes M1–M2 HTTP downloads. System signing and notarization checks pass; upgrade preserves task data. Release notes state version, hashes, supported macOS/CPU architectures, and unfinished FTP/BT/extension capabilities. Keep procedures and evidence in the [Release Process](RELEASE.md).
 
+#### Website deployment — Supporting M3 work package (planned)
+
+- **Scope and dependency:** Host an independent English/Chinese static website on Cloudflare Pages. The first version includes product features and screenshots, downloads, documentation links, a changelog, and source/feedback links. Website preparation may overlap with M3 signing work; native acceptance of the first App remains the priority, and official downloads go live only after the actual App passes M3.
+- **Initial downloads:** Link official downloads to GitHub Releases and automatically synchronize public release metadata. The download page's version, supported OS/CPU architectures, package size, SHA256, signing, and notarization status must reflect actual release artifacts. An unvalidated platform must not offer an installable download. Private tokens used for synchronization must not reach the browser.
+- **Deployment work:** Configure PR previews and the `main` production site separately, decide the website domain, and configure HTTPS. Preview builds and production releases use their own addresses and publication flows.
+- **Acceptance:** English/Chinese paths, language switching, and page links work. Download a real installer through the website link, verify its SHA256, signing, and notarization status against release records, and complete install/launch checks. PR previews do not update the production site or its download metadata.
+- **Later option:** Decide whether to add versioned R2 mirrors, a separate download domain, and a CDN based on actual traffic and cost limits, while retaining GitHub Releases as a fallback. Before enabling the mirror, verify matching metadata and hashes, `Range` support, download filenames, and file integrity.
+
 ### M4 — Multi-connection HTTP downloads of one file
 
 - **Work:** Once the single-connection path is stable, add fallback-capable `Range` segments, persistent segment-level state, and atomic completion. Keep concurrency, pause, retry, and cross-restart resume coverage.
@@ -75,6 +83,8 @@ The order expresses dependencies and priority, not dates. M0–M3 form the first
 - **Acceptance:** At least one real Engine or Resolver plugin passes end-to-end installation, invocation, permission denial, fault isolation, and removal before plugin support is claimed.
 
 ## 3. Scope and immediate next step
+
+Website deployment follows the M3 work package above: decide the domain and release metadata contract, then build the English/Chinese website and preview flow. Official downloads go live after M3 acceptance passes; schedule an R2 mirror later according to actual traffic needs.
 
 Motrix features such as automatic Tracker lists, UPnP/NAT-PMP, upload limits, launch at login, a statistics Dashboard, and remote/headless control need separate scope decisions; this plan does not count them as committed M0–M7 deliverables. Media/Automation, AI/MCP, remote devices, and manual themes/accent colors are also outside the first macOS downloader release gate. Whether local-file sources need an import/transfer path is a separate product decision. Durable event replay, explicit CA/certificate pinning, and stricter protocol compatibility checks should be scheduled for concrete multi-client or remote-connection needs. Clients currently recover from a disconnected event stream by refreshing a full task snapshot; [ADR 0005](decisions/0005-tls-transport.md) records the implemented TLS boundary. Existing data models or page placeholders alone do not make these features usable.
 
