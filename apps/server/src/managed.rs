@@ -158,7 +158,7 @@ pub(super) fn run(args: &[String]) -> io::Result<()> {
 
     let data_dir_lock = lock_data_dir(&config.data_dir)?;
     let state = Arc::new(Mutex::new(ServerState {
-        core: open_core(&config.data_dir)?,
+        core: open_core(&config.data_dir, config.bandwidth_policy)?,
         _data_dir_lock: data_dir_lock,
         data_dir: std::fs::canonicalize(&config.data_dir)?,
         active_http: HashMap::new(),

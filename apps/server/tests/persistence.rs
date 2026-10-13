@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 static SERVER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -202,6 +202,40 @@ impl ServerProcess {
         panic!("server did not listen on port {port}");
     }
 
+    /// Starts the server with a fixed base set of arguments plus `extra_args`,
+    /// for exercising flags that are not part of the common option chain (e.g.
+    /// `--bandwidth`).
+    fn start_with_extra_args(data_dir: &Path, extra_args: &[&str]) -> Self {
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nexum-server"));
+        command
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--data-dir")
+            .arg(data_dir);
+        for arg in extra_args {
+            command.arg(arg);
+        }
+        let child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut server = Self { child, port };
+        for _ in 0..100 {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                return server;
+            }
+            if let Some(status) = server.child.try_wait().unwrap() {
+                panic!("server exited before listening: {status}");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("server did not listen on port {port}");
+    }
+
     fn request(&self, method: &str, params: Option<Value>) -> Value {
         self.request_with_credential(method, params, None)
     }
@@ -240,6 +274,34 @@ impl ServerProcess {
         credential: Credential,
     ) -> Value {
         let response = self.request_with_credential(method, params, Some(credential));
+        assert!(response.get("error").is_none(), "{response}");
+        response["result"].clone()
+    }
+
+    /// A plain `task.*` call with an explicit read timeout, for handlers that
+    /// legitimately block (e.g. a pause that waits out a stalled read).
+    fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        read_timeout: Duration,
+    ) -> Value {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream.set_read_timeout(Some(read_timeout)).unwrap();
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        writeln!(stream, "{request}").unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn call_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        read_timeout: Duration,
+    ) -> Value {
+        let response = self.request_with_timeout(method, params, read_timeout);
         assert!(response.get("error").is_none(), "{response}");
         response["result"].clone()
     }
@@ -826,6 +888,194 @@ fn queued_http_tasks_dispatch_after_server_restart() {
     fixture.finish();
     restarted.wait_for_state("recovered-http", "Completed");
     assert_eq!(fs::read(destination).unwrap(), b"recovered response");
+}
+
+#[test]
+fn bandwidth_config_throttles_download_and_reports_capped_speed() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    // 5000 bytes at a 1 KiB/s cap takes ~5 s of pacing.
+    let body: &'static [u8] = Box::leak(vec![b't'; 5000].into_boxed_slice());
+    let fixture = HttpFixture::new(body);
+    let mut server =
+        ServerProcess::start_with_extra_args(dir.path(), &["--bandwidth", "fixed", "1000"]);
+    let destination = dir.output_path("bandwidth");
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "bandwidth",
+            "source": fixture.source.clone(),
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    let started = Instant::now();
+    server.call("task.queue", Some(json!({"id": "bandwidth"})));
+    fixture.wait_until_connected();
+    fixture.finish(); // release the body; the worker paces it to 1000 B/s
+
+    // Poll while the paced transfer runs, tracking the reported speed.
+    let mut peak_speed = 0u64;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let task = server.call("task.get", Some(json!({"id": "bandwidth"})));
+        peak_speed = peak_speed.max(task["speed_bytes_per_second"].as_u64().unwrap_or(0));
+        if task["state"].as_str() == Some("Completed") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "capped download did not complete in time"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(3),
+        "a 5000 B / 1000 B/s capped download finished in {elapsed:?}, above its budget"
+    );
+    assert!(
+        peak_speed <= 1000 * 8,
+        "reported speed {peak_speed} B/s far exceeds the 1000 B/s cap"
+    );
+    assert_eq!(fs::read(&destination).unwrap().len(), 5000);
+    server.stop();
+}
+
+#[test]
+fn shared_bandwidth_policy_splits_the_total_between_competing_tasks() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    // Two independent fixtures, served as fast as possible, so the scheduler's
+    // pacing — not the server — is what limits them.
+    let body_a: &'static [u8] = Box::leak(vec![b'a'; 2000].into_boxed_slice());
+    let body_b: &'static [u8] = Box::leak(vec![b'b'; 2000].into_boxed_slice());
+    let fixture_a = HttpFixture::new(body_a);
+    let fixture_b = HttpFixture::new(body_b);
+    // A shared total of 2000 B/s split across the two active tasks is 1000 B/s
+    // each; 2000 bytes each takes ~2 s. Unlimited would finish well under a
+    // second, so the lower bound proves the shared cap is applied to both tasks.
+    let mut server =
+        ServerProcess::start_with_extra_args(dir.path(), &["--bandwidth", "shared", "2000"]);
+    let dest_a = dir.output_path("shared-a");
+    let dest_b = dir.output_path("shared-b");
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "shared-a",
+            "source": fixture_a.source.clone(),
+            "destination": dest_a.to_string_lossy(),
+        })),
+    );
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "shared-b",
+            "source": fixture_b.source.clone(),
+            "destination": dest_b.to_string_lossy(),
+        })),
+    );
+    let started = Instant::now();
+    server.call("task.queue", Some(json!({"id": "shared-a"})));
+    fixture_a.wait_until_connected();
+    server.call("task.queue", Some(json!({"id": "shared-b"})));
+    fixture_b.wait_until_connected();
+    fixture_a.finish();
+    fixture_b.finish();
+
+    server.wait_for_state("shared-a", "Completed");
+    server.wait_for_state("shared-b", "Completed");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(1500),
+        "a 2000 B/s shared cap across two 2000 B tasks finished in {elapsed:?}; the cap was not applied to both"
+    );
+    assert!(
+        elapsed <= Duration::from_secs(30),
+        "the shared cap over-slept: {elapsed:?}"
+    );
+    assert_eq!(fs::read(&dest_a).unwrap().len(), 2000);
+    assert_eq!(fs::read(&dest_b).unwrap().len(), 2000);
+    server.stop();
+}
+
+#[test]
+fn pausing_a_stalled_download_returns_within_budget() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    // Headers are sent, then the body is held, so the worker's read stalls.
+    let fixture = HttpFixture::new(b"stalled body");
+    let mut server = ServerProcess::start(dir.path());
+    let destination = dir.output_path("stalled-pause");
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "stalled-pause",
+            "source": fixture.source.clone(),
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    server.call("task.queue", Some(json!({"id": "stalled-pause"})));
+    fixture.wait_until_connected();
+    let started = Instant::now();
+    let result = server.call_with_timeout(
+        "task.pause",
+        Some(json!({"id": "stalled-pause"})),
+        Duration::from_secs(10),
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(result, json!(true), "pause should succeed");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "task.pause took {elapsed:?} to return on a stalled read"
+    );
+    assert_eq!(server.task_state("stalled-pause"), "Paused");
+    fixture.finish();
+    server.stop();
+}
+
+#[test]
+fn removing_a_stalled_download_returns_within_budget() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let fixture = HttpFixture::new(b"stalled body");
+    let mut server = ServerProcess::start(dir.path());
+    let destination = dir.output_path("stalled-remove");
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "stalled-remove",
+            "source": fixture.source.clone(),
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    server.call("task.queue", Some(json!({"id": "stalled-remove"})));
+    fixture.wait_until_connected();
+    let started = Instant::now();
+    let result = server.call_with_timeout(
+        "task.remove",
+        Some(json!({"id": "stalled-remove"})),
+        Duration::from_secs(10),
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(result, json!(true), "remove should succeed");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "task.remove took {elapsed:?} to return on a stalled read"
+    );
+    let list = server.call("task.list", None);
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|task| task["id"] != "stalled-remove"),
+        "a removed task must leave the task list"
+    );
+    assert!(
+        !destination.exists(),
+        "a removed download leaves no destination file"
+    );
+    fixture.finish();
+    server.stop();
 }
 
 #[test]

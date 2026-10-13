@@ -27,6 +27,8 @@ interface TaskItem {
   state: TaskState;
   downloaded_bytes: number;
   total_bytes: number | null;
+  speed_bytes_per_second: number;
+  eta_seconds: number | null;
   error: string | null;
 }
 
@@ -172,6 +174,36 @@ function taskProgress(task: TaskItem): number | null {
   if (task.total_bytes === null) return null;
   if (task.total_bytes === 0) return 0;
   return Math.max(0, Math.min(100, (task.downloaded_bytes / task.total_bytes) * 100));
+}
+
+function formatRate(bytesPerSecond: number): string {
+  if (bytesPerSecond < 1024) return `${bytesPerSecond} B/s`;
+  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+  if (bytesPerSecond < 1024 * 1024 * 1024) return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`;
+  return `${(bytesPerSecond / (1024 * 1024 * 1024)).toFixed(1)} GB/s`;
+}
+
+function formatDuration(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/**
+ * Live transfer detail (speed, and ETA only when the total length is known).
+ * Speed shows while actively downloading; ETA is only trustworthy when the
+ * response reported a total length, so it is omitted for unknown-length bodies.
+ */
+function transferDetail(task: TaskItem, t: Translate): string {
+  if (task.state !== "Downloading") return "";
+  const parts: string[] = [];
+  if (task.speed_bytes_per_second > 0) parts.push(formatRate(task.speed_bytes_per_second));
+  if (task.total_bytes !== null && task.eta_seconds !== null && task.eta_seconds > 0) {
+    parts.push(t("{eta} left", { eta: formatDuration(task.eta_seconds) }));
+  }
+  return parts.length > 0 ? parts.join(" · ") : "";
 }
 
 function formatUpdatedAt(value: number | null, t: Translate): string {
@@ -1250,9 +1282,11 @@ function TaskRow({ task, selected, disabled, action, onSelect, onPause, onResume
   const t = useTranslation();
   const progress = taskProgress(task);
   const name = taskDisplayName(task) ?? t("Download");
+  const detail = transferDetail(task, t);
   const selectionLabel = (progress === null
     ? t("Select {name}, {state}, progress unknown", { name, state: taskStateLabel(task.state, t) })
     : t("Select {name}, {state}, {percent} percent complete", { name, state: taskStateLabel(task.state, t), percent: Math.round(progress) }))
+    + (detail ? `, ${detail}` : "")
     + (task.error ? t(", error: {error}", { error: task.error }) : "");
   const handleSelectionKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -1269,7 +1303,7 @@ function TaskRow({ task, selected, disabled, action, onSelect, onPause, onResume
       <span className="task-row-heading"><strong>{name}</strong><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span></span><span className="task-source" title={task.source}>{task.source}</span><span className="progress-track" aria-hidden="true"><span className={progress === null ? (task.state === "Downloading" ? "indeterminate active" : "indeterminate") : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></span>
     </button>
     <div className="task-row-footer">
-      <div className="task-row-meta"><span>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</span><span className="task-destination" title={task.destination}>{task.destination}</span></div>
+      <div className="task-row-meta"><span>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}{detail ? ` · ${detail}` : ""}</span><span className="task-destination" title={task.destination}>{task.destination}</span></div>
       <div className="task-row-actions">{task.state === "Downloading" && <button className="row-action" disabled={disabled || Boolean(action)} onClick={onPause} aria-label={t("Pause {name}", { name })}>{action === "task_pause" ? t("Pausing…") : t("Pause")}</button>}{task.state === "Paused" && <button className="row-action" disabled={disabled || Boolean(action)} onClick={onResume} aria-label={t("Resume {name}", { name })}>{action === "task_resume" ? t("Resuming…") : t("Resume")}</button>}{task.state === "Queued" && <button className="row-action" disabled={disabled || Boolean(action)} onClick={onStart} aria-label={t("Start next queued task")}>{action === "start" ? t("Starting…") : t("Start")}</button>}{task.state === "Created" && <button className="row-action" disabled={disabled || Boolean(action)} onClick={onQueue} aria-label={t("Queue {name}", { name })}>{action === "task_queue" ? t("Queueing…") : t("Queue")}</button>}<button className="row-action danger-text" disabled={disabled || Boolean(action)} onClick={onRemove} aria-label={t("Remove {name}", { name })}>{action === "task_remove" ? t("Removing…") : t("Remove")}</button></div>
     </div>
     {task.error && <span className="task-error">{task.error}</span>}
@@ -1281,7 +1315,8 @@ function TaskInspector({ task, server, className = "" }: { task: TaskItem | null
   if (!task) return <aside className={`inspector inspector-empty ${className}`}><span className="inspector-icon"><Icon name="info" size={24} /></span><p>{t("Select a download to inspect it.")}</p></aside>;
   const progress = taskProgress(task);
   const name = taskDisplayName(task) ?? t("Download");
-  return <aside className={`inspector ${className}`} aria-label={t("Task details")}><span className="eyebrow">{t("Task details")}</span><h2>{name}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={t("{name} download progress", { name })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={task.total_bytes === null ? `${taskStateLabel(task.state, t)}; ${t("{bytes} downloaded; total size unknown", { bytes: formatBytes(task.downloaded_bytes) })}` : undefined}><span className={progress === null ? (task.state === "Downloading" ? "indeterminate active" : "indeterminate") : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}</strong></div><dl className="detail-list"><div><dt>{t("Source")}</dt><dd title={task.source}>{task.source}</dd></div><div><dt>{t("Destination")}</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>{t("Server")}</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>{t("Latest error")}</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>{t("Copy error")}</button></div>}</aside>;
+  const detail = transferDetail(task, t);
+  return <aside className={`inspector ${className}`} aria-label={t("Task details")}><span className="eyebrow">{t("Task details")}</span><h2>{name}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={t("{name} download progress", { name })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={task.total_bytes === null ? `${taskStateLabel(task.state, t)}; ${t("{bytes} downloaded; total size unknown", { bytes: formatBytes(task.downloaded_bytes) })}` : undefined}><span className={progress === null ? (task.state === "Downloading" ? "indeterminate active" : "indeterminate") : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}{detail ? ` · ${detail}` : ""}</strong></div><dl className="detail-list"><div><dt>{t("Source")}</dt><dd title={task.source}>{task.source}</dd></div><div><dt>{t("Destination")}</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>{t("Server")}</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>{t("Latest error")}</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>{t("Copy error")}</button></div>}</aside>;
 }
 
 function EmptyDownloads({ onAdd, hasFilter }: { onAdd: (trigger?: HTMLElement) => void; hasFilter: boolean }) {

@@ -5,12 +5,13 @@ use nexum_task::TaskState;
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod completion;
 pub use completion::{
@@ -19,6 +20,58 @@ pub use completion::{
 };
 
 static NEXT_TEMP_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
+
+/// Inactivity bound on the response body. A stale socket returns a zero-byte
+/// timeout within this window so pause and cancel take effect promptly instead
+/// of blocking for the whole 30-minute request timeout.
+const READ_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Consecutive zero-data stalls tolerated before a dead connection is failed.
+/// Any byte read resets the counter, so a slow-but-flowing connection never trips
+/// this; only a connection that delivers nothing for the whole window does.
+const MAX_CONSECUTIVE_STALLS: u32 = 8;
+
+/// Sliding-window estimate of transfer speed in bytes/second over the trailing
+/// samples. Created per download and observed once per chunk.
+struct RateGauge {
+    samples: VecDeque<(Instant, u64)>,
+    last: u64,
+}
+
+impl RateGauge {
+    fn new() -> Self {
+        Self {
+            samples: VecDeque::new(),
+            last: 0,
+        }
+    }
+
+    /// Records a cumulative `total_bytes` sample now and returns the smoothed
+    /// bytes/second measured over the trailing window.
+    fn observe(&mut self, total_bytes: u64) -> u64 {
+        let now = Instant::now();
+        self.samples.push_back((now, total_bytes));
+        let horizon = now - Duration::from_secs(5);
+        while self.samples.front().is_some_and(|&(at, _)| at < horizon) {
+            self.samples.pop_front();
+        }
+        // Measure against the oldest in-window sample (or the current sample at
+        // the start) so the rate reflects the trailing window, never more.
+        let (reference_time, reference_bytes) = match self.samples.front() {
+            Some(&(at, bytes)) if at >= horizon => (at, bytes),
+            _ => (now, total_bytes),
+        };
+        let elapsed = (now - reference_time).as_secs_f64();
+        if elapsed < 0.5 || total_bytes < reference_bytes {
+            return self.last;
+        }
+        let rate = ((total_bytes - reference_bytes) as f64 / elapsed) as u64;
+        // Light exponential smoothing so a single chunk does not spike the UI.
+        let smoothed = self.last * 3 / 4 + rate / 4;
+        self.last = smoothed;
+        smoothed
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineCapabilities {
@@ -218,7 +271,7 @@ impl EngineAdapter for InMemoryEngine {
 }
 
 pub struct HttpEngine {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     tasks: std::collections::HashMap<String, (TaskId, EngineTaskState, Progress, String)>,
     next_handle: u64,
 }
@@ -242,6 +295,13 @@ struct HttpTransferControlState {
     cancelled: bool,
     committed: bool,
     finished: bool,
+    /// Per-connection bandwidth cap in bytes/second, set by the server from the
+    /// scheduler. `None` means unlimited; a small value (including `0`, treated as
+    /// `1`) effectively pauses the transfer.
+    bytes_per_second: Option<u64>,
+    /// Virtual-clock pacer: bytes accounted and the real instant the clock began.
+    pacer_sent: u64,
+    pacer_started: Option<Instant>,
 }
 
 impl HttpTransferControl {
@@ -362,6 +422,67 @@ impl HttpTransferControl {
             Err(EngineError::Cancelled)
         } else {
             Ok(())
+        }
+    }
+
+    /// Returns the per-connection bandwidth cap currently in effect. `None` means
+    /// unlimited. Lets a caller avoid re-applying a cap that is already set, which
+    /// would otherwise restart the pacing clock and allow a one-chunk burst.
+    pub fn bytes_per_second(&self) -> Option<u64> {
+        self.with_state(|state| state.bytes_per_second)
+    }
+
+    /// Sets the per-connection bandwidth cap computed by the scheduler and
+    /// restarts the pacing clock so the first chunk is not delayed. A `None` cap
+    /// means unlimited. Idempotent and safe to call while the worker runs.
+    pub fn set_bytes_per_second(&self, bytes_per_second: Option<u64>) {
+        let (lock, _) = &*self.inner;
+        let mut state = lock.lock().expect("HTTP transfer control mutex poisoned");
+        state.bytes_per_second = bytes_per_second;
+        state.pacer_sent = 0;
+        state.pacer_started = None;
+    }
+
+    /// Blocks until the pacing clock has room for `bytes` at the configured cap,
+    /// keeping the transfer's average throughput within the limit. A `None` cap
+    /// only accounts the bytes and returns immediately. Returns
+    /// [`EngineError::Cancelled`] if the transfer is cancelled while sleeping.
+    fn wait_for_budget(&self, bytes: u64) -> Result<(), EngineError> {
+        let (lock, _) = &*self.inner;
+        let mut state = lock.lock().expect("HTTP transfer control mutex poisoned");
+        if state.cancelled {
+            return Err(EngineError::Cancelled);
+        }
+        let Some(cap) = state.bytes_per_second else {
+            state.pacer_sent = state.pacer_sent.saturating_add(bytes);
+            return Ok(());
+        };
+        let now = Instant::now();
+        let started = *state.pacer_started.get_or_insert(now);
+        state.pacer_sent = state.pacer_sent.saturating_add(bytes);
+        let virtual_seconds = state.pacer_sent as f64 / cap.max(1) as f64;
+        let real_seconds = now.duration_since(started).as_secs_f64();
+        let wait = virtual_seconds - real_seconds;
+        drop(state);
+        if wait > 0.0 {
+            self.sleep_until(Instant::now() + Duration::from_secs_f64(wait))?;
+        }
+        Ok(())
+    }
+
+    /// Sleeps until `until`, waking early and returning [`EngineError::Cancelled`]
+    /// if the transfer is cancelled. Sliced so cancellation stays responsive.
+    fn sleep_until(&self, until: Instant) -> Result<(), EngineError> {
+        let slice = Duration::from_millis(50);
+        loop {
+            if self.is_cancelled() {
+                return Err(EngineError::Cancelled);
+            }
+            let now = Instant::now();
+            if now >= until {
+                return Ok(());
+            }
+            std::thread::sleep((until - now).min(slice));
         }
     }
 
@@ -827,7 +948,7 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
 impl Default for HttpEngine {
     fn default() -> Self {
         Self {
-            client: reqwest::blocking::Client::builder()
+            client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::limited(5))
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(30 * 60))
@@ -1000,7 +1121,101 @@ impl HttpEngine {
         result
     }
 
+    /// Reads `response` into `file` until EOF, enforcing the control's bandwidth
+    /// cap and reporting a windowed speed/eta on each chunk.
+    ///
+    /// A stalled body (zero-byte inactivity timeout) is not a failure: pause and
+    /// cancel are re-checked and the read retried, so they take effect within the
+    /// stall window instead of the full request timeout. Only a sustained
+    /// zero-data gap, or a real I/O error, aborts the transfer. Returns the total
+    /// bytes downloaded, including the pre-seeded `start_downloaded` offset.
+    async fn pump_response<F>(
+        &self,
+        response: &mut reqwest::Response,
+        file: &mut std::fs::File,
+        control: &HttpTransferControl,
+        on_progress: &mut F,
+        mut downloaded: u64,
+        total: Option<u64>,
+    ) -> Result<u64, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        let mut rate = RateGauge::new();
+        let mut consecutive_stalls = 0u32;
+        loop {
+            control.wait_if_paused()?;
+            control.check_cancelled()?;
+            let chunk = match tokio::time::timeout(READ_STALL_TIMEOUT, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => return Err(EngineError::Failed(error.to_string())),
+                Err(_) => {
+                    // A stalled body yields a zero-data inactivity timeout. Pause
+                    // and cancel are only observable between reads, so re-check
+                    // them and retry; fail only after a sustained zero-data gap.
+                    control.wait_if_paused()?;
+                    control.check_cancelled()?;
+                    consecutive_stalls = consecutive_stalls.saturating_add(1);
+                    if consecutive_stalls >= MAX_CONSECUTIVE_STALLS {
+                        return Err(EngineError::Failed(
+                            "stalled HTTP download: no data on the connection".to_owned(),
+                        ));
+                    }
+                    continue;
+                }
+            };
+            consecutive_stalls = 0;
+            control.check_cancelled()?;
+            control.wait_for_budget(chunk.len() as u64)?;
+            file.write_all(&chunk)
+                .map_err(|error| EngineError::Failed(error.to_string()))?;
+            downloaded += chunk.len() as u64;
+            let speed = rate.observe(downloaded);
+            let eta = total.and_then(|expected| {
+                (speed > 0).then(|| (expected.saturating_sub(downloaded)) / speed.max(1))
+            });
+            on_progress(Progress::with_rate(downloaded, total, speed, eta))?;
+            control.wait_if_paused()?;
+            // Complete a known-length response as soon as the declared length is
+            // reached, so a keep-alive connection need not close to signal EOF.
+            if total.is_some_and(|expected| downloaded >= expected) {
+                break;
+            }
+        }
+        Ok(downloaded)
+    }
+
     fn download_to_resumable_inner<F>(
+        &self,
+        source: &str,
+        destination: &str,
+        partial_path: &Path,
+        control: &HttpTransferControl,
+        on_progress: &mut F,
+        completion: Option<&CompletionContext>,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|error| {
+                EngineError::Failed(format!("could not start the HTTP runtime: {error}"))
+            })?;
+        runtime.block_on(self.download_to_resumable_inner_async(
+            source,
+            destination,
+            partial_path,
+            control,
+            &mut *on_progress,
+            completion,
+        ))
+    }
+
+    async fn download_to_resumable_inner_async<F>(
         &self,
         source: &str,
         destination: &str,
@@ -1062,6 +1277,7 @@ impl HttpEngine {
         }
         let mut response = request
             .send()
+            .await
             .map_err(|error| EngineError::Failed(error.to_string()))?;
 
         let (offset, total, append) = if let Some((saved, offset)) = candidate.take() {
@@ -1108,6 +1324,7 @@ impl HttpEngine {
                     .client
                     .get(source)
                     .send()
+                    .await
                     .map_err(|error| EngineError::Failed(error.to_string()))?;
                 if !response.status().is_success() {
                     return Err(EngineError::Failed(format!(
@@ -1161,29 +1378,15 @@ impl HttpEngine {
         };
 
         let mut temporary = ResumableDownload::open(partial_path, append)?;
-        let mut downloaded = offset;
-        let mut buffer = [0u8; 32 * 1024];
+        let downloaded = {
+            let writer = temporary
+                .file
+                .as_mut()
+                .expect("resumable download file is open");
+            self.pump_response(&mut response, writer, control, on_progress, offset, total)
+                .await?
+        };
         let result = (|| {
-            loop {
-                control.wait_if_paused()?;
-                let read = response
-                    .read(&mut buffer)
-                    .map_err(|error| EngineError::Failed(error.to_string()))?;
-                if read == 0 {
-                    break;
-                }
-                control.check_cancelled()?;
-                temporary
-                    .file
-                    .as_mut()
-                    .expect("resumable download file is open")
-                    .write_all(&buffer[..read])
-                    .map_err(|error| EngineError::Failed(error.to_string()))?;
-                downloaded += read as u64;
-                on_progress(Progress::new(downloaded, total))?;
-                control.wait_if_paused()?;
-            }
-
             control.check_cancelled()?;
             if total.is_some_and(|expected| downloaded != expected) {
                 return Err(EngineError::Failed(format!(
@@ -1236,11 +1439,37 @@ impl HttpEngine {
     where
         F: FnMut(Progress) -> Result<(), EngineError>,
     {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|error| {
+                EngineError::Failed(format!("could not start the HTTP runtime: {error}"))
+            })?;
+        runtime.block_on(self.download_to_with_control_inner_async(
+            source,
+            destination,
+            control,
+            &mut *on_progress,
+        ))
+    }
+
+    async fn download_to_with_control_inner_async<F>(
+        &self,
+        source: &str,
+        destination: &str,
+        control: &HttpTransferControl,
+        on_progress: &mut F,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
         control.check_cancelled()?;
         let mut response = self
             .client
             .get(source)
             .send()
+            .await
             .map_err(|error| EngineError::Failed(error.to_string()))?;
         control.check_cancelled()?;
         if !response.status().is_success() {
@@ -1253,28 +1482,14 @@ impl HttpEngine {
         let total = response.content_length();
         let destination = Path::new(destination);
         let mut temporary = TemporaryDownload::create(destination)?;
-        let mut downloaded = 0u64;
-        let mut buffer = [0u8; 32 * 1024];
-
-        loop {
-            control.wait_if_paused()?;
-            let read = response
-                .read(&mut buffer)
-                .map_err(|error| EngineError::Failed(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            control.check_cancelled()?;
-            temporary
+        let downloaded = {
+            let writer = temporary
                 .file
                 .as_mut()
-                .expect("temporary download file is open")
-                .write_all(&buffer[..read])
-                .map_err(|error| EngineError::Failed(error.to_string()))?;
-            downloaded += read as u64;
-            on_progress(Progress::new(downloaded, total))?;
-            control.wait_if_paused()?;
-        }
+                .expect("temporary download file is open");
+            self.pump_response(&mut response, writer, control, on_progress, 0, total)
+                .await?
+        };
 
         control.check_cancelled()?;
         if let Some(expected) = total
@@ -1451,6 +1666,7 @@ impl TaskMapping {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::thread;
@@ -1576,6 +1792,45 @@ mod tests {
             let _ = stream.write_all(&second);
         });
         (address, first_sent, release_tx, worker)
+    }
+
+    /// Serves `body` in fixed-size chunks separated by a delay, optionally with
+    /// a `Content-Length`. The gap makes the transfer's rate observable and
+    /// deterministic for speed, ETA, and pacing assertions.
+    fn serve_drip(
+        body: Vec<u8>,
+        chunk: usize,
+        inter_chunk_delay: Duration,
+        declare_length: bool,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}/file", listener.local_addr().unwrap());
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let _ = read_http_request(&mut stream);
+            let length_line = if declare_length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            let header = format!("HTTP/1.1 200 OK\r\n{length_line}Connection: close\r\n\r\n");
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.flush().unwrap();
+            let mut position = 0;
+            while position < body.len() {
+                let end = (position + chunk).min(body.len());
+                stream.write_all(&body[position..end]).unwrap();
+                stream.flush().unwrap();
+                position = end;
+                if position < body.len() {
+                    thread::sleep(inter_chunk_delay);
+                }
+            }
+        });
+        (address, worker)
     }
 
     fn pause_at_first_progress(
@@ -1716,6 +1971,241 @@ mod tests {
         server.join().unwrap();
         assert_eq!(result, Progress::new(64 * 1024, Some(64 * 1024)));
         assert_eq!(std::fs::read(&destination).unwrap().len(), 64 * 1024);
+    }
+
+    #[test]
+    fn http_engine_reports_speed_and_eta_for_declared_length() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let body = vec![b'x'; 64 * 1024];
+        // Drip slowly enough that the trailing rate window fills in (> 0.5 s).
+        let (source, server) = serve_drip(body.clone(), 1024, Duration::from_millis(20), true);
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let source_for_worker = source.clone();
+        let destination_for_worker = destination.to_str().unwrap().to_owned();
+        let worker = thread::spawn(move || {
+            HttpEngine::new().download_to_with_progress(
+                &source_for_worker,
+                &destination_for_worker,
+                |progress| {
+                    progress_tx.send(progress.clone()).unwrap();
+                    Ok(())
+                },
+            )
+        });
+        let mut observed_speed = 0;
+        let mut saw_total = false;
+        let mut saw_eta = false;
+        while let Ok(progress) = progress_rx.recv() {
+            observed_speed = observed_speed.max(progress.speed_bytes_per_second);
+            saw_total = saw_total || progress.total_bytes == Some(body.len() as u64);
+            saw_eta = saw_eta || progress.eta_seconds.is_some();
+        }
+        server.join().unwrap();
+        let result = worker.join().unwrap().unwrap();
+        assert_eq!(result.downloaded_bytes, body.len() as u64);
+        assert_eq!(result.total_bytes, Some(body.len() as u64));
+        assert!(
+            saw_total,
+            "a declared-length response must report its total"
+        );
+        assert!(
+            observed_speed > 0,
+            "a transferring response must report a real speed"
+        );
+        assert!(
+            saw_eta,
+            "a declared-length transfer with a positive speed must report an ETA"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap().len(), body.len());
+    }
+
+    #[test]
+    fn http_engine_omits_eta_for_unknown_length() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let body = vec![b'y'; 64 * 1024];
+        let (source, server) = serve_drip(body.clone(), 1024, Duration::from_millis(20), false);
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let source_for_worker = source.clone();
+        let destination_for_worker = destination.to_str().unwrap().to_owned();
+        let worker = thread::spawn(move || {
+            HttpEngine::new().download_to_with_progress(
+                &source_for_worker,
+                &destination_for_worker,
+                |progress| {
+                    progress_tx.send(progress.clone()).unwrap();
+                    Ok(())
+                },
+            )
+        });
+        let mut observed_speed = 0;
+        while let Ok(progress) = progress_rx.recv() {
+            observed_speed = observed_speed.max(progress.speed_bytes_per_second);
+            assert!(
+                progress.eta_seconds.is_none(),
+                "an unknown-length body must not report an ETA"
+            );
+        }
+        server.join().unwrap();
+        let result = worker.join().unwrap().unwrap();
+        assert_eq!(result.downloaded_bytes, body.len() as u64);
+        assert_eq!(result.total_bytes, None);
+        assert!(
+            observed_speed > 0,
+            "speed is still measurable even without a declared length"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap().len(), body.len());
+    }
+
+    #[test]
+    fn http_engine_paces_downloads_to_the_bandwidth_cap() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let body = vec![b'c'; 4000];
+        // Serve as fast as possible so the cap, not the server, is the limiter.
+        let (source, server) = serve_drip(body.clone(), 1000, Duration::ZERO, true);
+        let control = HttpTransferControl::new();
+        control.set_bytes_per_second(Some(1000)); // 1 KB/s
+        let source_for_worker = source.clone();
+        let destination_for_worker = destination.to_str().unwrap().to_owned();
+        let control_for_worker = control.clone();
+        let worker = thread::spawn(move || {
+            HttpEngine::new().download_to_with_control(
+                &source_for_worker,
+                &destination_for_worker,
+                &control_for_worker,
+                |_| Ok(()),
+            )
+        });
+        let started = Instant::now();
+        let result = worker.join().unwrap().unwrap();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+        assert_eq!(result.downloaded_bytes, body.len() as u64);
+        // 4000 bytes at 1000 B/s of pacing takes ~4 s; allow slack on both ends.
+        assert!(
+            elapsed >= Duration::from_secs(2),
+            "a 1000 B/s capped download finished in {elapsed:?}, exceeding its budget"
+        );
+        assert!(
+            elapsed <= Duration::from_secs(10),
+            "a capped download took {elapsed:?}; the pacer over-slept"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap().len(), body.len());
+    }
+
+    #[test]
+    fn http_engine_does_not_slow_unlimited_downloads() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let body = vec![b'u'; 64 * 1024];
+        let (source, server) = serve_drip(body.clone(), 8192, Duration::from_millis(5), true);
+        let control = HttpTransferControl::new(); // no cap: unlimited
+        let source_for_worker = source.clone();
+        let destination_for_worker = destination.to_str().unwrap().to_owned();
+        let control_for_worker = control.clone();
+        let worker = thread::spawn(move || {
+            HttpEngine::new().download_to_with_control(
+                &source_for_worker,
+                &destination_for_worker,
+                &control_for_worker,
+                |_| Ok(()),
+            )
+        });
+        let started = Instant::now();
+        let result = worker.join().unwrap().unwrap();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+        assert_eq!(result.downloaded_bytes, body.len() as u64);
+        // The served body is ready in well under a second; an uncapped
+        // transfer must not add any pacing delay.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "an uncapped download was artificially slowed to {elapsed:?}"
+        );
+        assert_eq!(std::fs::read(&destination).unwrap().len(), body.len());
+    }
+
+    #[test]
+    fn http_engine_breaks_a_stalled_read_to_pause_within_budget() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let (source, first_sent, release, server) =
+            serve_in_chunks(vec![b'a'; 1024], vec![b'b'; 1024]);
+        let control = HttpTransferControl::new();
+        let source_for_worker = source.clone();
+        let destination_for_worker = destination.to_str().unwrap().to_owned();
+        let control_for_worker = control.clone();
+        let worker = thread::spawn(move || {
+            HttpEngine::new().download_to_with_control(
+                &source_for_worker,
+                &destination_for_worker,
+                &control_for_worker,
+                |_| Ok(()),
+            )
+        });
+        first_sent.recv().unwrap();
+        // The worker holds the first chunk and is blocked in a stalled read.
+        let requester = thread::spawn({
+            let control = control.clone();
+            move || {
+                let started = Instant::now();
+                let result = control.request_pause();
+                (started.elapsed(), result)
+            }
+        });
+        let (elapsed, pause_result) = requester.join().unwrap();
+        assert!(pause_result.is_ok(), "pause failed: {pause_result:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "pause took {elapsed:?} to take effect on a stalled read"
+        );
+        assert!(control.is_paused());
+        // Finish the transfer and release the fixture.
+        let _ = control.resume();
+        release.send(()).unwrap();
+        let _ = worker.join().unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn http_engine_breaks_a_stalled_read_to_cancel_within_budget() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file.bin");
+        let (source, first_sent, release, server) =
+            serve_in_chunks(vec![b'a'; 1024], vec![b'b'; 1024]);
+        let control = HttpTransferControl::new();
+        let source_for_worker = source.clone();
+        let destination_for_worker = destination.to_str().unwrap().to_owned();
+        let control_for_worker = control.clone();
+        let worker = thread::spawn(move || {
+            HttpEngine::new().download_to_with_control(
+                &source_for_worker,
+                &destination_for_worker,
+                &control_for_worker,
+                |_| Ok(()),
+            )
+        });
+        first_sent.recv().unwrap();
+        let cancel_time = Instant::now();
+        control.cancel();
+        let result = worker.join().unwrap();
+        let elapsed = cancel_time.elapsed();
+        assert!(
+            matches!(result, Err(EngineError::Cancelled)),
+            "expected cancellation, got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancellation took {elapsed:?} to abort a stalled read"
+        );
+        assert!(
+            !destination.exists(),
+            "a cancelled download leaves no destination file"
+        );
+        release.send(()).unwrap(); // unblock the fixture server
+        server.join().unwrap();
     }
 
     #[test]

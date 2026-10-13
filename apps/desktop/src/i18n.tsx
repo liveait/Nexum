@@ -88,6 +88,7 @@ const zhCN = {
   "RPC, storage and diagnostics": "RPC、存储和诊断",
   "Version, updates and documentation": "版本、更新和文档",
   "Unknown size": "大小未知",
+  "{eta} left": "还剩 {eta}",
   "Not updated yet": "尚未更新",
   "Updated just now": "刚刚更新",
   "Updated {count}s ago": "{count} 秒前更新",

@@ -219,6 +219,8 @@ pub struct TaskView {
     pub state: String,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
+    pub speed_bytes_per_second: u64,
+    pub eta_seconds: Option<u64>,
     pub error: Option<String>,
 }
 impl From<&nexum_task::DownloadTask> for TaskView {
@@ -230,6 +232,8 @@ impl From<&nexum_task::DownloadTask> for TaskView {
             state: format!("{:?}", task.state),
             downloaded_bytes: task.progress.downloaded_bytes,
             total_bytes: task.progress.total_bytes,
+            speed_bytes_per_second: task.progress.speed_bytes_per_second,
+            eta_seconds: task.progress.eta_seconds,
             error: task.last_error.clone(),
         }
     }

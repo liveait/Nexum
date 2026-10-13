@@ -68,4 +68,22 @@ impl Progress {
             ..Self::default()
         }
     }
+
+    /// A progress snapshot carrying an observed transfer rate. `eta_seconds`
+    /// should be `Some` only when the total length is trustworthy (`total_bytes`
+    /// `Some`) and `speed_bytes_per_second` is non-zero; callers keep it `None`
+    /// for unknown-length (e.g. chunked) responses.
+    pub fn with_rate(
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        speed_bytes_per_second: u64,
+        eta_seconds: Option<u64>,
+    ) -> Self {
+        Self {
+            downloaded_bytes,
+            total_bytes,
+            speed_bytes_per_second,
+            eta_seconds,
+        }
+    }
 }
