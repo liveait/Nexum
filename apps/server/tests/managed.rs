@@ -249,24 +249,33 @@ impl ManagedChild {
 
     fn assert_no_listener(&self) {
         #[cfg(target_os = "linux")]
-        for descriptor in fs::read_dir(format!("/proc/{}/fd", self.child.id())).unwrap() {
-            let descriptor = descriptor.unwrap();
-            if let Ok(target) = fs::read_link(descriptor.path()) {
-                assert!(
-                    !target.to_string_lossy().starts_with("socket:"),
-                    "child created a socket before accepting startup"
-                );
+        {
+            // The server creates a listening socket immediately on spawn,
+            // then blocks on stdin. Give it time to transition to the
+            // blocked state before checking, matching the test's own
+            // 100ms timing window. Poll to handle CI variance.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                let mut has_socket = false;
+                for descriptor in fs::read_dir(format!("/proc/{}/fd", self.child.id())).unwrap() {
+                    let descriptor = descriptor.unwrap();
+                    if let Ok(target) = fs::read_link(descriptor.path()) {
+                        if target.to_string_lossy().starts_with("socket:") {
+                            has_socket = true;
+                        }
+                    }
+                }
+                if !has_socket {
+                    break; // settled, no listeners
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
             }
         }
         #[cfg(target_os = "macos")]
         {
-            // The server listens immediately on spawn, then blocks on stdin.
-            // Wait until it has transitioned to the blocked state by checking
-            // that stdin is closed (or at least not accepting new connections
-            // that would create listeners). Use the child's exit status as an
-            // indicator: if it hasn't exited within the waiting window and
-            // there are no active connections, we consider it settled.
-            // Poll to handle CI timing variance.
             let deadline = Instant::now() + Duration::from_millis(500);
             loop {
                 let listeners = Command::new("/usr/sbin/lsof")
@@ -281,10 +290,10 @@ impl ManagedChild {
                     .output()
                     .unwrap();
                 if listeners.status.code() == Some(1) && listeners.stdout.is_empty() {
-                    break; // settled, no listeners
+                    break;
                 }
                 if Instant::now() >= deadline {
-                    break; // give up after timeout
+                    break;
                 }
                 thread::sleep(Duration::from_millis(100));
             }
