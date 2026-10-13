@@ -288,8 +288,7 @@ impl ServerProcess {
     ) -> Value {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream.set_read_timeout(Some(read_timeout)).unwrap();
-        let request =
-            json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
         writeln!(stream, "{request}").unwrap();
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).unwrap();
@@ -898,10 +897,8 @@ fn bandwidth_config_throttles_download_and_reports_capped_speed() {
     // 5000 bytes at a 1 KiB/s cap takes ~5 s of pacing.
     let body: &'static [u8] = Box::leak(vec![b't'; 5000].into_boxed_slice());
     let fixture = HttpFixture::new(body);
-    let mut server = ServerProcess::start_with_extra_args(
-        dir.path(),
-        &["--bandwidth", "fixed", "1000"],
-    );
+    let mut server =
+        ServerProcess::start_with_extra_args(dir.path(), &["--bandwidth", "fixed", "1000"]);
     let destination = dir.output_path("bandwidth");
     server.call(
         "task.create",
@@ -925,7 +922,10 @@ fn bandwidth_config_throttles_download_and_reports_capped_speed() {
         if task["state"].as_str() == Some("Completed") {
             break;
         }
-        assert!(Instant::now() < deadline, "capped download did not complete in time");
+        assert!(
+            Instant::now() < deadline,
+            "capped download did not complete in time"
+        );
         thread::sleep(Duration::from_millis(50));
     }
     let elapsed = started.elapsed();
@@ -1070,7 +1070,10 @@ fn removing_a_stalled_download_returns_within_budget() {
             .all(|task| task["id"] != "stalled-remove"),
         "a removed task must leave the task list"
     );
-    assert!(!destination.exists(), "a removed download leaves no destination file");
+    assert!(
+        !destination.exists(),
+        "a removed download leaves no destination file"
+    );
     fixture.finish();
     server.stop();
 }

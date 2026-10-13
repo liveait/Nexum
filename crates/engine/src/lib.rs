@@ -1173,8 +1173,7 @@ impl HttpEngine {
             downloaded += chunk.len() as u64;
             let speed = rate.observe(downloaded);
             let eta = total.and_then(|expected| {
-                (speed > 0)
-                    .then(|| ((expected.saturating_sub(downloaded)) / speed.max(1)) as u64)
+                (speed > 0).then(|| (expected.saturating_sub(downloaded)) / speed.max(1))
             });
             on_progress(Progress::with_rate(downloaded, total, speed, eta))?;
             control.wait_if_paused()?;
@@ -1817,8 +1816,7 @@ mod tests {
             } else {
                 String::new()
             };
-            let header =
-                format!("HTTP/1.1 200 OK\r\n{length_line}Connection: close\r\n\r\n");
+            let header = format!("HTTP/1.1 200 OK\r\n{length_line}Connection: close\r\n\r\n");
             stream.write_all(header.as_bytes()).unwrap();
             stream.flush().unwrap();
             let mut position = 0;
@@ -2007,9 +2005,18 @@ mod tests {
         let result = worker.join().unwrap().unwrap();
         assert_eq!(result.downloaded_bytes, body.len() as u64);
         assert_eq!(result.total_bytes, Some(body.len() as u64));
-        assert!(saw_total, "a declared-length response must report its total");
-        assert!(observed_speed > 0, "a transferring response must report a real speed");
-        assert!(saw_eta, "a declared-length transfer with a positive speed must report an ETA");
+        assert!(
+            saw_total,
+            "a declared-length response must report its total"
+        );
+        assert!(
+            observed_speed > 0,
+            "a transferring response must report a real speed"
+        );
+        assert!(
+            saw_eta,
+            "a declared-length transfer with a positive speed must report an ETA"
+        );
         assert_eq!(std::fs::read(&destination).unwrap().len(), body.len());
     }
 
@@ -2018,8 +2025,7 @@ mod tests {
         let dir = TestDir::new();
         let destination = dir.0.join("file.bin");
         let body = vec![b'y'; 64 * 1024];
-        let (source, server) =
-            serve_drip(body.clone(), 1024, Duration::from_millis(20), false);
+        let (source, server) = serve_drip(body.clone(), 1024, Duration::from_millis(20), false);
         let (progress_tx, progress_rx) = mpsc::channel();
         let source_for_worker = source.clone();
         let destination_for_worker = destination.to_str().unwrap().to_owned();
@@ -2159,7 +2165,7 @@ mod tests {
         // Finish the transfer and release the fixture.
         let _ = control.resume();
         release.send(()).unwrap();
-        worker.join().unwrap();
+        let _ = worker.join().unwrap();
         server.join().unwrap();
     }
 
@@ -2194,7 +2200,10 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "cancellation took {elapsed:?} to abort a stalled read"
         );
-        assert!(!destination.exists(), "a cancelled download leaves no destination file");
+        assert!(
+            !destination.exists(),
+            "a cancelled download leaves no destination file"
+        );
         release.send(()).unwrap(); // unblock the fixture server
         server.join().unwrap();
     }

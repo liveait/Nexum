@@ -460,12 +460,10 @@ fn parse_bandwidth_policy(value: &str) -> Result<BandwidthPolicyKind, String> {
     if value.eq_ignore_ascii_case("unlimited") {
         return Ok(BandwidthPolicyKind::Unlimited);
     }
-    let (kind, rest) = value
-        .split_once(char::is_whitespace)
-        .ok_or_else(|| {
-            "bandwidth must be `unlimited`, `fixed <bytes/sec>`, or `shared <total bytes/sec>`"
-                .to_owned()
-        })?;
+    let (kind, rest) = value.split_once(char::is_whitespace).ok_or_else(|| {
+        "bandwidth must be `unlimited`, `fixed <bytes/sec>`, or `shared <total bytes/sec>`"
+            .to_owned()
+    })?;
     let bytes = rest
         .trim()
         .parse::<u64>()
@@ -690,7 +688,7 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
         // (complete/finish). A cancelled transfer's slot is released by the remove
         // RPC handler, which refreshes the caps itself.
         if !cancelled {
-            refresh_http_bandwidth(&*state);
+            refresh_http_bandwidth(&state);
         }
     }
 
@@ -1033,7 +1031,7 @@ fn pause_active_http_task(
         Ok(()) => {
             {
                 let locked = state.lock().expect("server state mutex poisoned");
-                refresh_http_bandwidth(&*locked);
+                refresh_http_bandwidth(&locked);
             }
             dispatch_available_http_tasks(state);
             reply_bool(request, true)
@@ -1078,13 +1076,15 @@ fn resume_active_http_task(
             // so it does not run ahead on the pre-resume cap.
             {
                 let locked = state.lock().expect("server state mutex poisoned");
-                refresh_http_bandwidth(&*locked);
+                refresh_http_bandwidth(&locked);
             }
             match transfer.control.resume() {
                 Ok(()) => reply_bool(request, true),
                 Err(error) => reply_error(
                     request,
-                    RpcErrorObject::invalid_params(format!("could not resume HTTP transfer: {error}")),
+                    RpcErrorObject::invalid_params(format!(
+                        "could not resume HTTP transfer: {error}"
+                    )),
                 ),
             }
         }
@@ -1201,7 +1201,7 @@ fn remove_active_http_task(
 
     {
         let locked = state.lock().expect("server state mutex poisoned");
-        refresh_http_bandwidth(&*locked);
+        refresh_http_bandwidth(&locked);
     }
     dispatch_available_http_tasks(state);
     match cleanup_error {
@@ -1876,9 +1876,7 @@ fn parse_cli_args(args: &[String]) -> Result<(ServerConfig, PathBuf, bool, bool)
                     config.bandwidth_policy = BandwidthPolicyKind::Unlimited;
                 } else {
                     i += 1;
-                    let limit = args
-                        .get(i)
-                        .ok_or("--bandwidth requires a numeric limit")?;
+                    let limit = args.get(i).ok_or("--bandwidth requires a numeric limit")?;
                     config.bandwidth_policy = parse_bandwidth_policy(&format!("{kind} {limit}"))?;
                 }
             }
@@ -1946,7 +1944,9 @@ fn print_usage() {
     eprintln!("  --auth-token TOKEN  Authentication secret");
     eprintln!("  --rate-limit-rps N  Maximum average RPC requests per second (requires burst)");
     eprintln!("  --rate-limit-burst N Maximum RPC burst size (requires rps)");
-    eprintln!("  --bandwidth P       Download bandwidth: `unlimited`, `fixed <bytes/sec>`, or `shared <total bytes/sec>` (default: unlimited)");
+    eprintln!(
+        "  --bandwidth P       Download bandwidth: `unlimited`, `fixed <bytes/sec>`, or `shared <total bytes/sec>` (default: unlimited)"
+    );
     eprintln!("  --tls-cert-path PATH PEM server certificate (enables TLS with key)");
     eprintln!("  --tls-key-path PATH PEM server private key (enables TLS with certificate)");
     eprintln!("  --version           Show server and protocol version");
@@ -1988,10 +1988,7 @@ fn lock_data_dir(data_dir: &Path) -> io::Result<File> {
     Ok(lock_file)
 }
 
-fn open_core(
-    data_dir: &Path,
-    bandwidth_policy: BandwidthPolicyKind,
-) -> io::Result<ServerCore> {
+fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Result<ServerCore> {
     let database_path = data_dir.join(DATABASE_FILE);
     let repository = SqliteRepository::open(&database_path)
         .map_err(|error| io::Error::other(format!("{}: {error}", database_path.display())))?;
@@ -2254,14 +2251,24 @@ mod tests {
         );
         assert_eq!(
             parse_bandwidth_policy("fixed 1000").unwrap(),
-            BandwidthPolicyKind::Fixed { bytes_per_second: 1000 }
+            BandwidthPolicyKind::Fixed {
+                bytes_per_second: 1000
+            }
         );
         assert_eq!(
             parse_bandwidth_policy("shared 2000").unwrap(),
-            BandwidthPolicyKind::Shared { total_bytes_per_second: 2000 }
+            BandwidthPolicyKind::Shared {
+                total_bytes_per_second: 2000
+            }
         );
-        assert!(parse_bandwidth_policy("fixed").is_err(), "fixed requires a limit");
-        assert!(parse_bandwidth_policy("fixed 0").is_err(), "a zero limit is rejected");
+        assert!(
+            parse_bandwidth_policy("fixed").is_err(),
+            "fixed requires a limit"
+        );
+        assert!(
+            parse_bandwidth_policy("fixed 0").is_err(),
+            "a zero limit is rejected"
+        );
         assert!(
             parse_bandwidth_policy("fixed -5").is_err(),
             "a negative limit is rejected"
@@ -2278,13 +2285,17 @@ mod tests {
             parse_cli_args(&managed_args(&["--bandwidth", "fixed", "1000"])).unwrap();
         assert_eq!(
             config.bandwidth_policy,
-            BandwidthPolicyKind::Fixed { bytes_per_second: 1000 }
+            BandwidthPolicyKind::Fixed {
+                bytes_per_second: 1000
+            }
         );
         let (config, _, _, _) =
             parse_cli_args(&managed_args(&["--bandwidth", "shared", "2000"])).unwrap();
         assert_eq!(
             config.bandwidth_policy,
-            BandwidthPolicyKind::Shared { total_bytes_per_second: 2000 }
+            BandwidthPolicyKind::Shared {
+                total_bytes_per_second: 2000
+            }
         );
         let (config, _, _, _) =
             parse_cli_args(&managed_args(&["--bandwidth", "unlimited"])).unwrap();
