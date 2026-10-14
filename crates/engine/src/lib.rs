@@ -80,6 +80,10 @@ pub struct EngineCapabilities {
     pub supports_resume: bool,
     pub supports_remove: bool,
     pub supports_progress: bool,
+    pub supports_range: bool,
+    pub supports_retry: bool,
+    pub supported_protocols: &'static [&'static str],
+    pub max_concurrent_segments: usize,
 }
 
 impl EngineCapabilities {
@@ -88,6 +92,10 @@ impl EngineCapabilities {
         supports_resume: false,
         supports_remove: false,
         supports_progress: true,
+        supports_range: false,
+        supports_retry: false,
+        supported_protocols: &[],
+        max_concurrent_segments: 0,
     };
 }
 
@@ -134,6 +142,55 @@ pub trait EngineAdapter {
     fn remove(&mut self, task: &EngineTask) -> Result<(), EngineError>;
     fn progress(&self, task: &EngineTask) -> Result<Progress, EngineError>;
     fn state(&self, task: &EngineTask) -> Result<EngineTaskState, EngineError>;
+}
+
+/// Session for a long-running transfer. Implemented by engines that support
+/// asynchronous, interruptible downloads (e.g. the HTTP engine).
+pub trait TransferSession: Send + Sync {
+    /// Returns the current progress (bytes transferred, total if known, rate).
+    fn progress(&self) -> Progress;
+
+    /// Returns the current state (Queued, Downloading, Paused, Completed, Failed).
+    fn state(&self) -> EngineTaskState;
+
+    /// Returns any error that caused the transfer to fail (None if still
+    /// running or completed).
+    fn error(&self) -> Option<String>;
+
+    /// Requests a boundary pause. Returns Ok(()) if the engine supports pause,
+    /// or Err if not. The transfer continues until the next chunk boundary.
+    fn pause(&self) -> Result<(), EngineError>;
+
+    /// Resumes a paused transfer. Returns Ok(()) if the engine supports resume,
+    /// or Err if not. The transfer continues from the pause point on the next
+    /// chunk boundary.
+    fn resume(&self) -> Result<(), EngineError>;
+
+    /// Requests cancellation. The engine should stop as soon as possible,
+    /// cleaning up any partial files and leaving the destination untouched.
+    fn cancel(&self);
+
+    /// Blocks until the transfer reaches a terminal state (Completed or Failed)
+    /// and returns (state, progress).
+    fn wait(self: Box<Self>) -> (EngineTaskState, Progress);
+}
+
+/// Trait for engines that support cross-restart resume after a process restart.
+pub trait ResumableEngine: Send + Sync {
+    /// Returns metadata needed to resume this transfer, or None if the transfer
+    /// has not yet started or cannot be resumed.
+    fn resume_metadata(&self) -> Option<ResumeMetadata>;
+}
+
+/// Metadata needed to resume a transfer after a process restart.
+#[derive(Clone, Debug)]
+pub struct ResumeMetadata {
+    pub source: String,
+    pub destination: String,
+    pub downloaded_bytes: u64,
+    pub expected_total: Option<u64>,
+    pub validator: Option<HttpResumeValidator>,
+    pub partial_path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,6 +269,10 @@ impl EngineAdapter for InMemoryEngine {
             supports_resume: true,
             supports_remove: true,
             supports_progress: true,
+            supports_range: false,
+            supports_retry: false,
+            supported_protocols: &[],
+            max_concurrent_segments: 0,
         }
     }
 
@@ -1127,6 +1188,48 @@ impl HttpEngine {
         Self::default()
     }
 
+    /// Returns capabilities for the HTTP engine, including range support and
+    /// multi-connection parameters now added to the enhanced `EngineCapabilities`.
+    pub fn capabilities(&self) -> EngineCapabilities {
+        EngineCapabilities {
+            supports_pause: true,
+            supports_resume: true,
+            supports_remove: true,
+            supports_progress: true,
+            supports_range: true,
+            supports_retry: true,
+            supported_protocols: &["http", "https"],
+            max_concurrent_segments: 8,
+        }
+    }
+
+    /// Returns metadata needed to resume an HTTP transfer after a process
+    /// restart, or None if no resumable transfer file exists.
+    pub fn resume_metadata(
+        &self,
+        partial_path: impl AsRef<Path>,
+    ) -> Result<Option<ResumeMetadata>, EngineError> {
+        let partial = partial_path.as_ref();
+        match read_resume_metadata(partial) {
+            Ok(Some(metadata)) => {
+                let partial_length = std::fs::symlink_metadata(partial)
+                    .ok()
+                    .filter(|m| m.file_type().is_file())
+                    .map(|m| m.len());
+                Ok(Some(ResumeMetadata {
+                    source: metadata.source,
+                    destination: metadata.destination,
+                    downloaded_bytes: partial_length.unwrap_or(0),
+                    expected_total: metadata.expected_length,
+                    validator: Some(metadata.validator),
+                    partial_path: partial.to_path_buf(),
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(_) => Ok(None),
+        }
+    }
+
     fn entry(
         &self,
         task: &EngineTask,
@@ -1930,12 +2033,7 @@ impl EngineAdapter for HttpEngine {
     }
 
     fn capabilities(&self) -> EngineCapabilities {
-        EngineCapabilities {
-            supports_pause: false,
-            supports_resume: false,
-            supports_remove: true,
-            supports_progress: true,
-        }
+        HttpEngine::capabilities(self)
     }
 
     fn start(
