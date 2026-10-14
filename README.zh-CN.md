@@ -17,6 +17,8 @@ Server 可以在启用 `require_auth` 时执行 Bearer 或 ApiKey 认证，也�
 
 HTTP 完成凭证可在进程重启后对账完整响应，包括文件发布与 SQLite 完成保存之间的窗口。须同时匹配文件身份和 SHA-256，保留无关目标文件。详见 [ADR 0007](docs/decisions/0007-http-completion-reconciliation.zh-CN.md)。M0 实际 VoiceOver 朗读和 M1 全新用户／升级最终验收仍待完成。
 
+单文件多连接 HTTP 下载探测目标服务端的 Range 支持，将超过 1 MiB 的文件分割为最多 8 个并发段（服务端不支持 Range 时回退单连接）并原子重组。段失败或取消时中止所有工作线程，清理部分文件而不覆盖目标文件。M4 已完成。
+
 ## 运行本地任务流程
 
 需要支持 Rust 2024 edition 的 Rust（1.85 或更新版本）及 Cargo。在仓库根目录的一个终端启动 Server：

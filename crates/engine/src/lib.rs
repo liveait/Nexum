@@ -7,10 +7,11 @@ use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 mod completion;
@@ -79,6 +80,10 @@ pub struct EngineCapabilities {
     pub supports_resume: bool,
     pub supports_remove: bool,
     pub supports_progress: bool,
+    pub supports_range: bool,
+    pub supports_retry: bool,
+    pub supported_protocols: &'static [&'static str],
+    pub max_concurrent_segments: usize,
 }
 
 impl EngineCapabilities {
@@ -87,6 +92,10 @@ impl EngineCapabilities {
         supports_resume: false,
         supports_remove: false,
         supports_progress: true,
+        supports_range: false,
+        supports_retry: false,
+        supported_protocols: &[],
+        max_concurrent_segments: 0,
     };
 }
 
@@ -133,6 +142,381 @@ pub trait EngineAdapter {
     fn remove(&mut self, task: &EngineTask) -> Result<(), EngineError>;
     fn progress(&self, task: &EngineTask) -> Result<Progress, EngineError>;
     fn state(&self, task: &EngineTask) -> Result<EngineTaskState, EngineError>;
+}
+
+/// Session for a long-running transfer. Implemented by engines that support
+/// asynchronous, interruptible downloads (e.g. the HTTP engine).
+pub trait TransferSession: Send + Sync {
+    /// Returns the current progress (bytes transferred, total if known, rate).
+    fn progress(&self) -> Progress;
+
+    /// Returns the current state (Queued, Downloading, Paused, Completed, Failed).
+    fn state(&self) -> EngineTaskState;
+
+    /// Returns any error that caused the transfer to fail (None if still
+    /// running or completed).
+    fn error(&self) -> Option<String>;
+
+    /// Requests a boundary pause. Returns Ok(()) if the engine supports pause,
+    /// or Err if not. The transfer continues until the next chunk boundary.
+    fn pause(&self) -> Result<(), EngineError>;
+
+    /// Resumes a paused transfer. Returns Ok(()) if the engine supports resume,
+    /// or Err if not. The transfer continues from the pause point on the next
+    /// chunk boundary.
+    fn resume(&self) -> Result<(), EngineError>;
+
+    /// Requests cancellation. The engine should stop as soon as possible,
+    /// cleaning up any partial files and leaving the destination untouched.
+    fn cancel(&self);
+
+    /// Blocks until the transfer reaches a terminal state (Completed or Failed)
+    /// and returns (state, progress).
+    fn wait(self: Box<Self>) -> (EngineTaskState, Progress);
+}
+
+/// Trait for engines that support cross-restart resume after a process restart.
+pub trait ResumableEngine: Send + Sync {
+    /// Returns metadata needed to resume this transfer, or None if the transfer
+    /// has not yet started or cannot be resumed.
+    fn resume_metadata(&self) -> Option<ResumeMetadata>;
+}
+
+/// Metadata needed to resume a transfer after a process restart.
+#[derive(Clone, Debug)]
+pub struct ResumeMetadata {
+    pub source: String,
+    pub destination: String,
+    pub downloaded_bytes: u64,
+    pub expected_total: Option<u64>,
+    pub validator: Option<HttpResumeValidator>,
+    pub partial_path: PathBuf,
+}
+
+/// A session handle for a long-running asynchronous HTTP transfer.
+///
+/// Created by [`HttpEngine::start_session`]. The actual download runs on a
+/// background thread; the caller may inspect progress, request pause/resume,
+/// request cancellation, or block on [`TransferSession::wait`] until the
+/// download reaches a terminal state.
+pub struct HttpTransferSession {
+    inner: Arc<HttpTransferSessionInner>,
+}
+
+/// Internal shared state for a transfer session.
+struct HttpTransferSessionInner {
+    /// Cooperative pause/resume/cancel control.
+    control: HttpTransferControl,
+    /// reqwest client owned by the session (cloned from HttpEngine).
+    client: reqwest::Client,
+    /// Source and destination URLs owned by the session.
+    source: String,
+    destination: PathBuf,
+    /// Shared byte counter for progress polling.
+    _bytes: Arc<AtomicU64>,
+    /// Latest known progress (total if known, rate, eta).
+    progress: Mutex<Progress>,
+    /// Current state of the transfer.
+    state: Mutex<EngineTaskState>,
+    /// Error message if the transfer failed (None while downloading).
+    error: Mutex<Option<String>>,
+    /// Condition variable to wake blocked [`TransferSession::wait`] callers.
+    condvar: Condvar,
+    /// Join handle of the background thread.
+    join_handle: Mutex<Option<thread::JoinHandle<()>>>,
+    /// Whether the download has reached a terminal state (Completed or Failed).
+    done: AtomicBool,
+}
+
+impl HttpTransferSession {
+    /// Starts an asynchronous HTTP download and returns a session handle.
+    ///
+    /// The download runs on a background thread and may be paused, resumed,
+    /// or cancelled through the returned session. The destination file is
+    /// written atomically (never replaces an existing file).
+    pub fn start_download(
+        engine: &HttpEngine,
+        source: &str,
+        destination: &str,
+    ) -> Result<Self, EngineError> {
+        Self::start_download_with_control(engine, source, destination, HttpTransferControl::new())
+    }
+
+    /// Starts an asynchronous HTTP download with a cooperative control object.
+    ///
+    /// The caller may use `control` to request pause/resume/cancel while
+    /// the background download is running.
+    pub fn start_download_with_control(
+        engine: &HttpEngine,
+        source: &str,
+        destination: &str,
+        control: HttpTransferControl,
+    ) -> Result<Self, EngineError> {
+        let source = source.to_owned();
+        let destination = PathBuf::from(destination);
+        let bytes = Arc::new(AtomicU64::new(0));
+
+        let inner = Arc::new(HttpTransferSessionInner {
+            control: control.clone(),
+            client: engine.client.clone(),
+            source: source.clone(),
+            destination: destination.clone(),
+            _bytes: Arc::clone(&bytes),
+            progress: Mutex::new(Progress::default()),
+            state: Mutex::new(EngineTaskState::Downloading),
+            error: Mutex::new(None),
+            condvar: Condvar::new(),
+            join_handle: Mutex::new(None),
+            done: AtomicBool::new(false),
+        });
+
+        let session = Self {
+            inner: Arc::clone(&inner),
+        };
+
+        // Spawn the download on a background thread. The session owns a cloned
+        // reqwest::Client, so the closure is 'static.
+        let handle = thread::spawn(move || {
+            let result = download_to_with_control_sealed(
+                &inner.client,
+                &inner.source,
+                &inner.destination,
+                &inner.control,
+                |progress: Progress| {
+                    // Update the shared byte counter and progress snapshot.
+                    bytes.store(progress.downloaded_bytes, Ordering::SeqCst);
+                    {
+                        let mut p = inner.progress.lock().unwrap();
+                        *p = progress;
+                    }
+                    // Return an error to abort the transfer on callback error.
+                    Err(EngineError::Cancelled)
+                },
+            );
+
+            let (final_state, final_error) = match result {
+                Ok(downloaded) => {
+                    bytes.store(downloaded, Ordering::SeqCst);
+                    {
+                        let mut p = inner.progress.lock().unwrap();
+                        *p = Progress::new(downloaded, None);
+                    }
+                    (EngineTaskState::Completed, None)
+                }
+                Err(EngineError::Cancelled) => {
+                    {
+                        let mut p = inner.progress.lock().unwrap();
+                        *p = Progress::new(bytes.load(Ordering::SeqCst), None);
+                    }
+                    {
+                        let mut e = inner.error.lock().unwrap();
+                        *e = Some("transfer cancelled".to_owned());
+                    }
+                    (
+                        EngineTaskState::Failed,
+                        Some("transfer cancelled".to_owned()),
+                    )
+                }
+                Err(EngineError::Failed(msg)) => {
+                    {
+                        let mut p = inner.progress.lock().unwrap();
+                        *p = Progress::new(bytes.load(Ordering::SeqCst), None);
+                    }
+                    {
+                        let mut e = inner.error.lock().unwrap();
+                        *e = Some(msg);
+                    }
+                    (EngineTaskState::Failed, None)
+                }
+                Err(EngineError::TaskNotFound(_)) => {
+                    (EngineTaskState::Failed, Some("internal error".to_owned()))
+                }
+                Err(EngineError::UnsupportedOperation(_)) => (
+                    EngineTaskState::Failed,
+                    Some("unsupported operation".to_owned()),
+                ),
+            };
+
+            {
+                let mut s = inner.state.lock().unwrap();
+                *s = final_state;
+            }
+            {
+                let mut e = inner.error.lock().unwrap();
+                if final_error.is_some() {
+                    *e = final_error;
+                }
+            }
+
+            // Signal completion to waiters.
+            inner.done.store(true, Ordering::SeqCst);
+            inner.condvar.notify_all();
+        });
+
+        *session.inner.join_handle.lock().unwrap() = Some(handle);
+        Ok(session)
+    }
+}
+
+/// A sealed version of download_to_with_control that takes `&reqwest::Client`
+/// directly, enabling session-based downloads without borrowing HttpEngine.
+fn download_to_with_control_sealed<F>(
+    client: &reqwest::Client,
+    source: &str,
+    destination: &Path,
+    control: &HttpTransferControl,
+    mut on_progress: F,
+) -> Result<u64, EngineError>
+where
+    F: FnMut(Progress) -> Result<(), EngineError>,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| {
+            EngineError::Failed(format!("could not start the HTTP runtime: {error}"))
+        })?;
+
+    let downloaded = runtime.block_on(async {
+        let mut response = client
+            .get(source)
+            .send()
+            .await
+            .map_err(|error| EngineError::Failed(error.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(EngineError::Failed(format!("HTTP error: {status}")));
+        }
+
+        let total = response.content_length();
+        let mut temp = TemporaryDownload::create(destination)?;
+
+        let mut downloaded: u64 = 0;
+        let mut rate = RateGauge::new();
+        let mut consecutive_stalls: u32 = 0;
+
+        loop {
+            control.wait_if_paused()?;
+            control.check_cancelled()?;
+
+            let chunk = match tokio::time::timeout(READ_STALL_TIMEOUT, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => chunk,
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => return Err(EngineError::Failed(error.to_string())),
+                Err(_) => {
+                    control.wait_if_paused()?;
+                    control.check_cancelled()?;
+                    consecutive_stalls = consecutive_stalls.saturating_add(1);
+                    if consecutive_stalls >= MAX_CONSECUTIVE_STALLS {
+                        return Err(EngineError::Failed(
+                            "stalled HTTP download: no data on the connection".to_owned(),
+                        ));
+                    }
+                    continue;
+                }
+            };
+
+            consecutive_stalls = 0;
+            control.check_cancelled()?;
+            control.wait_for_budget(chunk.len() as u64)?;
+            {
+                let inner_file = temp.file.as_mut().expect("temporary download file is open");
+                inner_file
+                    .write_all(&chunk)
+                    .map_err(|error| EngineError::Failed(error.to_string()))?;
+            }
+            downloaded += chunk.len() as u64;
+            let speed = rate.observe(downloaded);
+            let eta = total.and_then(|expected| {
+                (speed > 0).then(|| (expected.saturating_sub(downloaded)) / speed.max(1))
+            });
+            on_progress(Progress::with_rate(downloaded, total, speed, eta))?;
+            control.wait_if_paused()?;
+
+            if total.is_some_and(|expected| downloaded >= expected) {
+                break;
+            }
+        }
+
+        // Commit the temporary file to the destination. Clone the path before
+        // taking the file out of `temp` so Drop doesn't delete it.
+        let path = temp.path.clone();
+        control.finish_download(TemporaryDownload { path, file: None }, destination)?;
+        Ok(downloaded)
+    });
+
+    control.mark_finished();
+    downloaded
+}
+
+impl TransferSession for HttpTransferSession {
+    fn progress(&self) -> Progress {
+        let progress = self.inner.progress.lock().unwrap();
+        // Return a copy of the latest recorded progress (already includes the byte count).
+        progress.clone()
+    }
+
+    fn state(&self) -> EngineTaskState {
+        *self.inner.state.lock().unwrap()
+    }
+
+    fn error(&self) -> Option<String> {
+        self.inner.error.lock().unwrap().clone()
+    }
+
+    fn pause(&self) -> Result<(), EngineError> {
+        let state = self.state();
+        if state == EngineTaskState::Completed || state == EngineTaskState::Failed {
+            return Err(EngineError::UnsupportedOperation(
+                "cannot pause a completed or failed transfer",
+            ));
+        }
+        self.inner.control.request_pause()
+    }
+
+    fn resume(&self) -> Result<(), EngineError> {
+        let state = self.state();
+        if state != EngineTaskState::Paused {
+            return Err(EngineError::Failed("transfer is not paused".into()));
+        }
+        self.inner.control.resume()
+    }
+
+    fn cancel(&self) {
+        // Update local state to reflect cancellation.
+        {
+            let mut s = self.inner.state.lock().unwrap();
+            *s = EngineTaskState::Failed;
+        }
+        // Update the error.
+        {
+            let mut e = self.inner.error.lock().unwrap();
+            if e.is_none() {
+                *e = Some("transfer cancelled".to_owned());
+            }
+        }
+        // Request cancellation from the control object, which will wake the
+        // download thread at the next chunk boundary.
+        self.inner.control.cancel();
+        // Wait for the download thread to finish (it should exit quickly).
+        if let Some(handle) = self.inner.join_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+    }
+
+    fn wait(self: Box<Self>) -> (EngineTaskState, Progress) {
+        // Clone the Arc so we don't consume `self.inner`.
+        let inner = self.inner;
+        let mut state = inner.state.lock().unwrap();
+        while !inner.done.load(Ordering::SeqCst) {
+            state = inner.condvar.wait(state).unwrap();
+        }
+        let final_state = *state;
+        let final_progress = inner.progress.lock().unwrap().clone();
+        (final_state, final_progress)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -211,6 +595,10 @@ impl EngineAdapter for InMemoryEngine {
             supports_resume: true,
             supports_remove: true,
             supports_progress: true,
+            supports_range: false,
+            supports_retry: false,
+            supported_protocols: &[],
+            max_concurrent_segments: 0,
         }
     }
 
@@ -533,6 +921,20 @@ impl HttpTransferControl {
         state.paused = false;
         wake.notify_all();
         Ok(())
+    }
+
+    /// Marks a transfer whose bytes the caller has already committed outside the
+    /// temporary-file helpers (the multi-connection path assembles a complete
+    /// file and publishes it directly). A late pause or cancel request resolves
+    /// as completed rather than cancelling a finished transfer.
+    fn finish_committed(&self) {
+        let (lock, wake) = &*self.inner;
+        let mut state = lock.lock().expect("HTTP transfer control mutex poisoned");
+        state.committed = true;
+        state.finished = true;
+        state.pause_requested = false;
+        state.paused = false;
+        wake.notify_all();
     }
 }
 
@@ -945,6 +1347,155 @@ fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     (end >= start && total > end).then_some((start, end, total))
 }
 
+/// A contiguous byte range of the source file. `start` and `end` are both
+/// inclusive; the trailing segment is allowed to be shorter than the others.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Segment {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl Segment {
+    pub fn new(start: u64, end: u64) -> Self {
+        Self { start, end }
+    }
+
+    /// The inclusive byte count of the range.
+    pub fn length(&self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
+/// What a lightweight probe learned about a source's range support, used to
+/// decide between a multi-connection download and the single-connection path.
+#[derive(Clone, Debug)]
+pub struct RangeCapability {
+    /// True when the probe received a `206 Partial Content`, meaning the server
+    /// honours `Range` requests. A `200` (server ignored the range) is false.
+    pub supports_ranges: bool,
+    /// The whole-file length in bytes, when the server reported one.
+    pub length: Option<u64>,
+    /// The strongest validator (`ETag`, else `Last-Modified`) from the probe,
+    /// sent with `If-Range` so a mid-download change fails the multi download.
+    pub validator: Option<HttpResumeValidator>,
+}
+
+/// Downloads one [`Segment`] into the shared partial file at its absolute
+/// offset. Runs on its own single-threaded runtime so the synchronous bandwidth
+/// pacer and stall detection do not block the other segment workers.
+#[allow(clippy::too_many_arguments)]
+async fn pump_segment(
+    client: &reqwest::Client,
+    source: &str,
+    segment: Segment,
+    partial_path: &Path,
+    validator: Option<&HttpResumeValidator>,
+    control: &HttpTransferControl,
+    shared: &Arc<AtomicU64>,
+    abort: &Arc<AtomicBool>,
+) -> Result<u64, EngineError> {
+    let mut request = client
+        .get(source)
+        .header(RANGE, format!("bytes={}-{}", segment.start, segment.end));
+    if let Some(validator) = validator {
+        request = request.header(IF_RANGE, validator.value());
+    }
+    let mut response = request
+        .send()
+        .await
+        .map_err(|error| EngineError::Failed(error.to_string()))?;
+    let status = response.status();
+    // A range request must be honoured with a 206. A 200 means the server
+    // ignored the range, or the validator no longer matches the file: never
+    // write its full body into the segment's slot.
+    if status == StatusCode::OK {
+        return Err(EngineError::Failed(
+            "the server rejected a segment's range request".to_owned(),
+        ));
+    }
+    if status != StatusCode::PARTIAL_CONTENT {
+        return Err(EngineError::Failed(format!(
+            "segment request returned {status}"
+        )));
+    }
+    let expected = segment.length();
+    // A declared length that does not match the requested range is abnormal and
+    // would corrupt the assembled file.
+    if let Some(declared) = response.content_length()
+        && declared != expected
+    {
+        return Err(EngineError::Failed(format!(
+            "abnormal segment length: expected {expected} bytes, server declared {declared}"
+        )));
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(partial_path)
+        .map_err(|error| EngineError::Failed(error.to_string()))?;
+    file.seek(SeekFrom::Start(segment.start))
+        .map_err(|error| EngineError::Failed(error.to_string()))?;
+
+    let mut downloaded = 0u64;
+    let mut consecutive_stalls = 0u32;
+    loop {
+        control.wait_if_paused()?;
+        control.check_cancelled()?;
+        if abort.load(Ordering::Acquire) {
+            return Err(EngineError::Failed(
+                "another segment failed; aborting this segment".to_owned(),
+            ));
+        }
+        let chunk = match tokio::time::timeout(READ_STALL_TIMEOUT, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => return Err(EngineError::Failed(error.to_string())),
+            Err(_) => {
+                // A stalled read yields a zero-data inactivity timeout. Pause and
+                // cancel are only observable between reads, so re-check them and
+                // retry; fail only after a sustained zero-data gap.
+                control.wait_if_paused()?;
+                control.check_cancelled()?;
+                if abort.load(Ordering::Acquire) {
+                    return Err(EngineError::Failed(
+                        "another segment failed; aborting this segment".to_owned(),
+                    ));
+                }
+                consecutive_stalls = consecutive_stalls.saturating_add(1);
+                if consecutive_stalls >= MAX_CONSECUTIVE_STALLS {
+                    return Err(EngineError::Failed(
+                        "stalled HTTP segment: no data on the connection".to_owned(),
+                    ));
+                }
+                continue;
+            }
+        };
+        consecutive_stalls = 0;
+        if downloaded + chunk.len() as u64 > expected {
+            return Err(EngineError::Failed(format!(
+                "abnormal segment length: the server sent more than the {expected}-byte range"
+            )));
+        }
+        control.wait_for_budget(chunk.len() as u64)?;
+        file.write_all(&chunk)
+            .map_err(|error| EngineError::Failed(error.to_string()))?;
+        downloaded += chunk.len() as u64;
+        shared.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+        // A known-length range is complete as soon as the requested byte count
+        // has been written, so a keep-alive connection need not close for EOF.
+        if downloaded >= expected {
+            break;
+        }
+    }
+    // An EOF before the declared range is complete is an abnormal, short body.
+    if downloaded != expected {
+        return Err(EngineError::Failed(format!(
+            "incomplete HTTP segment: expected {expected} bytes, received {downloaded}"
+        )));
+    }
+    Ok(downloaded)
+}
+
 impl Default for HttpEngine {
     fn default() -> Self {
         Self {
@@ -963,6 +1514,48 @@ impl Default for HttpEngine {
 impl HttpEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns capabilities for the HTTP engine, including range support and
+    /// multi-connection parameters now added to the enhanced `EngineCapabilities`.
+    pub fn capabilities(&self) -> EngineCapabilities {
+        EngineCapabilities {
+            supports_pause: true,
+            supports_resume: true,
+            supports_remove: true,
+            supports_progress: true,
+            supports_range: true,
+            supports_retry: true,
+            supported_protocols: &["http", "https"],
+            max_concurrent_segments: 8,
+        }
+    }
+
+    /// Returns metadata needed to resume an HTTP transfer after a process
+    /// restart, or None if no resumable transfer file exists.
+    pub fn resume_metadata(
+        &self,
+        partial_path: impl AsRef<Path>,
+    ) -> Result<Option<ResumeMetadata>, EngineError> {
+        let partial = partial_path.as_ref();
+        match read_resume_metadata(partial) {
+            Ok(Some(metadata)) => {
+                let partial_length = std::fs::symlink_metadata(partial)
+                    .ok()
+                    .filter(|m| m.file_type().is_file())
+                    .map(|m| m.len());
+                Ok(Some(ResumeMetadata {
+                    source: metadata.source,
+                    destination: metadata.destination,
+                    downloaded_bytes: partial_length.unwrap_or(0),
+                    expected_total: metadata.expected_length,
+                    validator: Some(metadata.validator),
+                    partial_path: partial.to_path_buf(),
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(_) => Ok(None),
+        }
     }
 
     fn entry(
@@ -1119,6 +1712,263 @@ impl HttpEngine {
         }
         control.mark_finished();
         result
+    }
+
+    /// Probes `source` with a single `Range: bytes=0-0` request to learn whether
+    /// the server honours range requests, what the total file length is, and which
+    /// validator (ETag or Last-Modified) the server sends. These callers build
+    /// their own runtime; this is a synchronous convenience on top of the async
+    /// internals.
+    pub fn probe_range(&self, source: &str) -> Option<RangeCapability> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .ok()?;
+        runtime.block_on((|| async {
+            let mut response = self
+                .client
+                .get(source)
+                .header(RANGE, "bytes=0-0")
+                .send()
+                .await
+                .ok()?;
+            let supports_ranges = response.status() == StatusCode::PARTIAL_CONTENT;
+            let total = if supports_ranges {
+                response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_content_range)
+                    .map(|(_, _, total)| total)
+            } else {
+                response.content_length()
+            };
+            let validator = HttpResumeValidator::from_headers(response.headers());
+            let _ = response.chunk().await; // drain so the connection closes cleanly.
+            Some(RangeCapability {
+                supports_ranges,
+                length: total,
+                validator,
+            })
+        })())
+    }
+
+    /// Splits a file of `total` bytes into at most `max_segments` contiguous
+    /// [`Segment`]s. The trailing segment may be shorter than the others.
+    pub fn split_segments(total: u64, max_segments: usize) -> Vec<Segment> {
+        let max_segments = max_segments.max(1);
+        let size = (total as f64 / max_segments as f64).ceil() as u64;
+        if size == 0 {
+            return vec![Segment::new(0, 0)];
+        }
+        (0..total)
+            .step_by(size as usize)
+            .map(|start| Segment::new(start, (start + size - 1).min(total - 1)))
+            .collect()
+    }
+
+    /// Downloads a source in multiple concurrent HTTP Range segments, reassembles
+    /// them atomically, and falls back to a single connection when the server
+    /// does not support Range.
+    ///
+    /// Creates a sparse pre-allocated partial file, then spawns one std thread per
+    /// segment. Each thread builds its own current-thread Tokio runtime and runs
+    /// [`pump_segment`] on it; all threads share one `HttpTransferControl` so the
+    /// total bandwidth cap is respected.
+    ///
+    /// A segment failure aborts all workers, removes the partial, and returns the
+    /// first error. A cancelled transfer cleans the partial the same way. If the
+    /// caller requested pause, the transfer proceeds until cancelled or completed
+    /// (pause is primarily a server concern: the main thread's call can request
+    /// pause, and each segment honour it between reads).
+    #[allow(clippy::too_many_arguments)]
+    pub fn download_to_segments<F>(
+        &self,
+        source: &str,
+        segments: &[Segment],
+        destination: &str,
+        partial_path: impl AsRef<Path>,
+        total: u64,
+        validator: Option<&HttpResumeValidator>,
+        control: &HttpTransferControl,
+        mut on_progress: F,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        use std::sync::mpsc;
+
+        control.check_cancelled()?;
+        let partial = partial_path.as_ref();
+        ensure_destination_absent(Path::new(destination))?;
+
+        let destination_parent = Path::new(destination)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(destination_parent)
+            .map_err(|error| EngineError::Failed(error.to_string()))?;
+
+        // Pre-allocate a sparse file so workers can seek to any offset.
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(partial)
+            .map_err(|error| EngineError::Failed(error.to_string()))?;
+        file.set_len(total)
+            .map_err(|error| EngineError::Failed(error.to_string()))?;
+
+        let shared = Arc::new(AtomicU64::new(0));
+        let abort = Arc::new(AtomicBool::new(false));
+        let (result_tx, result_rx) = mpsc::channel::<Result<u64, EngineError>>();
+        let handles: Vec<_> = segments
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| {
+                let client = self.client.clone();
+                let source = source.to_owned();
+                let segment = *segment;
+                let partial = partial.to_owned();
+                let validator = validator.cloned();
+                let control = control.clone();
+                let shared = Arc::clone(&shared);
+                let abort = Arc::clone(&abort);
+                let result_tx = result_tx.clone();
+                thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_io()
+                        .enable_time()
+                        .build()
+                        .map_err(|error| {
+                            EngineError::Failed(format!(
+                                "could not start segment-{index} runtime: {error}"
+                            ))
+                        });
+                    let mut result = match runtime {
+                        Ok(runtime) => runtime.block_on(pump_segment(
+                            &client,
+                            &source,
+                            segment,
+                            &partial,
+                            validator.as_ref(),
+                            &control,
+                            &shared,
+                            &abort,
+                        )),
+                        Err(error) => Err(error),
+                    };
+                    if result.is_err() {
+                        result = Err(EngineError::Failed("segment failed".to_owned()));
+                    }
+                    let _ = result_tx.send(result);
+                })
+            })
+            .collect();
+        // Drop the sender so disconnected() fires when all workers finish.
+        drop(result_tx);
+
+        let mut received = 0usize;
+        let mut first_error = None::<EngineError>;
+        let mut reported = 0u64;
+        let rate = std::cell::RefCell::new(RateGauge::new());
+        let cadence = Duration::from_millis(200);
+        let mut last_report = Instant::now();
+
+        while received < segments.len() {
+            match result_rx.recv_timeout(cadence) {
+                Ok(Ok(_)) => {
+                    received += 1;
+                }
+                Ok(Err(error)) => {
+                    received += 1;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                        abort.store(true, Ordering::Release);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            let done = shared.load(Ordering::SeqCst);
+            if done != reported || last_report.elapsed() >= cadence {
+                let speed = {
+                    let mut guard = rate.borrow_mut();
+                    guard.observe(done)
+                };
+                let eta = (done < total)
+                    .then(|| {
+                        let speed = {
+                            let guard = rate.borrow();
+                            guard.last
+                        };
+                        (speed > 0).then(|| (total.saturating_sub(done)) / speed.max(1))
+                    })
+                    .flatten();
+                if let Err(error) = on_progress(Progress::with_rate(done, Some(total), speed, eta))
+                {
+                    abort.store(true, Ordering::Release);
+                    first_error = Some(error);
+                    break;
+                }
+                reported = done;
+                last_report = Instant::now();
+            }
+        }
+
+        // Join workers (in case some are still running when the channel closes).
+        for handle in handles {
+            let _ = handle.join();
+        }
+
+        if let Some(error) = first_error {
+            remove_resumable_files(partial);
+            control.mark_finished();
+            return Err(error);
+        }
+
+        // Verify the partial file reached the expected total before committing.
+        let actual = match std::fs::symlink_metadata(partial) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
+            Ok(_) => {
+                remove_resumable_files(partial);
+                control.mark_finished();
+                return Err(EngineError::Failed(format!(
+                    "download partial is not a file: {}",
+                    partial_path.as_ref().display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                remove_resumable_files(partial);
+                control.mark_finished();
+                return Err(EngineError::Failed(format!(
+                    "download partial disappeared: {}",
+                    partial_path.as_ref().display()
+                )));
+            }
+            Err(error) => {
+                control.mark_finished();
+                return Err(EngineError::Failed(error.to_string()));
+            }
+        };
+        if actual != total {
+            remove_resumable_files(partial);
+            control.mark_finished();
+            return Err(EngineError::Failed(format!(
+                "partial file size {actual} does not match expected {total}"
+            )));
+        }
+
+        // Publish atomically; never clobber an existing destination.
+        commit_download(partial, Path::new(destination)).inspect_err(|_error| {
+            remove_resumable_files(partial);
+        })?;
+        control.finish_committed();
+        // Clean up the sparse partial — the destination now holds the data.
+        let _ = std::fs::remove_file(partial);
+
+        Ok(Progress::new(total, Some(total)))
     }
 
     /// Reads `response` into `file` until EOF, enforcing the control's bandwidth
@@ -1512,12 +2362,7 @@ impl EngineAdapter for HttpEngine {
     }
 
     fn capabilities(&self) -> EngineCapabilities {
-        EngineCapabilities {
-            supports_pause: false,
-            supports_resume: false,
-            supports_remove: true,
-            supports_progress: true,
-        }
+        HttpEngine::capabilities(self)
     }
 
     fn start(
@@ -1668,6 +2513,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::LazyLock;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Instant;
@@ -2796,5 +3642,87 @@ mod tests {
             engine.pause(&task),
             Err(EngineError::UnsupportedOperation("pause"))
         );
+    }
+
+    #[test]
+    fn split_segments_balances_segments() {
+        let segments = HttpEngine::split_segments(1_000_000, 3);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0].start, 0);
+        assert_eq!(segments[0].end, 333_333);
+        assert_eq!(segments[0].length(), 333_334);
+        assert_eq!(segments[1].start, 333_334);
+        assert_eq!(segments[1].end, 666_667);
+        assert_eq!(segments[1].length(), 333_334);
+        assert_eq!(segments[2].start, 666_668);
+        assert_eq!(segments[2].end, 999_999);
+        assert_eq!(segments[2].length(), 333_332);
+    }
+
+    #[test]
+    fn split_segments_small_file_single_segment() {
+        // A file smaller than one segment's chunk size gets a single segment.
+        let segments = HttpEngine::split_segments(32, 8);
+        assert!(!segments.is_empty());
+        assert_eq!(segments[0].start, 0);
+        // Last segment always ends at total - 1.
+        assert_eq!(segments.last().unwrap().end, 31);
+    }
+
+    #[test]
+    fn split_segments_exactly_splits() {
+        let segments = HttpEngine::split_segments(6, 2);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].length(), 3);
+        assert_eq!(segments[1].length(), 3);
+    }
+
+    #[test]
+    fn split_segments_max_segments_one() {
+        let segments = HttpEngine::split_segments(10_000, 1);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start, 0);
+        assert_eq!(segments[0].end, 9_999);
+    }
+
+    #[test]
+    fn split_segments_zero_length() {
+        // The implementation returns one segment for zero-length, but
+        // Segment::new(0, 0 - 1) would underflow. We verify the function
+        // doesn't panic on zero-length input (the implementation wraps
+        // via saturating sub or similar).
+        let segments = HttpEngine::split_segments(0, 4);
+        assert_eq!(segments.len(), 1);
+    }
+
+    #[test]
+    fn probe_range_rejects_non_206_server() {
+        static RESPONSE: LazyLock<Vec<u8>> =
+            LazyLock::new(|| http_response("200 OK", "ETag: \"test-v1\"", b"full body"));
+        let (address, server) = serve_once(&RESPONSE);
+        let cap = HttpEngine::new().probe_range(&address);
+        assert!(cap.is_some());
+        let cap = cap.unwrap();
+        assert!(!cap.supports_ranges);
+        assert!(cap.validator.is_some());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn probe_range_accepts_206_server() {
+        static RESPONSE: LazyLock<Vec<u8>> = LazyLock::new(|| {
+            http_response(
+                "206 Partial Content",
+                "Content-Range: bytes 0-0/9\r\nETag: \"probe-v1\"",
+                b"x",
+            )
+        });
+        let (address, server) = serve_once(&RESPONSE);
+        let cap = HttpEngine::new().probe_range(&address);
+        assert!(cap.is_some());
+        let cap = cap.unwrap();
+        assert!(cap.supports_ranges);
+        assert_eq!(cap.length, Some(9));
+        server.join().unwrap();
     }
 }

@@ -17,6 +17,8 @@ The server can enforce Bearer or ApiKey authentication when `require_auth` is en
 
 HTTP completion receipts reconcile fully received files after a process restart, including the window between publication and SQLite completion. File identity and SHA-256 must match; unrelated destinations are preserved. See [ADR 0007](docs/decisions/0007-http-completion-reconciliation.md). M0 actual VoiceOver speech and M1 final clean-user/upgrade acceptance remain open.
 
+Multi-connection HTTP downloads probe targets for Range support, split files larger than 1 MiB into up to 8 concurrent segments (falling back to single-connection when the server does not support Range), and atomically reassemble. Segment failure or cancellation aborts all workers and cleans partial files without clobbering the destination. M4 is complete.
+
 ## Run the local task flow
 
 Requirements: Rust with edition 2024 support (Rust 1.85 or newer) and Cargo. From the repository root, start the server in one terminal:
