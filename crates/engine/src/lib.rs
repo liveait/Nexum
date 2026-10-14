@@ -209,9 +209,9 @@ struct HttpTransferSessionInner {
     control: HttpTransferControl,
     /// reqwest client owned by the session (cloned from HttpEngine).
     client: reqwest::Client,
-    /// Source and destination URLs owned by the session.
+    /// Source and destination paths owned by the session.
     source: String,
-    destination: PathBuf,
+    _destination: PathBuf,
     /// Shared byte counter for progress polling.
     _bytes: Arc<AtomicU64>,
     /// Latest known progress (total if known, rate, eta).
@@ -275,7 +275,7 @@ impl HttpTransferSession {
             control: control.clone(),
             client: engine.client.clone(),
             source: source.clone(),
-            destination: destination.clone(),
+            _destination: destination.clone(),
             _bytes: Arc::clone(&bytes),
             progress: Mutex::new(Progress::default()),
             state: Mutex::new(EngineTaskState::Downloading),
@@ -377,110 +377,11 @@ impl HttpTransferSession {
     }
 }
 
-/// A sealed version of download_to_with_control that takes `&reqwest::Client`
-/// directly, enabling session-based downloads without borrowing HttpEngine.
-fn download_to_with_control_sealed<F>(
-    client: &reqwest::Client,
-    source: &str,
-    destination: &Path,
-    control: &HttpTransferControl,
-    mut on_progress: F,
-) -> Result<u64, EngineError>
-where
-    F: FnMut(Progress) -> Result<(), EngineError>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|error| {
-            EngineError::Failed(format!("could not start the HTTP runtime: {error}"))
-        })?;
-
-    let downloaded = runtime.block_on(async {
-        let mut response = client
-            .get(source)
-            .send()
-            .await
-            .map_err(|error| EngineError::Failed(error.to_string()))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(EngineError::Failed(format!("HTTP error: {status}")));
-        }
-
-        let total = response.content_length();
-        let mut temp = TemporaryDownload::create(destination)?;
-
-        let mut downloaded: u64 = 0;
-        let mut rate = RateGauge::new();
-        let mut consecutive_stalls: u32 = 0;
-
-        loop {
-            control.wait_if_paused()?;
-            control.check_cancelled()?;
-
-            let chunk = match tokio::time::timeout(READ_STALL_TIMEOUT, response.chunk()).await {
-                Ok(Ok(Some(chunk))) => chunk,
-                Ok(Ok(None)) => break,
-                Ok(Err(error)) => return Err(EngineError::Failed(error.to_string())),
-                Err(_) => {
-                    control.wait_if_paused()?;
-                    control.check_cancelled()?;
-                    consecutive_stalls = consecutive_stalls.saturating_add(1);
-                    if consecutive_stalls >= MAX_CONSECUTIVE_STALLS {
-                        return Err(EngineError::Failed(
-                            "stalled HTTP download: no data on the connection".to_owned(),
-                        ));
-                    }
-                    continue;
-                }
-            };
-
-            consecutive_stalls = 0;
-            control.check_cancelled()?;
-            control.wait_for_budget(chunk.len() as u64)?;
-            {
-                let inner_file = temp.file.as_mut().expect("temporary download file is open");
-                inner_file
-                    .write_all(&chunk)
-                    .map_err(|error| EngineError::Failed(error.to_string()))?;
-            }
-            downloaded += chunk.len() as u64;
-            let speed = rate.observe(downloaded);
-            let eta = total.and_then(|expected| {
-                (speed > 0).then(|| (expected.saturating_sub(downloaded)) / speed.max(1))
-            });
-            on_progress(Progress::with_rate(downloaded, total, speed, eta))?;
-            control.wait_if_paused()?;
-
-            if total.is_some_and(|expected| downloaded >= expected) {
-                break;
-            }
-            // Also break if we've read all available data and no more content-length
-            if total.is_none() && downloaded > 0 {
-                // For responses without Content-Length, break after first iteration
-                // This is a fallback for edge cases
-            }
-        }
-
-        // Commit the temporary file to the destination. Clone the path before
-        // taking the file out of `temp` so Drop doesn't delete it.
-        let path = temp.path.clone();
-        control.finish_download(TemporaryDownload { path, file: None }, destination)?;
-        Ok(downloaded)
-    });
-
-    control.mark_finished();
-    downloaded
-}
-
 /// Sealed session download that writes directly to a **stable partial file**.
 ///
-/// Unlike `download_to_with_control_sealed` (which writes to a hidden temp file
-/// and commits at the end), this function opens the partial path directly and
-/// writes chunks into it. The partial file is committed to the destination at
-/// the end via `ResumableDownload::finish`.
+/// This function opens the partial path directly and writes chunks into it.
+/// The partial file is committed to the destination at the end via
+/// `ResumableDownload::finish`.
 fn download_to_partial_sealed<F>(
     client: &reqwest::Client,
     source: &str,
