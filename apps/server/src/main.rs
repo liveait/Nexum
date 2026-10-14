@@ -821,6 +821,7 @@ fn run_session_download(
 
 /// Completes an HTTP transfer: remove from active list, update task state,
 /// handle the completion journal, and refresh bandwidth caps.
+#[allow(clippy::too_many_arguments)]
 fn complete_http_transfer(
     state: &Arc<Mutex<ServerState>>,
     id: &TaskId,
