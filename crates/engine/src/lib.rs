@@ -195,10 +195,10 @@ pub struct ResumeMetadata {
 
 /// A session handle for a long-running asynchronous HTTP transfer.
 ///
-/// Created by [`HttpEngine::start_session`]. The actual download runs on a
-/// background thread; the caller may inspect progress, request pause/resume,
-/// request cancellation, or block on [`TransferSession::wait`] until the
-/// download reaches a terminal state.
+/// Created by [`HttpTransferSession::start_download`]. The actual download
+/// runs on a background thread; the caller may inspect progress, request
+/// pause/resume, request cancellation, or block on
+/// [`TransferSession::wait`] until the download reaches a terminal state.
 pub struct HttpTransferSession {
     inner: Arc<HttpTransferSessionInner>,
 }
@@ -209,9 +209,9 @@ struct HttpTransferSessionInner {
     control: HttpTransferControl,
     /// reqwest client owned by the session (cloned from HttpEngine).
     client: reqwest::Client,
-    /// Source and destination URLs owned by the session.
+    /// Source and destination paths owned by the session.
     source: String,
-    destination: PathBuf,
+    _destination: PathBuf,
     /// Shared byte counter for progress polling.
     _bytes: Arc<AtomicU64>,
     /// Latest known progress (total if known, rate, eta).
@@ -239,28 +239,43 @@ impl HttpTransferSession {
         source: &str,
         destination: &str,
     ) -> Result<Self, EngineError> {
-        Self::start_download_with_control(engine, source, destination, HttpTransferControl::new())
+        let partial_path = resumable_partial_path(Path::new(destination));
+        Self::start_download_with_partial(
+            engine,
+            source,
+            destination,
+            &partial_path,
+            HttpTransferControl::new(),
+            false, // no valid partial for a fresh download
+        )
     }
 
-    /// Starts an asynchronous HTTP download with a cooperative control object.
+    /// Starts an asynchronous HTTP download with a cooperative control object,
+    /// writing to a **stable partial file** at `partial_path` during download.
     ///
-    /// The caller may use `control` to request pause/resume/cancel while
-    /// the background download is running.
-    pub fn start_download_with_control(
+    /// The partial file is written directly (not via a hidden temp file) so
+    /// that pause / cancel / recovery logic can inspect it while the transfer
+    /// is still running. The final destination is only updated after the
+    /// complete response has been received.
+    pub fn start_download_with_partial(
         engine: &HttpEngine,
         source: &str,
         destination: &str,
+        partial_path: &Path,
         control: HttpTransferControl,
+        has_valid_partial: bool,
     ) -> Result<Self, EngineError> {
         let source = source.to_owned();
         let destination = PathBuf::from(destination);
+        let partial_path = partial_path.to_owned();
+        let has_valid = has_valid_partial;
         let bytes = Arc::new(AtomicU64::new(0));
 
         let inner = Arc::new(HttpTransferSessionInner {
             control: control.clone(),
             client: engine.client.clone(),
             source: source.clone(),
-            destination: destination.clone(),
+            _destination: destination.clone(),
             _bytes: Arc::clone(&bytes),
             progress: Mutex::new(Progress::default()),
             state: Mutex::new(EngineTaskState::Downloading),
@@ -277,11 +292,13 @@ impl HttpTransferSession {
         // Spawn the download on a background thread. The session owns a cloned
         // reqwest::Client, so the closure is 'static.
         let handle = thread::spawn(move || {
-            let result = download_to_with_control_sealed(
+            let result = download_to_partial_sealed(
                 &inner.client,
                 &inner.source,
-                &inner.destination,
+                &destination,
+                &partial_path,
                 &inner.control,
+                has_valid,
                 |progress: Progress| {
                     // Update the shared byte counter and progress snapshot.
                     bytes.store(progress.downloaded_bytes, Ordering::SeqCst);
@@ -289,8 +306,10 @@ impl HttpTransferSession {
                         let mut p = inner.progress.lock().unwrap();
                         *p = progress;
                     }
-                    // Return an error to abort the transfer on callback error.
-                    Err(EngineError::Cancelled)
+                    // Return Ok so the download continues; the session's internal
+                    // progress state is used by the polling thread to persist
+                    // progress to the database.
+                    Ok(())
                 },
             );
 
@@ -358,13 +377,18 @@ impl HttpTransferSession {
     }
 }
 
-/// A sealed version of download_to_with_control that takes `&reqwest::Client`
-/// directly, enabling session-based downloads without borrowing HttpEngine.
-fn download_to_with_control_sealed<F>(
+/// Sealed session download that writes directly to a **stable partial file**.
+///
+/// This function opens the partial path directly and writes chunks into it.
+/// The partial file is committed to the destination at the end via
+/// `ResumableDownload::finish`.
+fn download_to_partial_sealed<F>(
     client: &reqwest::Client,
     source: &str,
     destination: &Path,
+    partial_path: &Path,
     control: &HttpTransferControl,
+    has_valid_partial: bool,
     mut on_progress: F,
 ) -> Result<u64, EngineError>
 where
@@ -379,19 +403,86 @@ where
         })?;
 
     let downloaded = runtime.block_on(async {
-        let mut response = client
-            .get(source)
+        // Build the HTTP request: send Range + If-Range when resuming, plain GET otherwise.
+        let mut request = client.get(source);
+        let mut expecting_range = false;
+
+        if has_valid_partial {
+            // Read metadata to get the validator and check source matches.
+            let metadata = read_resume_metadata(partial_path)?
+                .ok_or_else(|| EngineError::Failed("resume metadata not found".into()))?;
+
+            // Verify source hasn't changed.
+            if metadata.source != source {
+                return Err(EngineError::Failed(
+                    "source mismatch: resume metadata source does not match current source".into(),
+                ));
+            }
+
+            // Get the current partial file size for the Range header.
+            let partial_size = std::fs::metadata(partial_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            // Send Range request with If-Range validator.
+            request = request.header(RANGE, format!("bytes={}-", partial_size));
+            request = request.header(IF_RANGE, metadata.validator.value());
+            expecting_range = true;
+        }
+
+        let mut response = request
             .send()
             .await
             .map_err(|error| EngineError::Failed(error.to_string()))?;
 
         let status = response.status();
-        if !status.is_success() {
-            return Err(EngineError::Failed(format!("HTTP error: {status}")));
+
+        // Check response status based on whether we sent a Range request.
+        if expecting_range {
+            // For Range requests, we expect 206 Partial Content.
+            // 200 OK means the server ignored the Range (source changed or no Range support).
+            if status == StatusCode::OK {
+                return Err(EngineError::Failed(
+                    "source mismatch: expected 206 Partial Content, got 200 OK".into(),
+                ));
+            }
+            if status != StatusCode::PARTIAL_CONTENT {
+                return Err(EngineError::Failed(format!(
+                    "range request failed with {status}"
+                )));
+            }
+        } else {
+            // For plain GET requests, any success status is acceptable.
+            if !status.is_success() {
+                return Err(EngineError::Failed(format!("HTTP error: {status}")));
+            }
         }
 
         let total = response.content_length();
-        let mut temp = TemporaryDownload::create(destination)?;
+
+        // Write/update metadata sidecar.
+        {
+            let validator = HttpResumeValidator::from_headers(response.headers());
+            let metadata = validator.map(|validator| HttpResumeMetadata {
+                source: source.to_owned(),
+                destination: destination.to_string_lossy().into_owned(),
+                validator,
+                expected_length: total,
+            });
+            if let Some(metadata) = metadata.as_ref() {
+                let _ = write_resume_metadata(partial_path, metadata);
+            } else {
+                let _ = std::fs::remove_file(resumable_metadata_path(partial_path));
+            }
+        }
+
+        // Never replace an existing destination file (only relevant for fresh downloads).
+        if !has_valid_partial {
+            ensure_destination_absent(destination)?;
+        }
+
+        // Open the partial file: append mode for resume, truncate for fresh download.
+        let mut temporary = ResumableDownload::open(partial_path, has_valid_partial)?;
 
         let mut downloaded: u64 = 0;
         let mut rate = RateGauge::new();
@@ -422,7 +513,10 @@ where
             control.check_cancelled()?;
             control.wait_for_budget(chunk.len() as u64)?;
             {
-                let inner_file = temp.file.as_mut().expect("temporary download file is open");
+                let inner_file = temporary
+                    .file
+                    .as_mut()
+                    .expect("resumable download file is open");
                 inner_file
                     .write_all(&chunk)
                     .map_err(|error| EngineError::Failed(error.to_string()))?;
@@ -438,12 +532,15 @@ where
             if total.is_some_and(|expected| downloaded >= expected) {
                 break;
             }
+            // Also break if we've read all available data and no more content-length
+            if total.is_none() && downloaded > 0 {
+                // For responses without Content-Length, break after first iteration
+                // This is a fallback for edge cases
+            }
         }
 
-        // Commit the temporary file to the destination. Clone the path before
-        // taking the file out of `temp` so Drop doesn't delete it.
-        let path = temp.path.clone();
-        control.finish_download(TemporaryDownload { path, file: None }, destination)?;
+        // Commit the partial file to the destination.
+        control.finish_resumable_download(temporary, destination)?;
         Ok(downloaded)
     });
 
@@ -976,6 +1073,14 @@ pub struct HttpResumeMetadata {
 }
 
 /// Returns the stable JSON sidecar path for a resumable partial file.
+pub fn resumable_partial_path(destination: &Path) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .expect("checked destination has a file name")
+        .to_string_lossy();
+    destination.with_file_name(format!(".{file_name}.nexum.part"))
+}
+
 pub fn resumable_metadata_path(partial_path: impl AsRef<Path>) -> PathBuf {
     let partial_path = partial_path.as_ref();
     let file_name = partial_path

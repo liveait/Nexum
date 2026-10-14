@@ -650,6 +650,7 @@ impl StalledOrigin {
                 body.len() - split
             )?;
             second.write_all(&body[split..])?;
+            second.flush()?;
             Ok(())
         });
         Self {
