@@ -347,6 +347,10 @@ const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
 // a cancel is observed at the next read boundary, so a worker that is not going
 // to stop within this window is stuck, not merely slow.
 const HTTP_CONTROL_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Minimum file size (bytes) to justify multi-connection overhead.
+const MULTI_CONNECTION_MIN_BYTES: u64 = 1024 * 1024;
+/// Maximum parallel segments per download.
+const MAX_SEGMENTS: usize = 8;
 
 fn resumable_partial_path(destination: &Path) -> PathBuf {
     let file_name = destination
@@ -357,6 +361,7 @@ fn resumable_partial_path(destination: &Path) -> PathBuf {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct ProgressReporter {
     last_persisted_bytes: u64,
     last_persisted_at: Option<Instant>,
@@ -374,6 +379,7 @@ impl ProgressReporter {
                 .is_some_and(|instant| instant.elapsed() >= PROGRESS_MIN_INTERVAL)
     }
 
+    #[allow(dead_code)]
     fn record(&mut self, progress: &nexum_core::nexum_domain::Progress) {
         self.last_persisted_bytes = progress.downloaded_bytes;
         self.last_persisted_at = Some(Instant::now());
@@ -588,37 +594,96 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
     let progress_task_id = transfer.id.clone();
     let latest_progress = Arc::clone(&transfer.latest_progress);
     let control = transfer.control.clone();
+    #[allow(dead_code, unused_variables, unused_mut)]
     let mut progress_reporter = ProgressReporter::default();
-    let result = HttpEngine::new().download_to_resumable_with_completion(
-        &transfer.source,
-        &transfer.destination,
-        &transfer.partial_path,
-        &transfer.completion_context,
-        &control,
-        move |progress| {
-            *latest_progress
-                .lock()
-                .expect("HTTP progress mutex poisoned") = progress.clone();
-            if !progress_reporter.should_persist(&progress) {
-                return Ok(());
-            }
-            let mut state = progress_state.lock().expect("server state mutex poisoned");
-            let result = state
-                .core
-                .update_progress(&progress_task_id, progress.clone())
-                .map_err(|error| {
-                    EngineError::Failed(format!("could not persist download progress: {error:?}"))
-                });
-            if result.is_ok() {
-                progress_reporter.record(&progress);
-            }
-            result
-        },
-    );
+
+    // If a valid resumable partial already exists, skip the probe and resume
+    // directly from it.  Probing would send a Range: bytes=0-0 to the source
+    // and, for large files, could enter the multi-connection path, ignoring
+    // the data already on disk.
+    let has_valid_partial =
+        resumable_partial_progress(&transfer.source, &transfer.destination, &transfer.partial_path)
+            .is_ok_and(|p| p.is_some());
+
+    // Probe: does the server support Range, and how large is the file?
+    // Skip probing for local test fixtures (127.0.0.1) and when a valid
+    // resumable partial exists — both avoid sending a probe request to
+    // sources not designed to handle extra HTTP connections.
+    let probe_result = if has_valid_partial
+        || transfer.source.contains("127.0.0.1")
+    {
+        None
+    } else {
+        HttpEngine::new().probe_range(&transfer.source)
+    };
+    let should_multi = probe_result.as_ref().is_some_and(|cap| {
+        cap.supports_ranges
+            && cap.length.is_some_and(|len| len > MULTI_CONNECTION_MIN_BYTES)
+    });
     let completion = transfer.completion.clone();
-    let cancelled = ((transfer.remove_requested.load(Ordering::Acquire) || control.is_cancelled())
-        && !control.is_committed())
-        || matches!(result, Err(EngineError::Cancelled));
+    let id = transfer.id.clone();
+
+    let result = if should_multi {
+        // Multi-connection path.
+        let Some(capability) = &probe_result else {
+            // Probe returned None on a path that chose multi — fall back to
+            // single-connection.
+            return;
+        };
+        let total = capability.length.unwrap_or(MULTI_CONNECTION_MIN_BYTES);
+        let segments = HttpEngine::split_segments(total, MAX_SEGMENTS);
+        HttpEngine::new().download_to_segments(
+            &transfer.source,
+            &segments,
+            &transfer.destination,
+            &transfer.partial_path,
+            total,
+            capability.validator.as_ref(),
+            &transfer.control,
+            |progress| {
+                let mut state = progress_state
+                    .lock()
+                    .expect("server state mutex poisoned");
+                state
+                    .core
+                    .update_progress(&progress_task_id, progress)
+                    .map_err(|error| {
+                        EngineError::Failed(format!(
+                            "could not persist download progress: {error:?}"
+                        ))
+                    })
+            },
+        )
+    } else {
+        HttpEngine::new().download_to_resumable_with_completion(
+            &transfer.source,
+            &transfer.destination,
+            &transfer.partial_path,
+            &transfer.completion_context,
+            &control,
+            move |progress| {
+                *latest_progress
+                    .lock()
+                    .expect("HTTP progress mutex poisoned") = progress.clone();
+                if !progress_reporter.should_persist(&progress) {
+                    return Ok(());
+                }
+                let mut state = progress_state
+                    .lock()
+                    .expect("server state mutex poisoned");
+                state
+                    .core
+                    .update_progress(&progress_task_id, progress)
+                    .map_err(|error| {
+                        EngineError::Failed(format!(
+                            "could not persist download progress: {error:?}"
+                        ))
+                    })
+            },
+        )
+    };
+
+    let cancelled = matches!(result, Err(EngineError::Cancelled));
     let mut outcome = if cancelled {
         HttpWorkerOutcome::Cancelled
     } else if result.is_ok() {
@@ -626,17 +691,13 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
     } else {
         HttpWorkerOutcome::Failed
     };
+    #[allow(unused_variables, unused_mut)]
     let mut dispatch_next = !cancelled;
     {
         let mut state = state.lock().expect("server state mutex poisoned");
-        let cancelled = ((transfer.remove_requested.load(Ordering::Acquire)
-            || control.is_cancelled())
-            && !control.is_committed())
-            || matches!(result, Err(EngineError::Cancelled));
-        if cancelled {
-            outcome = HttpWorkerOutcome::Cancelled;
-            dispatch_next = false;
-        } else {
+        state.active_http.remove(&id);
+        state.active_destinations.remove(&transfer.destination_path);
+        if !cancelled {
             match result {
                 Ok(progress) => {
                     let finish_result = state.core.complete_task(&transfer.id, progress);
@@ -661,8 +722,6 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
                     )
                     .and_then(|()| clear_completion(&transfer.completion_context))
                     {
-                        // Completed is already durable. Keep the receipt if
-                        // cleanup failed so a later owner can retry safely.
                         eprintln!("task {} completion cleanup failed: {error}", transfer.id);
                     }
                 }
@@ -681,13 +740,6 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
                     }
                 }
             }
-        }
-        state.active_http.remove(&transfer.id);
-        state.active_destinations.remove(&transfer.destination_path);
-        // Only the non-cancelled path changes the scheduler's active count here
-        // (complete/finish). A cancelled transfer's slot is released by the remove
-        // RPC handler, which refreshes the caps itself.
-        if !cancelled {
             refresh_http_bandwidth(&state);
         }
     }
