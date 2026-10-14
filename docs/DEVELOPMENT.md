@@ -52,7 +52,7 @@ apps/
   extension/              # Manifest V3 扩展 / Manifest V3 extension
 ```
 
-保持 UI 逻辑与 Core 分离，避免将具体 Engine 的实现细节放入 Domain Model。行为变化应补充针对性测试，并同步更新受影响单篇文档中的中英文内容。需要 RFC 的变更类型见[贡献指南](../CONTRIBUTING.zh-CN.md)。
+保持 UI 逻辑与 Core 分离，避免将具体 Engine 的实现细节放入 Domain Model。行为变化应补充针对性测试，并同步更新受影响单篇文档中的中英文内容。需要 RFC 的变更类型见[贡献指南](../CONTRIBUTING.md)。
 
 Keep UI logic out of Core and engine-specific details out of the Domain Model. Add focused tests and update the Chinese and English content in affected shared documents when behavior changes. Check [Contributing](../CONTRIBUTING.md) for changes that require an RFC.
 
@@ -61,7 +61,7 @@ Keep UI logic out of Core and engine-specific details out of the Domain Model. A
 
 ## 开发流程入口 / Development Workflow Entry
 
-任务定义、独立 worktree、多工具协作、审查、测试门槛、合并及清理规则统一见[贡献指南](../CONTRIBUTING.zh-CN.md#开发流程)。本指南维护环境和运行命令；开始任务时同时阅读根目录 `AGENTS.md`。
+任务定义、独立 worktree、多工具协作、审查、测试门槛、合并及清理规则统一见[贡献指南](../CONTRIBUTING.md#开发流程)。本指南维护环境和运行命令；开始任务时同时阅读根目录 `AGENTS.md`。
 
 See the [Contribution Workflow](../CONTRIBUTING.md#development-workflow) for task definition, separate worktrees, collaboration, review, test gates, merging, and cleanup. This guide maintains environment and execution commands; also read root `AGENTS.md` when starting a task.
 
@@ -111,7 +111,7 @@ For Desktop frontend changes, also run `pnpm install --frozen-lockfile`, `pnpm b
 
 ## 合并后的 CI 核对 / Checking CI After Merge
 
-完整规则见[贡献指南](../CONTRIBUTING.zh-CN.md#合并前与合并后都要检查-ci)。使用 GitHub CLI 时，在仓库根目录查询 PR 的真实合并提交：
+完整规则见[贡献指南](../CONTRIBUTING.md#合并前与合并后都要检查-ci)。使用 GitHub CLI 时，在仓库根目录查询 PR 的真实合并提交：
 
 See the [Contribution Workflow](../CONTRIBUTING.md#verify-ci-before-and-after-merging) for the full rules. With GitHub CLI, query the actual merged commit from the repository root:
 
@@ -175,7 +175,7 @@ To enable the Server TLS listener, set both `tls_cert_path` and `tls_key_path` i
 
 ### 托管 Server 协议测试 / Managed Server protocol tests
 
-`--managed` 是 App 子进程的私有启动入口，要求绝对数据目录和 stdin 启动帧，不能通过 `--auth-token` 或外部配置文件提供密钥。Desktop 已通过拥有句柄的子进程管理者调用此入口；令牌只由后端持有。控制帧、就绪响应、启动等待和退出边界见 [ADR 0006](decisions/0006-managed-macos-server.zh-CN.md#首个实现切片server-托管启动协议)。运行隔离的协议与进程测试：
+`--managed` 是 App 子进程的私有启动入口，要求绝对数据目录和 stdin 启动帧，不能通过 `--auth-token` 或外部配置文件提供密钥。Desktop 已通过拥有句柄的子进程管理者调用此入口；令牌只由后端持有。控制帧、就绪响应、启动等待和退出边界见 [ADR 0006](decisions/0006-managed-macos-server.md#首个实现切片server-托管启动协议)。运行隔离的协议与进程测试：
 
 `--managed` is a private App-child entry point requiring an absolute data directory and a startup frame on stdin. Neither `--auth-token` nor an external configuration file can supply its secret. The Desktop now calls it through the owned-child supervisor; its token remains backend-only. See [ADR 0006](decisions/0006-managed-macos-server.md#first-implementation-slice-managed-server-bootstrap) for control frames, readiness, startup waiting, and exit boundaries. Run the isolated protocol and process tests:
 
@@ -289,7 +289,7 @@ codesign --verify --deep --strict ../../target/release/bundle/macos/Nexum.app
 
 This local signature does not replace distribution signing, notarization, Gatekeeper acceptance, or native UI validation.
 
-macOS 优先的信息架构、任务状态、添加流程、设置、事件订阅、轮询回退和实现切片见 [Desktop UI 设计](DESKTOP_UI_DESIGN.zh-CN.md)。
+macOS 优先的信息架构、任务状态、添加流程、设置、事件订阅、轮询回退和实现切片见 [Desktop UI 设计](DESKTOP_UI_DESIGN.md)。
 
 The macOS-first information architecture, task states, add flow, settings, event subscription, polling fallback, and implementation slices are documented in [Desktop UI Design](DESKTOP_UI_DESIGN.md).
 

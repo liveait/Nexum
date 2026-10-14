@@ -63,9 +63,9 @@ PR #56/#57 引入多连接 HTTP 探测和分段：检查目标服务端的 Range
 
 PRs #56/#57 introduced multi-connection HTTP probing and segmentation: targets are checked for Range support, and files larger than 1 MiB can use up to 8 concurrent segments. The intended contract includes single-connection fallback when Range is unavailable, atomic assembly, cancellation of all workers on failure/cancel, and preservation of the destination.
 
-对 `3768c3a` 的独立审查已复现 Range／校验器检查缺失、不安全的部分文件处理、最终进度丢失、完成凭证绕过及取消后仍发布文件。M4/M5 属于已实现待验收；PR #58 仍需对最终 SHA 完成审查和 CI。
+对 `3768c3a` 的独立审查已复现 Range／校验器检查缺失、不安全的部分文件处理、最终进度丢失、完成凭证绕过及取消后仍发布文件。M4/M5 属于部分实现，待补齐与验收；PR #58 仍需对最终 SHA 完成审查和 CI。
 
-Independent review of `3768c3a` reproduced missing Range/validator checks, unsafe partial-file handling, lost final progress, bypassed completion receipts, and publication after cancellation. M4/M5 are implemented awaiting verification; PR #58 is awaiting review and CI against its final SHA.
+Independent review of `3768c3a` reproduced missing Range/validator checks, unsafe partial-file handling, lost final progress, bypassed completion receipts, and publication after cancellation. M4/M5 are partially implemented, with missing behavior and acceptance remaining; PR #58 is awaiting review and CI against its final SHA.
 
 排除 Server unit/persistence 的绿色运行不能证明验收通过。
 

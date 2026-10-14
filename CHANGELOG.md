@@ -3,9 +3,9 @@
 
 # 变更日志 / Changelog
 
-此处记录 Nexum 的重要变更。条目记录开发历史，不代表当前提交已验收。对 `3768c3a` 的审查发现下载回归及 Server 测试排除；PR #58 仍待最终 SHA 的独立审查和完整门槛验证。M4/M5 属于已实现待验收。
+此处记录 Nexum 的重要变更。条目记录开发历史，不代表当前提交已验收。对 `3768c3a` 的审查发现下载回归及 Server 测试排除；PR #58 仍待最终 SHA 的独立审查和完整门槛验证。M4/M5 属于部分实现，待补齐与验收。
 
-All notable changes to Nexum will be documented here. Entries record development history, not acceptance of the current commit. The `3768c3a` review found download regressions and Server test exclusions; PR #58 awaits independent review and full gates at its final SHA. M4/M5 remain implemented awaiting verification.
+All notable changes to Nexum will be documented here. Entries record development history, not acceptance of the current commit. The `3768c3a` review found download regressions and Server test exclusions; PR #58 awaits independent review and full gates at its final SHA. M4/M5 remain partially implemented, with missing behavior and acceptance remaining.
 
 <a id="unreleased"></a>
 <a id="未发布"></a>

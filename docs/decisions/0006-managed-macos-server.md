@@ -110,7 +110,7 @@ On October 11, 2026, `managed_server.rs` wires bounded readiness/probing, handle
 
 The build stages the target-architecture Server, applies its local ad-hoc signature before hashing, bundles it as `Contents/Resources/nexum-server`, and embeds SHA-256 in Desktop. A release build without matching resources fails; missing, changed, incompatible, or failed executables produce rebuild/retry guidance without PATH or fixed-port fallback. Managed storage uses stable `app_data_dir()/server/`. Closing the window hides the app, Quit stops its child, and Dock reopen restores the window.
 
-新增下载在 Rust 中校验 HTTP(S) URL、安全名称和目录，生成随机 ID，绕开已有任务、完整文件、稳定部分文件及 sidecar 分配名称；不创建最终文件。默认使用系统 Downloads，可为单项或设置中的默认位置改选目录。此切片保留了既有 Server 恢复规则，后续 [ADR 0007](0007-http-completion-reconciliation.md) 切片增加完整文件／Completed 对账；全新用户、升级和实际旁白朗读验收仍待完成。实际构建与原生检查见[发布流程](../RELEASE.zh-CN.md)。
+新增下载在 Rust 中校验 HTTP(S) URL、安全名称和目录，生成随机 ID，绕开已有任务、完整文件、稳定部分文件及 sidecar 分配名称；不创建最终文件。默认使用系统 Downloads，可为单项或设置中的默认位置改选目录。此切片保留了既有 Server 恢复规则，后续 [ADR 0007](0007-http-completion-reconciliation.md) 切片增加完整文件／Completed 对账；全新用户、升级和实际旁白朗读验收仍待完成。实际构建与原生检查见[发布流程](../RELEASE.md)。
 
 Rust validates the HTTP(S) URL, safe filename and folder, generates random IDs, and allocates around task destinations, complete files, stable partials, and sidecars without creating a final file. System Downloads is the default, with per-task and saved default-folder selection. This slice retained existing Server recovery. The subsequent [ADR 0007](0007-http-completion-reconciliation.md) slice adds complete-file/Completed reconciliation; final clean-user, upgrade, and actual VoiceOver speech checks remain open. See [Release Process](../RELEASE.md) for artifact and native evidence.
 

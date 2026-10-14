@@ -7,6 +7,10 @@ Nexum 由个人维护，可由多个编码工具协作。采用以下统一流�
 
 Nexum has an individual maintainer and may use several coding tools. Follow this shared workflow; direct task instructions and authorization from the maintainer take precedence. Small changes can go directly to a PR, larger changes need a plan, and architectural changes need an RFC first.
 
+每个文档主题只保留一个标准文件名的双语 `.md`。标题、段落、列表及表格都采用中文在前、英文在后的顺序，共用相同的命令和代码示例；新增或更新文档时同时维护两种语言，不再创建平行的中文副本。
+
+Keep one bilingual `.md` with a standard filename per topic. Place Chinese before English in headings, paragraphs, lists, and tables, and share identical commands and code examples. Maintain both languages when adding or changing docs; do not create parallel Chinese copies.
+
 <a id="development-workflow"></a>
 <a id="开发流程"></a>
 

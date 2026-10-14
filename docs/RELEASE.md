@@ -37,7 +37,7 @@ The following steps describe what the current source tree requires for a release
 2. 将发布内容从 `Unreleased` 移至 双语 `CHANGELOG.md` 中带日期的版本条目。
 
    Move the release notes from `Unreleased` into a dated entry in the shared bilingual `CHANGELOG.md`.
-3. 在仓库根目录运行[开发指南](DEVELOPMENT.zh-CN.md#rust-检查)列出的四条 Rust CI 命令。
+3. 在仓库根目录运行[开发指南](DEVELOPMENT.md#rust-检查)列出的四条 Rust CI 命令。
 
    Run the four Rust CI commands from the repository root as listed in the [Development Guide](DEVELOPMENT.md#rust-checks).
 4. 使用 pnpm 11.25.0，在 `apps/desktop` 运行 `pnpm install --frozen-lockfile && pnpm build`。macOS CI job 会执行这两条命令。在 `apps/extension` 运行 `pnpm install && pnpm lint && pnpm build`；Desktop 锁文件和 CI job 均不覆盖扩展。
@@ -146,7 +146,7 @@ All three images are 2400 × 1602 pixels in Light appearance and Simplified Chin
 
 #### HTTP 完成对账：后端证据 / HTTP completion reconciliation: backend evidence
 
-10 月 11 日的 [ADR 0007](decisions/0007-http-completion-reconciliation.zh-CN.md) 后续切片增加私有完成凭证和一次最终进度／Completed 持久化。本轮证据来自独立 engine／Core fixture 与真实 Server 子进程，未重启既有原生 App，也未修改其任务数据库和下载文件。
+10 月 11 日的 [ADR 0007](decisions/0007-http-completion-reconciliation.md) 后续切片增加私有完成凭证和一次最终进度／Completed 持久化。本轮证据来自独立 engine／Core fixture 与真实 Server 子进程，未重启既有原生 App，也未修改其任务数据库和下载文件。
 
 The October 11 follow-up under [ADR 0007](decisions/0007-http-completion-reconciliation.md) adds private completion receipts and one persisted final-progress/Completed update. This evidence uses independent engine/Core fixtures and real Server child processes, without restarting the existing native App or modifying its task database and downloads.
 

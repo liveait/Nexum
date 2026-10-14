@@ -10,7 +10,7 @@ ADRs record important technical decisions and the context in which they were mad
 
 Recommended sections: Context, Decision, Rationale, Consequences, and Alternatives Considered.
 
-**状态边界：**“已接受”表示设计决策已被接受，不代表当前实现已通过验收。历史实现或验证记录只适用于所注明的切片和日期；当前交付状态以[开发计划](../DEVELOPMENT_PLAN.zh-CN.md)以及最终提交的测试／CI 证据为准。
+**状态边界：**“已接受”表示设计决策已被接受，不代表当前实现已通过验收。历史实现或验证记录只适用于所注明的切片和日期；当前交付状态以[开发计划](../DEVELOPMENT_PLAN.md)以及最终提交的测试／CI 证据为准。
 
 **Status scope:** “Accepted” means the design decision was accepted. It does not establish that the current implementation has passed acceptance. Historical implementation or verification notes apply to the named slice and date; check the [Development Plan](../DEVELOPMENT_PLAN.md) and the final commit's test/CI evidence for current delivery status.
 
