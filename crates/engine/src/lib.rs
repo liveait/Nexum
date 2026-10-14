@@ -16,9 +16,8 @@ use std::time::{Duration, Instant};
 
 mod completion;
 pub use completion::{
-    CompletionContext, CompletionReceipt, cleanup_completion_partial, clear_completion,
-    completion_receipt_path, has_pending_completion, prepare_completion, publish_completion,
-    reconcile_completion,
+    CompletionContext, cleanup_completion_partial, clear_completion, completion_receipt_path,
+    has_pending_completion, reconcile_completion,
 };
 
 static NEXT_TEMP_DOWNLOAD: AtomicU64 = AtomicU64::new(0);

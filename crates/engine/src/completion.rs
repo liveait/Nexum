@@ -28,11 +28,6 @@ impl CompletionContext {
             directory: data_dir.as_ref().join("http-completions"),
         }
     }
-
-    /// Returns true when the context has no real directory (not yet initialized).
-    pub fn is_empty(&self) -> bool {
-        self.directory.as_path().is_empty()
-    }
 }
 
 /// The filename is a hash, so an RPC task identifier never becomes a path.
@@ -68,7 +63,7 @@ struct FileProof {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CompletionReceipt {
+pub(super) struct CompletionReceipt {
     version: u32,
     task_id: String,
     source: String,
@@ -413,7 +408,7 @@ fn write_receipt(
     result
 }
 
-pub fn prepare_completion(
+pub(super) fn prepare_completion(
     context: &CompletionContext,
     source: &str,
     destination: &str,
@@ -422,12 +417,6 @@ pub fn prepare_completion(
     progress: &Progress,
     control: &HttpTransferControl,
 ) -> Result<CompletionReceipt, EngineError> {
-    // Skip completion for contexts without a real directory (session downloads).
-    if context.directory.as_path().is_empty() {
-        return Err(EngineError::UnsupportedOperation(
-            "no completion context provided".into(),
-        ));
-    }
     control.wait_if_paused()?;
     if read_receipt(context)?.is_some() {
         return Err(failure(
@@ -481,7 +470,7 @@ fn validate_published(receipt: &CompletionReceipt) -> Result<(), EngineError> {
 
 /// Publish under the transfer-control lock so cancellation cannot win after the
 /// no-clobber operation while still being reported as a cancelled transfer.
-pub fn publish_completion(
+pub(super) fn publish_completion(
     receipt: &CompletionReceipt,
     control: &HttpTransferControl,
 ) -> Result<(), EngineError> {
