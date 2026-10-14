@@ -406,28 +406,35 @@ where
         // Build the HTTP request: send Range + If-Range when resuming, plain GET otherwise.
         let mut request = client.get(source);
         let mut expecting_range = false;
+        // When resuming, these hold the original validator and partial size.
+        let mut partial_size: Option<u64> = None;
+        let mut metadata: Option<HttpResumeMetadata> = None;
 
         if has_valid_partial {
             // Read metadata to get the validator and check source matches.
-            let metadata = read_resume_metadata(partial_path)?
+            let saved_metadata = read_resume_metadata(partial_path)?
                 .ok_or_else(|| EngineError::Failed("resume metadata not found".into()))?;
 
             // Verify source hasn't changed.
-            if metadata.source != source {
+            if saved_metadata.source != source {
                 return Err(EngineError::Failed(
                     "source mismatch: resume metadata source does not match current source".into(),
                 ));
             }
 
             // Get the current partial file size for the Range header.
-            let partial_size = std::fs::metadata(partial_path)
+            let saved_partial_size = std::fs::metadata(partial_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
 
             // Send Range request with If-Range validator.
-            request = request.header(RANGE, format!("bytes={}-", partial_size));
-            request = request.header(IF_RANGE, metadata.validator.value());
+            request = request.header(RANGE, format!("bytes={}-", saved_partial_size));
+            request = request.header(IF_RANGE, saved_metadata.validator.value());
             expecting_range = true;
+
+            // Store these for later validation (Content-Range + validator check).
+            partial_size = Some(saved_partial_size);
+            metadata = Some(saved_metadata.clone());
         }
 
         let mut response = request
@@ -442,38 +449,138 @@ where
             // For Range requests, we expect 206 Partial Content.
             // 200 OK means the server ignored the Range (source changed or no Range support).
             if status == StatusCode::OK {
-                return Err(EngineError::Failed(
-                    "source mismatch: expected 206 Partial Content, got 200 OK".into(),
-                ));
-            }
-            if status != StatusCode::PARTIAL_CONTENT {
+                // Source changed or server doesn't support Range: restart as a fresh GET.
+                remove_resumable_files(partial_path);
+                // Re-fetch with a plain GET.
+                let fresh = client
+                    .get(source)
+                    .send()
+                    .await
+                    .map_err(|error| EngineError::Failed(error.to_string()))?;
+                if !fresh.status().is_success() {
+                    return Err(EngineError::Failed(format!(
+                        "HTTP GET returned {}",
+                        fresh.status()
+                    )));
+                }
+                response = fresh;
+            } else if status != StatusCode::PARTIAL_CONTENT {
                 return Err(EngineError::Failed(format!(
                     "range request failed with {status}"
                 )));
             }
         } else {
             // For plain GET requests, any success status is acceptable.
-            if !status.is_success() {
+            if !response.status().is_success() {
                 return Err(EngineError::Failed(format!("HTTP error: {status}")));
+            }
+        }
+
+        // When resuming a validated partial, verify the 206 response
+        // Content-Range and validator match the stored metadata.
+        // If the server has changed the file, Content-Range or validator will
+        // differ and we discard the partial and restart as a fresh download.
+        if has_valid_partial {
+            let offset = partial_size.expect("set when has_valid_partial is true");
+            let saved = metadata
+                .as_ref()
+                .expect("parsed above when has_valid_partial");
+            if response.status() == StatusCode::PARTIAL_CONTENT {
+                let range_valid = response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_content_range)
+                    .is_some_and(|(start, end, total)| {
+                        start == offset
+                            && saved
+                                .expected_length
+                                .is_none_or(|expected| expected == total)
+                            && response
+                                .content_length()
+                                .is_none_or(|len| len == end - start + 1)
+                    });
+                let response_validator = HttpResumeValidator::from_headers(response.headers());
+                let validator_valid = response_validator.as_ref() == Some(&saved.validator);
+                if !range_valid || !validator_valid {
+                    // Source changed: discard stale partial, restart fresh.
+                    remove_resumable_files(partial_path);
+                    // Re-fetch with a plain GET.
+                    let fresh = client
+                        .get(source)
+                        .send()
+                        .await
+                        .map_err(|error| EngineError::Failed(error.to_string()))?;
+                    if !fresh.status().is_success() {
+                        return Err(EngineError::Failed(format!(
+                            "HTTP GET returned {}",
+                            fresh.status()
+                        )));
+                    }
+                    response = fresh;
+                }
             }
         }
 
         let total = response.content_length();
 
         // Write/update metadata sidecar.
-        {
+        // When resuming, preserve the original validator and partial file size.
+        let metadata_to_write = if let Some(outer) = metadata.as_ref() {
+            // For resumed downloads: keep the original validator and use the
+            // Content-Range total if this was a 206 response.
+            if response.status() == StatusCode::PARTIAL_CONTENT {
+                if let Some(cr) = response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("bytes ").and_then(|v| v.split_once('/')))
+                {
+                    let total: u64 = cr
+                        .1
+                        .parse()
+                        .map_err(|_| EngineError::Failed("invalid Content-Range total".into()))?;
+                    Some(HttpResumeMetadata {
+                        source: source.to_owned(),
+                        destination: destination.to_string_lossy().into_owned(),
+                        validator: outer.validator.clone(),
+                        expected_length: Some(total),
+                    })
+                } else {
+                    // No Content-Range on 206 — just update validator.
+                    let validator = HttpResumeValidator::from_headers(response.headers());
+                    validator.map(|v| HttpResumeMetadata {
+                        source: source.to_owned(),
+                        destination: destination.to_string_lossy().into_owned(),
+                        validator: v,
+                        expected_length: outer.expected_length,
+                    })
+                }
+            } else {
+                // Fresh GET (either fresh download or restart after source mismatch).
+                // Update metadata freely.
+                let validator = HttpResumeValidator::from_headers(response.headers());
+                validator.map(|v| HttpResumeMetadata {
+                    source: source.to_owned(),
+                    destination: destination.to_string_lossy().into_owned(),
+                    validator: v,
+                    expected_length: response.content_length(),
+                })
+            }
+        } else {
+            // Fresh download (no resumption).
             let validator = HttpResumeValidator::from_headers(response.headers());
-            let metadata = validator.map(|validator| HttpResumeMetadata {
+            validator.map(|v| HttpResumeMetadata {
                 source: source.to_owned(),
                 destination: destination.to_string_lossy().into_owned(),
-                validator,
-                expected_length: total,
-            });
-            if let Some(metadata) = metadata.as_ref() {
-                let _ = write_resume_metadata(partial_path, metadata);
-            } else {
-                let _ = std::fs::remove_file(resumable_metadata_path(partial_path));
-            }
+                validator: v,
+                expected_length: response.content_length(),
+            })
+        };
+        if let Some(ref metadata) = metadata_to_write {
+            let _ = write_resume_metadata(partial_path, metadata);
+        } else {
+            let _ = std::fs::remove_file(resumable_metadata_path(partial_path));
         }
 
         // Never replace an existing destination file (only relevant for fresh downloads).
@@ -1409,6 +1516,16 @@ impl ResumableDownload {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent).map_err(|error| EngineError::Failed(error.to_string()))?;
+        // Reject symbolic links to prevent staging files from pointing at
+        // unrelated user data.  Only regular files (or non-existent paths
+        // that will be created as regular files) are accepted.
+        if let Ok(metadata) = std::fs::symlink_metadata(partial_path)
+            && metadata.file_type().is_symlink()
+        {
+            // Remove the dangling / malicious symlink so the fresh
+            // truncate path below creates a regular file.
+            let _ = std::fs::remove_file(partial_path);
+        }
         let file = if append {
             std::fs::OpenOptions::new().append(true).open(partial_path)
         } else {
@@ -1916,6 +2033,13 @@ impl HttpEngine {
             .map_err(|error| EngineError::Failed(error.to_string()))?;
 
         // Pre-allocate a sparse file so workers can seek to any offset.
+        // Reject (and remove) any pre-existing symlink so that truncate
+        // creates a regular file instead of following the link.
+        if let Ok(metadata) = std::fs::symlink_metadata(partial)
+            && metadata.file_type().is_symlink()
+        {
+            let _ = std::fs::remove_file(partial);
+        }
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -2065,10 +2189,16 @@ impl HttpEngine {
             )));
         }
 
+        // Check cancellation before publishing (P2: cancellation before
+        // publication must win).
+        control.check_cancelled()?;
+
         // Publish atomically; never clobber an existing destination.
         commit_download(partial, Path::new(destination)).inspect_err(|_error| {
             remove_resumable_files(partial);
         })?;
+        // Re-check after publication so a cancel during the rename wins.
+        control.check_cancelled()?;
         control.finish_committed();
         // Clean up the sparse partial — the destination now holds the data.
         let _ = std::fs::remove_file(partial);

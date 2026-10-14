@@ -794,7 +794,7 @@ fn run_session_download(
 
     // Session reached terminal state — wait for the background thread and
     // handle the result.
-    let (final_state, _final_progress) =
+    let (final_state, final_progress) =
         <HttpTransferSession as TransferSession>::wait(Box::new(session));
 
     let cancelled = final_state == EngineTaskState::Failed && control_clone.is_cancelled();
@@ -811,8 +811,9 @@ fn run_session_download(
         if cancelled {
             Err(EngineError::Cancelled)
         } else if completed {
-            // Use zero progress; the caller handles the real progress from DB.
-            Ok(nexum_core::nexum_domain::Progress::default())
+            // Use the actual final progress from the session (includes
+            // the byte count and total size of the completed download).
+            Ok(final_progress)
         } else {
             Err(EngineError::Failed("transfer failed".into()))
         },

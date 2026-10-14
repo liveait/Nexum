@@ -32,7 +32,7 @@ jobs:
         run: cargo check --locked --workspace --all-targets
 
       - name: Test
-        run: cargo test --locked --workspace --exclude nexum-server
+        run: cargo test --locked --workspace -- --test-threads=1
 
       - name: Test Server managed tests
         run: cargo test --locked -p nexum-server --test managed
