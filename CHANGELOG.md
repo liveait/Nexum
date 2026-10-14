@@ -17,9 +17,9 @@ All notable changes to Nexum will be documented here. Entries record development
 
 ### 新增 / Added
 
-- **单文件多连接 HTTP 下载——已实现待验收**：引擎用 `Range: bytes=0-0` 探测 Range 支持、文件大小和 ETag/Last-Modified。支持 Range 且超过 1 MiB 的文件最多分为 8 个并发段；每段在独立的 current-thread Tokio runtime 和分离 std 线程中运行。
+- **单文件多连接 HTTP 下载——部分实现，待补齐与验收**：引擎用 `Range: bytes=0-0` 探测 Range 支持、文件大小和 ETag/Last-Modified。支持 Range 且超过 1 MiB 的文件最多分为 8 个并发段；每段在独立的 current-thread Tokio runtime 和分离 std 线程中运行。
 
-  **Multi-connection HTTP downloads — implemented, awaiting verification**: the engine probes with `Range: bytes=0-0` for Range support, file length, and ETag/Last-Modified. Supported files larger than 1 MiB split into up to 8 concurrent segments; each runs in its own current-thread Tokio runtime on a detached std thread.
+  **Multi-connection HTTP downloads — partially implemented, awaiting completion and verification**: the engine probes with `Range: bytes=0-0` for Range support, file length, and ETag/Last-Modified. Supported files larger than 1 MiB split into up to 8 concurrent segments; each runs in its own current-thread Tokio runtime on a detached std thread.
 
   各段共享 `HttpTransferControl` 实现全局带宽上限，在预分配的稀疏部分文件中定位写入。既有合约要求失败／取消时中止全部 Worker 并清理部分文件、保护已有目标，并在服务端不支持、校验失败或段长度异常时安全回退单连接。
 

@@ -140,9 +140,9 @@ tls_cert_path=/path/to/server-cert.pem
 tls_key_path=/path/to/server-key.pem
 ```
 
-命令行参数为 `--tls-cert-path PATH --tls-key-path PATH`。Server 会在接受连接前加载证书和私钥；配置不完整、PEM 无效或握手失败时会关闭该连接，不会回退到明文。
+命令行参数为 `--tls-cert-path PATH --tls-key-path PATH`。Server 会在接受连接前加载证书和私钥；配置不完整或 PEM 无效时拒绝启动。握手失败时关闭该连接，不会回退到明文。
 
-The equivalent flags are `--tls-cert-path PATH --tls-key-path PATH`. The certificate and key are loaded before the listener accepts connections; a missing pair, invalid PEM, or handshake failure stops that connection without falling back to plaintext.
+The equivalent flags are `--tls-cert-path PATH --tls-key-path PATH`. The certificate and key are loaded before the listener accepts connections; a missing pair or invalid PEM prevents Server startup. A handshake failure closes that connection without falling back to plaintext.
 
 CLI 或 Desktop 使用 `tls://host:port`，默认加载平台根证书（也支持 `rustls-native-certs` 提供的 `SSL_CERT_FILE`/`SSL_CERT_DIR` 来源），并校验主机名或 IP；证书失败时不会发送凭据。Browser Extension 会将 `tls://host:port` 映射到 `https://host:port/jsonrpc`，由浏览器校验证书；TLS 请求失败时不会改用 HTTP 重试。
 
@@ -172,9 +172,9 @@ The following describes the existing transfer contract and acceptance criteria; 
 
 On success it writes `./example.html` and records the final byte count; `task list` may show `Downloading` until then. The `task.get` and `task.list` views expose the persisted progress and an `error` field containing the most recent transfer error.
 
-完整响应先写入目标旁的隐藏稳定部分文件，sidecar 保存来源、目标、校验器和预期长度，完成后才替换目标文件。传输失败会保留已有目标文件、记录 Server 错误、将错误保存到任务，并在重试策略允许时重新排队；有可用槽位时 Server 会自动派发该重试。
+完整响应先写入目标旁的隐藏稳定部分文件，sidecar 保存来源、目标、校验器和预期长度，完整后原子发布到不存在的目标路径，不覆盖已有目标文件。传输失败会保留已有目标文件、记录 Server 错误、将错误保存到任务，并在重试策略允许时重新排队；有可用槽位时 Server 会自动派发该重试。
 
-The destination is replaced only after the full response is staged in a hidden stable partial file beside it; the sidecar records the source, destination, validator, and expected length. A failed transfer preserves an existing destination, logs the failure, stores the error on the task, and requeues it while the retry policy allows; the server automatically dispatches that retry when a slot is available.
+The complete response is staged in a hidden stable partial file beside the destination, then published atomically without replacing an existing destination; the sidecar records the source, destination, validator, and expected length. A failed transfer preserves an existing destination, logs the failure, stores the error on the task, and requeues it while the retry policy allows; the server automatically dispatches that retry when a slot is available.
 
 默认策略允许重试三次。领取新一轮传输时会重置持久化快照并清除旧错误；如果有可用的校验部分文件，Server 随后会恢复其进度。
 
