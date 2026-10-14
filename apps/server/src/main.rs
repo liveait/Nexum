@@ -601,24 +601,27 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
     // directly from it.  Probing would send a Range: bytes=0-0 to the source
     // and, for large files, could enter the multi-connection path, ignoring
     // the data already on disk.
-    let has_valid_partial =
-        resumable_partial_progress(&transfer.source, &transfer.destination, &transfer.partial_path)
-            .is_ok_and(|p| p.is_some());
+    let has_valid_partial = resumable_partial_progress(
+        &transfer.source,
+        &transfer.destination,
+        &transfer.partial_path,
+    )
+    .is_ok_and(|p| p.is_some());
 
     // Probe: does the server support Range, and how large is the file?
     // Skip probing for local test fixtures (127.0.0.1) and when a valid
     // resumable partial exists — both avoid sending a probe request to
     // sources not designed to handle extra HTTP connections.
-    let probe_result = if has_valid_partial
-        || transfer.source.contains("127.0.0.1")
-    {
+    let probe_result = if has_valid_partial || transfer.source.contains("127.0.0.1") {
         None
     } else {
         HttpEngine::new().probe_range(&transfer.source)
     };
     let should_multi = probe_result.as_ref().is_some_and(|cap| {
         cap.supports_ranges
-            && cap.length.is_some_and(|len| len > MULTI_CONNECTION_MIN_BYTES)
+            && cap
+                .length
+                .is_some_and(|len| len > MULTI_CONNECTION_MIN_BYTES)
     });
     let completion = transfer.completion.clone();
     let id = transfer.id.clone();
@@ -641,9 +644,7 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
             capability.validator.as_ref(),
             &transfer.control,
             |progress| {
-                let mut state = progress_state
-                    .lock()
-                    .expect("server state mutex poisoned");
+                let mut state = progress_state.lock().expect("server state mutex poisoned");
                 state
                     .core
                     .update_progress(&progress_task_id, progress)
@@ -668,9 +669,7 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
                 if !progress_reporter.should_persist(&progress) {
                     return Ok(());
                 }
-                let mut state = progress_state
-                    .lock()
-                    .expect("server state mutex poisoned");
+                let mut state = progress_state.lock().expect("server state mutex poisoned");
                 state
                     .core
                     .update_progress(&progress_task_id, progress)

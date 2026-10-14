@@ -92,4 +92,6 @@ Motrix 清单中的自动 Tracker 列表、UPnP/NAT-PMP、上传限速、登录�
 
 **已完成工作包**：[ADR 0008](decisions/0008-long-running-transfer-contract.zh-CN.md) 定义了长期传输契约：增强的 `EngineCapabilities`（新增 `supports_range`、`supports_retry`、`supported_protocols`、`max_concurrent_segments` 字段）、新的 `TransferSession` trait（`progress()`、`state()`、`error()`、`pause()`、`resume()`、`cancel()`、`wait()`）以及带 `ResumeMetadata` 的 `ResumableEngine` trait。同步 `EngineAdapter::start()` 已弃用但仍保留给简单引擎。Server 分发器检查能力声明以路由任务到合适的引擎。
 
+**M5 HTTP 会话实现**：`HttpTransferSession` 结构体拥有克隆的 `reqwest::Client`、源 URL 和目标路径，在后台线程启动下载。会话暴露 `TransferSession` 方法：`progress()` 从 `Mutex<Progress>` 读取（由回调更新）；`pause()` / `resume()` 委托给共享的 `HttpTransferControl`；`cancel()` 标记会话失败并等待下载线程；`wait(Box<Self>)` 在 `Condvar` 上阻塞直到后台线程到达终态。密封的 `download_to_with_control_sealed(&reqwest::Client, …)` 辅助函数不借用 `HttpEngine` 执行下载，使闭包为 `'static`。全部 52 项 engine 测试和 51 项 server 测试通过。
+
 **下一工作包**：在 HTTP 引擎中设计和实现 `TransferSession` trait（不回归 M2–M4），然后重构 Server 分发器使用新契约。HTTP 迁移完成后，添加 FTP/FTPS 作为下一个协议。同时，M0 实际 VoiceOver 朗读和 M1 全新用户／升级最终验收仍待完成；M3（签名、公证、分发）仍待规划。
