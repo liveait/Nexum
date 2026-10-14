@@ -25,7 +25,10 @@ static NEXT_TEMP_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
 /// Inactivity bound on the response body. A stale socket returns a zero-byte
 /// timeout within this window so pause and cancel take effect promptly instead
 /// of blocking for the whole 30-minute request timeout.
-const READ_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+// Keep the read boundary below the server RPC timeout so a pause or remove
+// request cannot wait longer than the client connection for a response that
+// is currently blocked on the next body chunk.
+const READ_STALL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Consecutive zero-data stalls tolerated before a dead connection is failed.
 /// Any byte read resets the counter, so a slow-but-flowing connection never trips
@@ -247,6 +250,7 @@ impl HttpTransferSession {
             &partial_path,
             HttpTransferControl::new(),
             false, // no valid partial for a fresh download
+            None,  // no completion context for fresh downloads
         )
     }
 
@@ -257,6 +261,11 @@ impl HttpTransferSession {
     /// that pause / cancel / recovery logic can inspect it while the transfer
     /// is still running. The final destination is only updated after the
     /// complete response has been received.
+    ///
+    /// When `completion_context` is provided, the session path generates and
+    /// publishes completion receipts before committing the destination,
+    /// enabling crash recovery for completed downloads.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_download_with_partial(
         engine: &HttpEngine,
         source: &str,
@@ -264,6 +273,7 @@ impl HttpTransferSession {
         partial_path: &Path,
         control: HttpTransferControl,
         has_valid_partial: bool,
+        completion_context: Option<CompletionContext>,
     ) -> Result<Self, EngineError> {
         let source = source.to_owned();
         let destination = PathBuf::from(destination);
@@ -299,6 +309,7 @@ impl HttpTransferSession {
                 &partial_path,
                 &inner.control,
                 has_valid,
+                completion_context.as_ref(),
                 |progress: Progress| {
                     // Update the shared byte counter and progress snapshot.
                     bytes.store(progress.downloaded_bytes, Ordering::SeqCst);
@@ -318,14 +329,19 @@ impl HttpTransferSession {
                     bytes.store(downloaded, Ordering::SeqCst);
                     {
                         let mut p = inner.progress.lock().unwrap();
-                        *p = Progress::new(downloaded, None);
+                        // Keep the total learned from Content-Length or
+                        // Content-Range. Clearing it here made completed
+                        // session downloads render as indeterminate.
+                        let total = p.total_bytes;
+                        *p = Progress::new(downloaded, total);
                     }
                     (EngineTaskState::Completed, None)
                 }
                 Err(EngineError::Cancelled) => {
                     {
                         let mut p = inner.progress.lock().unwrap();
-                        *p = Progress::new(bytes.load(Ordering::SeqCst), None);
+                        let total = p.total_bytes;
+                        *p = Progress::new(bytes.load(Ordering::SeqCst), total);
                     }
                     {
                         let mut e = inner.error.lock().unwrap();
@@ -339,7 +355,8 @@ impl HttpTransferSession {
                 Err(EngineError::Failed(msg)) => {
                     {
                         let mut p = inner.progress.lock().unwrap();
-                        *p = Progress::new(bytes.load(Ordering::SeqCst), None);
+                        let total = p.total_bytes;
+                        *p = Progress::new(bytes.load(Ordering::SeqCst), total);
                     }
                     {
                         let mut e = inner.error.lock().unwrap();
@@ -381,7 +398,9 @@ impl HttpTransferSession {
 ///
 /// This function opens the partial path directly and writes chunks into it.
 /// The partial file is committed to the destination at the end via
-/// `ResumableDownload::finish`.
+/// `ResumableDownload::finish` (or `publish_completion` when a completion
+/// context is provided).
+#[allow(clippy::too_many_arguments)]
 fn download_to_partial_sealed<F>(
     client: &reqwest::Client,
     source: &str,
@@ -389,6 +408,7 @@ fn download_to_partial_sealed<F>(
     partial_path: &Path,
     control: &HttpTransferControl,
     has_valid_partial: bool,
+    completion: Option<&CompletionContext>,
     mut on_progress: F,
 ) -> Result<u64, EngineError>
 where
@@ -405,29 +425,47 @@ where
     let downloaded = runtime.block_on(async {
         // Build the HTTP request: send Range + If-Range when resuming, plain GET otherwise.
         let mut request = client.get(source);
-        let mut expecting_range = false;
+        // These values describe the response we are currently consuming.  A
+        // failed range validation switches to a fresh GET, so they must be
+        // reset together with the partial file rather than retaining the
+        // original resume state.
+        let mut resuming = has_valid_partial;
+        let mut partial_size: u64 = 0;
+        let mut metadata: Option<HttpResumeMetadata> = None;
 
-        if has_valid_partial {
+        // Fail before opening a network connection when a fresh transfer
+        // would replace an existing destination.  The final no-clobber
+        // commit remains the authoritative race-safe check, but this early
+        // guard gives callers a deterministic destination error and avoids a
+        // needless request for a task that can never publish.
+        if !resuming {
+            ensure_destination_absent(destination)?;
+        }
+
+        if resuming {
             // Read metadata to get the validator and check source matches.
-            let metadata = read_resume_metadata(partial_path)?
+            let saved_metadata = read_resume_metadata(partial_path)?
                 .ok_or_else(|| EngineError::Failed("resume metadata not found".into()))?;
 
             // Verify source hasn't changed.
-            if metadata.source != source {
+            if saved_metadata.source != source {
                 return Err(EngineError::Failed(
                     "source mismatch: resume metadata source does not match current source".into(),
                 ));
             }
 
             // Get the current partial file size for the Range header.
-            let partial_size = std::fs::metadata(partial_path)
+            let saved_partial_size = std::fs::metadata(partial_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
 
             // Send Range request with If-Range validator.
-            request = request.header(RANGE, format!("bytes={}-", partial_size));
-            request = request.header(IF_RANGE, metadata.validator.value());
-            expecting_range = true;
+            request = request.header(RANGE, format!("bytes={}-", saved_partial_size));
+            request = request.header(IF_RANGE, saved_metadata.validator.value());
+
+            // Store these for later validation (Content-Range + validator check).
+            partial_size = saved_partial_size;
+            metadata = Some(saved_metadata.clone());
         }
 
         let mut response = request
@@ -438,55 +476,176 @@ where
         let status = response.status();
 
         // Check response status based on whether we sent a Range request.
-        if expecting_range {
+        if resuming {
             // For Range requests, we expect 206 Partial Content.
             // 200 OK means the server ignored the Range (source changed or no Range support).
             if status == StatusCode::OK {
-                return Err(EngineError::Failed(
-                    "source mismatch: expected 206 Partial Content, got 200 OK".into(),
-                ));
-            }
-            if status != StatusCode::PARTIAL_CONTENT {
+                // Source changed or server doesn't support Range: restart as a fresh GET.
+                remove_resumable_files(partial_path);
+                resuming = false;
+                partial_size = 0;
+                metadata = None;
+                // Re-fetch with a plain GET.
+                let fresh = client
+                    .get(source)
+                    .send()
+                    .await
+                    .map_err(|error| EngineError::Failed(error.to_string()))?;
+                if !fresh.status().is_success() {
+                    return Err(EngineError::Failed(format!(
+                        "HTTP GET returned {}",
+                        fresh.status()
+                    )));
+                }
+                response = fresh;
+            } else if status != StatusCode::PARTIAL_CONTENT {
                 return Err(EngineError::Failed(format!(
                     "range request failed with {status}"
                 )));
             }
         } else {
             // For plain GET requests, any success status is acceptable.
-            if !status.is_success() {
+            if !response.status().is_success() {
                 return Err(EngineError::Failed(format!("HTTP error: {status}")));
             }
         }
 
-        let total = response.content_length();
-
-        // Write/update metadata sidecar.
-        {
-            let validator = HttpResumeValidator::from_headers(response.headers());
-            let metadata = validator.map(|validator| HttpResumeMetadata {
-                source: source.to_owned(),
-                destination: destination.to_string_lossy().into_owned(),
-                validator,
-                expected_length: total,
-            });
-            if let Some(metadata) = metadata.as_ref() {
-                let _ = write_resume_metadata(partial_path, metadata);
-            } else {
-                let _ = std::fs::remove_file(resumable_metadata_path(partial_path));
+        // When resuming a validated partial, verify the 206 response
+        // Content-Range and validator match the stored metadata.
+        // If the server has changed the file, Content-Range or validator will
+        // differ and we discard the partial and restart as a fresh download.
+        if resuming {
+            let offset = partial_size;
+            let saved = metadata.as_ref().expect("parsed above when resuming");
+            if response.status() == StatusCode::PARTIAL_CONTENT {
+                let range_valid = response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_content_range)
+                    .is_some_and(|(start, end, total)| {
+                        start == offset
+                            && saved
+                                .expected_length
+                                .is_none_or(|expected| expected == total)
+                            && response
+                                .content_length()
+                                .is_none_or(|len| len == end - start + 1)
+                    });
+                let response_validator = HttpResumeValidator::from_headers(response.headers());
+                let validator_valid = response_validator.as_ref() == Some(&saved.validator);
+                if !range_valid || !validator_valid {
+                    // Source changed: discard stale partial, restart fresh.
+                    remove_resumable_files(partial_path);
+                    resuming = false;
+                    partial_size = 0;
+                    metadata = None;
+                    // Re-fetch with a plain GET.
+                    let fresh = client
+                        .get(source)
+                        .send()
+                        .await
+                        .map_err(|error| EngineError::Failed(error.to_string()))?;
+                    if !fresh.status().is_success() {
+                        return Err(EngineError::Failed(format!(
+                            "HTTP GET returned {}",
+                            fresh.status()
+                        )));
+                    }
+                    response = fresh;
+                }
             }
         }
 
-        // Never replace an existing destination file (only relevant for fresh downloads).
-        if !has_valid_partial {
-            ensure_destination_absent(destination)?;
+        // Content-Length on a 206 response is only the remaining body.  Keep
+        // it separate from the whole-file total used for progress and receipts.
+        let response_total = response.content_length();
+
+        // For 206 responses, extract the Content-Range total as the overall
+        // file length (Content-Length on a partial response is just the chunk
+        // size). This ensures Progress::new carries the correct total for
+        // completion receipts.
+        let overall_total = if response.status() == StatusCode::PARTIAL_CONTENT {
+            response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("bytes ").and_then(|v| v.split_once('/')))
+                .and_then(|(_, total_str)| total_str.parse().ok())
+        } else {
+            response_total
+        };
+
+        // Write/update metadata sidecar.
+        // When resuming, preserve the original validator and partial file size.
+        let metadata_to_write = if let Some(outer) = metadata.as_ref() {
+            // For resumed downloads: keep the original validator and use the
+            // Content-Range total if this was a 206 response.
+            if response.status() == StatusCode::PARTIAL_CONTENT {
+                if let Some(cr) = response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("bytes ").and_then(|v| v.split_once('/')))
+                {
+                    let total: u64 = cr
+                        .1
+                        .parse()
+                        .map_err(|_| EngineError::Failed("invalid Content-Range total".into()))?;
+                    Some(HttpResumeMetadata {
+                        source: source.to_owned(),
+                        destination: destination.to_string_lossy().into_owned(),
+                        validator: outer.validator.clone(),
+                        expected_length: Some(total),
+                    })
+                } else {
+                    // No Content-Range on 206 — just update validator.
+                    let validator = HttpResumeValidator::from_headers(response.headers());
+                    validator.map(|v| HttpResumeMetadata {
+                        source: source.to_owned(),
+                        destination: destination.to_string_lossy().into_owned(),
+                        validator: v,
+                        expected_length: outer.expected_length,
+                    })
+                }
+            } else {
+                // Fresh GET (either fresh download or restart after source mismatch).
+                // Update metadata freely.
+                let validator = HttpResumeValidator::from_headers(response.headers());
+                validator.map(|v| HttpResumeMetadata {
+                    source: source.to_owned(),
+                    destination: destination.to_string_lossy().into_owned(),
+                    validator: v,
+                    expected_length: response_total,
+                })
+            }
+        } else {
+            // Fresh download (no resumption).
+            let validator = HttpResumeValidator::from_headers(response.headers());
+            validator.map(|v| HttpResumeMetadata {
+                source: source.to_owned(),
+                destination: destination.to_string_lossy().into_owned(),
+                validator: v,
+                expected_length: response_total,
+            })
+        };
+        if let Some(ref metadata) = metadata_to_write {
+            let _ = write_resume_metadata(partial_path, metadata);
+        } else {
+            let _ = std::fs::remove_file(resumable_metadata_path(partial_path));
         }
 
         // Open the partial file: append mode for resume, truncate for fresh download.
-        let mut temporary = ResumableDownload::open(partial_path, has_valid_partial)?;
+        let mut temporary = ResumableDownload::open(partial_path, resuming)?;
 
-        let mut downloaded: u64 = 0;
+        // Keep progress and the completion receipt in whole-file coordinates
+        // when appending to a validated partial.
+        let mut downloaded: u64 = if resuming { partial_size } else { 0 };
         let mut rate = RateGauge::new();
         let mut consecutive_stalls: u32 = 0;
+
+        // Publish the known offset and total before receiving the first chunk.
+        on_progress(Progress::new(downloaded, overall_total))?;
 
         loop {
             control.wait_if_paused()?;
@@ -523,24 +682,55 @@ where
             }
             downloaded += chunk.len() as u64;
             let speed = rate.observe(downloaded);
-            let eta = total.and_then(|expected| {
+            let eta = overall_total.and_then(|expected| {
                 (speed > 0).then(|| (expected.saturating_sub(downloaded)) / speed.max(1))
             });
-            on_progress(Progress::with_rate(downloaded, total, speed, eta))?;
+            on_progress(Progress::with_rate(downloaded, overall_total, speed, eta))?;
             control.wait_if_paused()?;
 
-            if total.is_some_and(|expected| downloaded >= expected) {
+            if overall_total.is_some_and(|expected| downloaded >= expected) {
                 break;
             }
             // Also break if we've read all available data and no more content-length
-            if total.is_none() && downloaded > 0 {
+            if overall_total.is_none() && downloaded > 0 {
                 // For responses without Content-Length, break after first iteration
                 // This is a fallback for edge cases
             }
         }
 
         // Commit the partial file to the destination.
-        control.finish_resumable_download(temporary, destination)?;
+        // When a completion context is provided, generate and publish a
+        // completion receipt (enabling crash recovery).  Otherwise fall back
+        // to the fast commit path used by session downloads.
+        control.check_cancelled()?;
+        if let Some(expected) = overall_total
+            && downloaded != expected
+        {
+            return Err(EngineError::Failed(format!(
+                "incomplete HTTP response: expected {expected} bytes, received {downloaded}"
+            )));
+        }
+        if let Some(completion) = completion {
+            let receipt = completion::prepare_completion(
+                completion,
+                source,
+                destination.to_str().ok_or_else(|| {
+                    EngineError::Failed("destination path is not valid UTF-8".into())
+                })?,
+                partial_path,
+                temporary
+                    .file
+                    .as_ref()
+                    .expect("resumable download file is open"),
+                &Progress::new(downloaded, overall_total),
+                control,
+            )?;
+            // Keep the owned writer alive through publication and keep
+            // the private receipt until the caller commits Completed.
+            completion::publish_completion(&receipt, control)?;
+        } else {
+            control.finish_resumable_download(temporary, destination)?;
+        }
         Ok(downloaded)
     });
 
@@ -1409,6 +1599,16 @@ impl ResumableDownload {
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent).map_err(|error| EngineError::Failed(error.to_string()))?;
+        // Reject symbolic links to prevent staging files from pointing at
+        // unrelated user data.  Only regular files (or non-existent paths
+        // that will be created as regular files) are accepted.
+        if let Ok(metadata) = std::fs::symlink_metadata(partial_path)
+            && metadata.file_type().is_symlink()
+        {
+            // Remove the dangling / malicious symlink so the fresh
+            // truncate path below creates a regular file.
+            let _ = std::fs::remove_file(partial_path);
+        }
         let file = if append {
             std::fs::OpenOptions::new().append(true).open(partial_path)
         } else {
@@ -1916,6 +2116,13 @@ impl HttpEngine {
             .map_err(|error| EngineError::Failed(error.to_string()))?;
 
         // Pre-allocate a sparse file so workers can seek to any offset.
+        // Reject (and remove) any pre-existing symlink so that truncate
+        // creates a regular file instead of following the link.
+        if let Ok(metadata) = std::fs::symlink_metadata(partial)
+            && metadata.file_type().is_symlink()
+        {
+            let _ = std::fs::remove_file(partial);
+        }
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -2065,10 +2272,16 @@ impl HttpEngine {
             )));
         }
 
+        // Check cancellation before publishing (P2: cancellation before
+        // publication must win).
+        control.check_cancelled()?;
+
         // Publish atomically; never clobber an existing destination.
         commit_download(partial, Path::new(destination)).inspect_err(|_error| {
             remove_resumable_files(partial);
         })?;
+        // Re-check after publication so a cancel during the rename wins.
+        control.check_cancelled()?;
         control.finish_committed();
         // Clean up the sparse partial — the destination now holds the data.
         let _ = std::fs::remove_file(partial);
