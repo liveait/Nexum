@@ -29,9 +29,15 @@ apps/
 
 保持 UI 逻辑与 Core 分离，避免将具体 Engine 的实现细节放入 Domain Model。行为变化应补充针对性测试，并同步更新受影响文档的中英文版本。需要 RFC 的变更类型见[贡献指南](../CONTRIBUTING.zh-CN.md)。
 
+## 开发流程入口
+
+任务定义、独立 worktree、多工具协作、审查、测试门槛、合并及清理规则统一见[贡献指南](../CONTRIBUTING.zh-CN.md#开发流程)。本指南维护环境和运行命令；开始任务时同时阅读根目录 `AGENTS.md`。
+
+验收状态：本指南的操作说明和保护约定不能替代某个提交的验收证据。草案基线 `3768c3a` 的 CI 排除了 Server unit/persistence，审查已发现范围验证、文件保护、最终进度与完成恢复回归；这些行为应视为待修复/复验，而非已验收。修复后需用最终 SHA 的测试与 CI 记录更新此状态。
+
 ## Rust 检查
 
-在仓库根目录运行与 `.github/workflows/ci.yml` 相同的命令：
+在仓库根目录运行完整 Rust 门槛：
 
 ```bash
 cargo fmt --all -- --check
@@ -40,7 +46,36 @@ cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-仓库会提交 `Cargo.lock`，因为此工作区包含 Server、CLI 和 Desktop 可执行程序；修改 Rust 依赖时应同步更新它。CI 在 Ubuntu 上执行这些 Rust 检查。另有 macOS job 使用 `--frozen-lockfile` 和 `apps/desktop/pnpm-lock.yaml` 安装 Desktop 依赖，构建其 TypeScript 前端和 `.app`，并检查 App 内的语言声明。它不构建 Browser 扩展，也不生成完成分发签名和公证的发布产物。
+仓库会提交 `Cargo.lock`，因为此工作区包含 Server、CLI 和 Desktop 可执行程序；修改 Rust 依赖时应同步更新它。CI 的 Rust job 应在 Ubuntu 上执行完整门槛，必须包含 Server 单元、`managed` 和 `persistence` 测试；是否实际执行以当前 workflow 与运行日志为准，不以绿色状态代替覆盖核对。另有 macOS job 使用 `--frozen-lockfile` 和 `apps/desktop/pnpm-lock.yaml` 安装 Desktop 依赖，执行 `pnpm build`、`pnpm test`，构建 `.app`，并检查 App 内的语言声明、签名和托管 Server 资源。它不构建 Browser 扩展，也不生成完成分发签名和公证的发布产物。
+
+如需排查 Server 回归，可以先在仓库根目录运行：
+
+```bash
+cargo test --locked -p nexum-server
+cargo test --locked -p nexum-server --test persistence -- --test-threads=1
+```
+
+后一命令用于隔离定位持久化/进程场景，不能替代完整门槛。环境或时序问题需保留完整测试集合与断言，并记录执行方式调整的原因。
+
+Desktop 前端改动还需从 `apps/desktop` 运行 `pnpm install --frozen-lockfile`、`pnpm build` 和 `pnpm test`。涉及原生行为或打包时，还需本指南 Desktop 节中的 `.app` 构建、包验证与原生验收。纯文档改动执行 diff、内容和链接检查，不要求本地重跑无关构建。
+
+## 合并后的 CI 核对
+
+完整规则见[贡献指南](../CONTRIBUTING.zh-CN.md#合并前与合并后都要检查-ci)。使用 GitHub CLI 时，在仓库根目录查询 PR 的真实合并提交：
+
+```bash
+gh pr view PR_NUMBER --json state,headRefOid,baseRefName,mergeCommit,url
+```
+
+确认 `state` 为 `MERGED`、base 为 `main`，将 `mergeCommit.oid` 赋给任务变量；不要用源分支 head 代替 squash/rebase 后的 SHA：
+
+```bash
+task_merge_sha='ACTUAL_MERGED_SHA'
+gh run list --workflow CI --branch main --event push --commit "$task_merge_sha" --json databaseId,headSha,status,conclusion,url
+gh run view RUN_ID --json headSha,event,status,conclusion,jobs,url
+```
+
+核对 SHA、触发事件及必需 job 的实际结论。没有找到运行或仍在等待时，保持“已合并，等待主分支验收”；成功后在 PR/交接记录补充 run 链接。`main` 又更新时，还需验证最新 head。合并后失败的处理见贡献指南，不能用合并前或旧提交的成功替代。
 
 ## Server 与 CLI
 

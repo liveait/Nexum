@@ -29,9 +29,15 @@ apps/
 
 Keep UI logic out of Core and engine-specific details out of the Domain Model. Add focused tests and update both language versions of affected documentation when behavior changes. Check [Contributing](../CONTRIBUTING.md) for changes that require an RFC.
 
+## Development Workflow Entry
+
+See the [Contribution Workflow](../CONTRIBUTING.md#development-workflow) for task definition, separate worktrees, collaboration, review, test gates, merging, and cleanup. This guide maintains environment and execution commands; also read root `AGENTS.md` when starting a task.
+
+Acceptance status: operational guidance and protection contracts do not replace verification of a particular commit. Draft baseline `3768c3a` excludes Server unit/persistence tests from CI; review found regressions in range validation, file protection, final progress, and completion recovery. Treat those behaviors as awaiting fixes and verification, not accepted. Update this status with tests and CI for the final fixed SHA.
+
 ## Rust Checks
 
-From the repository root, run the same commands as `.github/workflows/ci.yml`:
+From the repository root, run the complete Rust gates:
 
 ```bash
 cargo fmt --all -- --check
@@ -40,7 +46,36 @@ cargo test --locked --workspace
 cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-`Cargo.lock` is committed because this workspace ships Server, CLI, and Desktop binaries; keep it updated when changing Rust dependencies. CI runs these Rust checks on Ubuntu. A separate macOS job installs the Desktop package from `apps/desktop/pnpm-lock.yaml` with `--frozen-lockfile`, builds its TypeScript frontend and `.app` bundle, and checks the bundled language declarations. It does not build the Browser extension or produce signed and notarized release artifacts.
+`Cargo.lock` is committed because this workspace ships Server, CLI, and Desktop binaries; keep it updated when changing Rust dependencies. The Rust CI job should run the complete gates on Ubuntu, including Server unit, `managed`, and `persistence` tests. Verify the actual workflow and logs; green status alone does not establish coverage. A separate macOS job installs the Desktop package from `apps/desktop/pnpm-lock.yaml` with `--frozen-lockfile`, runs `pnpm build` and `pnpm test`, builds the `.app` bundle, and verifies localization declarations, signatures, and managed Server resources. It does not build the Browser extension or produce signed and notarized release artifacts.
+
+To investigate Server regressions, run from the repository root:
+
+```bash
+cargo test --locked -p nexum-server
+cargo test --locked -p nexum-server --test persistence -- --test-threads=1
+```
+
+The latter isolates persistence/process scenarios; it does not replace the full gate. Preserve the complete test set and assertions when resolving environment/timing issues and record the reason for execution-mode changes.
+
+For Desktop frontend changes, also run `pnpm install --frozen-lockfile`, `pnpm build`, and `pnpm test` from `apps/desktop`. Native behavior or packaging changes additionally require the Desktop section's app build, bundle verification, and native acceptance. Documentation-only changes need diff, content, and link inspection without unrelated local builds.
+
+## Checking CI After Merge
+
+See the [Contribution Workflow](../CONTRIBUTING.md#verify-ci-before-and-after-merging) for the full rules. With GitHub CLI, query the actual merged commit from the repository root:
+
+```bash
+gh pr view PR_NUMBER --json state,headRefOid,baseRefName,mergeCommit,url
+```
+
+Confirm `state` is `MERGED` and base is `main`. Put `mergeCommit.oid` in a task-specific variable; do not substitute the source head for a squash/rebase result:
+
+```bash
+task_merge_sha='ACTUAL_MERGED_SHA'
+gh run list --workflow CI --branch main --event push --commit "$task_merge_sha" --json databaseId,headSha,status,conclusion,url
+gh run view RUN_ID --json headSha,event,status,conclusion,jobs,url
+```
+
+Verify the SHA, event, and actual required-job conclusions. If a run is missing or pending, keep the status “merged, awaiting main acceptance.” Record the successful run link in the PR/handoff. Also verify the latest head if `main` advances. Follow the contribution guide for failures; pre-merge or older successes cannot replace this check.
 
 ## Server and CLI
 
