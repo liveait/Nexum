@@ -25,7 +25,10 @@ static NEXT_TEMP_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
 /// Inactivity bound on the response body. A stale socket returns a zero-byte
 /// timeout within this window so pause and cancel take effect promptly instead
 /// of blocking for the whole 30-minute request timeout.
-const READ_STALL_TIMEOUT: Duration = Duration::from_secs(3);
+// Keep the read boundary below the server RPC timeout so a pause or remove
+// request cannot wait longer than the client connection for a response that
+// is currently blocked on the next body chunk.
+const READ_STALL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Consecutive zero-data stalls tolerated before a dead connection is failed.
 /// Any byte read resets the counter, so a slow-but-flowing connection never trips
