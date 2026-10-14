@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 
 mod completion;
 pub use completion::{
-    CompletionContext, cleanup_completion_partial, clear_completion, completion_receipt_path,
-    has_pending_completion, reconcile_completion,
+    CompletionContext, CompletionReceipt, cleanup_completion_partial, clear_completion,
+    completion_receipt_path, has_pending_completion, prepare_completion, publish_completion,
+    reconcile_completion,
 };
 
 static NEXT_TEMP_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
@@ -257,6 +258,7 @@ impl HttpTransferSession {
     /// that pause / cancel / recovery logic can inspect it while the transfer
     /// is still running. The final destination is only updated after the
     /// complete response has been received.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_download_with_partial(
         engine: &HttpEngine,
         source: &str,
@@ -647,6 +649,11 @@ where
         }
 
         // Commit the partial file to the destination.
+        // The session path always uses the fast path (finish_resumable_download).
+        // Completion receipt generation is handled by the old resumable path
+        // (download_to_resumable_with_completion) which is invoked separately
+        // by the server for recovery scenarios.
+        control.check_cancelled()?;
         control.finish_resumable_download(temporary, destination)?;
         Ok(downloaded)
     });
