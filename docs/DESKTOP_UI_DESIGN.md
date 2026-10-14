@@ -69,7 +69,7 @@ Use a macOS-style sidebar and a single main task surface rather than tabs across
 └───────────────┴────────────────────────────────────────────────┘
 ```
 
-图示术语 / Diagram terms: Sidebar = 侧边栏；filter = 过滤；search = 搜索；Task list = 任务列表；name/status/progress/destination = 名称/状态/进度/目标路径。
+图示术语 / Diagram terms: 侧边栏 = Sidebar；过滤 = filter；搜索 = search；任务列表 = Task list；名称/状态/进度/目标路径 = name/status/progress/destination。
 
 - 原生窗口默认尺寸为 1200×800，有下载任务时可同时显示任务列表与 Inspector。窗口仍可调整大小；目前未配置原生最小尺寸。
 

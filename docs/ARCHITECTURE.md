@@ -48,7 +48,7 @@ Desktop (Tauri) ───┼── line-delimited JSON-RPC 2.0 / TCP
 Browser extension ── HTTP(S) POST /jsonrpc + CORS (same listener)
 ```
 
-图示术语 / Diagram terms: Local server = 本地 Server；HTTP dispatch coordinator = HTTP 派发协调器；HTTP worker = HTTP Worker；destination = 目标文件；progress/final result = 进度/最终结果；event pump = 事件泵；TCP stream = TCP 流；Desktop event client = Desktop 事件客户端；InMemory (injectable) = 可注入内存实现；Core library API = Core 库 API；Browser extension = Browser 扩展。
+图示术语 / Diagram terms: 本地 Server = Local server；HTTP 派发协调器 = HTTP dispatch coordinator；HTTP Worker = HTTP worker；目标文件 = destination；进度/最终结果 = progress/final result；事件泵 = event pump；TCP 流 = TCP stream；Desktop 事件客户端 = Desktop event client；可注入内存实现 = InMemory (injectable)；Core 库 API = Core library API；Browser 扩展 = Browser extension。
 
 Server 默认监听 `127.0.0.1:39100`。当前实现始终绑定回环地址，`--port` 只改变端口。CLI 可以连接不带 scheme 的 TCP 地址，也可以用 `tls://host:port` 选择 TLS；Desktop UI 可以填写 Server 地址。同一个监听器同时接受按行分隔的 TCP JSON-RPC 和单请求 HTTP(S) `POST /jsonrpc`。HTTP 请求必须使用 `Content-Type: application/json` 并提供有上限的 `Content-Length`；分块请求和事件订阅仍不支持 HTTP(S) 传输。只有通过校验的 Chrome、Firefox 或 Safari 扩展 Origin 会收到 CORS 响应；网页 Origin 会在 RPC 分发前被拒绝。
 
