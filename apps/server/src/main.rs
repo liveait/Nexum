@@ -733,6 +733,7 @@ fn run_session_download(
         &partial_path,
         control,
         has_valid_partial,
+        Some(completion_context.clone()),
     ) {
         Ok(session) => session,
         Err(error) => {
@@ -751,7 +752,11 @@ fn run_session_download(
 
     // Poll progress until the session reaches a terminal state.
     let mut progress_reporter = ProgressReporter::default();
-    let poll_interval = Duration::from_millis(200);
+    // Keep terminal failures responsive while retaining a bounded polling
+    // cadence for progress persistence.  A long first sleep leaves a task
+    // reported as Downloading after startup even when the worker has already
+    // failed (for example after recovering a stale connection).
+    let poll_interval = Duration::from_millis(20);
 
     loop {
         std::thread::sleep(poll_interval);
@@ -794,6 +799,11 @@ fn run_session_download(
 
     // Session reached terminal state — wait for the background thread and
     // handle the result.
+    // Capture the engine's terminal error before consuming the session.  The
+    // generic fallback hid useful causes such as an existing destination and
+    // made RPC callers unable to distinguish a local publication refusal from
+    // a network failure.
+    let session_error = session.error();
     let (final_state, final_progress) =
         <HttpTransferSession as TransferSession>::wait(Box::new(session));
 
@@ -815,7 +825,9 @@ fn run_session_download(
             // the byte count and total size of the completed download).
             Ok(final_progress)
         } else {
-            Err(EngineError::Failed("transfer failed".into()))
+            Err(EngineError::Failed(
+                session_error.unwrap_or_else(|| "transfer failed".to_owned()),
+            ))
         },
     )
 }
@@ -2220,6 +2232,106 @@ fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Resu
         }
     })
     .map_err(|error| io::Error::other(format!("task recovery failed: {error:?}")))?;
+
+    // A worker publishes the response and its receipt before it persists the
+    // terminal task state.  A process crash can therefore leave a task in an
+    // interrupted state even though the response is already complete.  Do this
+    // reconciliation before returning the core so no queued task can issue a
+    // second HTTP request for bytes we already have.
+    let recovered_tasks: Vec<_> = core.tasks.list().cloned().collect();
+    for task in recovered_tasks {
+        if task.state == TaskState::Completed {
+            continue;
+        }
+
+        let context = CompletionContext::new(task.id.clone(), data_dir);
+        match std::fs::symlink_metadata(completion_receipt_path(&context)) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                mark_recovery_failed(
+                    &mut core,
+                    &task.id,
+                    format!("HTTP completion reconciliation: {error}"),
+                )?;
+                continue;
+            }
+        }
+        let destination = match normalized_destination(task.destination.as_str(), data_dir) {
+            Ok(destination) => destination,
+            Err(error) => {
+                // A destination that cannot be normalized cannot be safely
+                // reconciled.  Leave a durable failure instead of allowing a
+                // queued recovery to spin on the same invalid path.
+                mark_recovery_failed(
+                    &mut core,
+                    &task.id,
+                    format!("HTTP completion reconciliation: {error}"),
+                )?;
+                continue;
+            }
+        };
+        let destination = destination
+            .to_str()
+            .expect("normalized destination is UTF-8")
+            .to_owned();
+        let partial = resumable_partial_path(Path::new(&destination));
+        let control = HttpTransferControl::new();
+
+        match nexum_core::nexum_engine::reconcile_completion(
+            &context,
+            task.source.as_str(),
+            &destination,
+            &partial,
+            &control,
+        ) {
+            Ok(Some(progress)) => {
+                // Recovery normalizes interrupted tasks to Queued.  Claim the
+                // queue entry briefly so the regular completion transition
+                // (Queued -> Downloading -> Completed) remains valid without
+                // dispatching a network worker.
+                let claimed = core.claim_queued(&task.id).map_err(|error| {
+                    io::Error::other(format!("task recovery failed: {error:?}"))
+                })?;
+                if !claimed {
+                    mark_recovery_failed(
+                        &mut core,
+                        &task.id,
+                        "HTTP completion reconciliation: task was not queued".to_owned(),
+                    )?;
+                    continue;
+                }
+                if let Err(error) = core.complete_task(&task.id, progress) {
+                    mark_recovery_failed(
+                        &mut core,
+                        &task.id,
+                        format!(
+                            "HTTP completion reconciliation could not persist Completed: {error:?}"
+                        ),
+                    )?;
+                    continue;
+                }
+                if let Err(error) = cleanup_completion_partial(
+                    &context,
+                    task.source.as_str(),
+                    &destination,
+                    &partial,
+                )
+                .and_then(|()| clear_completion(&context))
+                {
+                    // Completed is already durable.  Retain the receipt when
+                    // cleanup cannot prove the staging inode, allowing a later
+                    // startup to retry cleanup without redownloading.
+                    eprintln!("task {} completed receipt cleanup failed: {error}", task.id);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                mark_recovery_failed(&mut core, &task.id, error.to_string())?;
+            }
+        }
+    }
+
     // These tasks already have a durable Completed snapshot. Cleanup compares
     // staging identity and only hashes a small validator sidecar at startup.
     for task in core.tasks.list() {
@@ -2254,6 +2366,26 @@ fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Resu
         }
     }
     Ok(core)
+}
+
+/// Persist a startup reconciliation failure without entering the normal
+/// retry loop.  Recovery tasks are queued in memory so they can be reconciled
+/// synchronously; `Scheduler::mark_finished(Failed)` would retry them and may
+/// issue a network request for a malformed or replaced completion receipt.
+fn mark_recovery_failed(core: &mut ServerCore, id: &TaskId, error: String) -> io::Result<()> {
+    let mut task = core
+        .tasks
+        .remove(id)
+        .map_err(|error| io::Error::other(format!("task recovery failed: {error}")))?;
+    let previous_state = task.state;
+    core.scheduler.forget_task(id, previous_state);
+    task.state = TaskState::Failed;
+    task.last_error = Some(error);
+    core.tasks
+        .restore(task)
+        .map_err(|error| io::Error::other(format!("task recovery failed: {error}")))?;
+    core.persist_task(id)
+        .map_err(|error| io::Error::other(format!("task recovery failed: {error:?}")))
 }
 
 fn load_tls_server_config(config: &ServerConfig) -> io::Result<Option<Arc<rustls::ServerConfig>>> {
@@ -2334,6 +2466,24 @@ fn main() -> io::Result<()> {
 
     spawn_event_pump(Arc::clone(&state));
     dispatch_available_http_tasks(&state);
+    // Let immediately failing workers (for example a recovered connection
+    // whose peer has gone away) publish their terminal state before accepting
+    // the first RPC.  The bounded wait does not hold the server mutex and
+    // never delays startup for a healthy long-running transfer.
+    let startup_deadline = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < startup_deadline {
+        let has_active = state
+            .lock()
+            .expect("server state mutex poisoned")
+            .active_http
+            .values()
+            .next()
+            .is_some();
+        if !has_active {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 
     eprintln!("Nexum server listening on {address}");
     eprintln!(
