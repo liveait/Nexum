@@ -64,9 +64,9 @@ This changelog records notable changes, not acceptance of every milestone. PR #5
 
   Failures preserve the error in `TaskView` and requeue while the default three-retry budget remains; the dispatcher starts the retry when a slot is available, and after the budget is exhausted the task stays `Failed`. A new claim clears the previous error.
 
-  活跃 HTTP Worker 现在支持响应块边界 `task.pause`、同进程 `task.resume` 和破坏性 `task.remove` 取消；响应体读取按 1 秒无数据窗口检查暂停／取消，连续 8 次无数据判为停滞；删除最多等待 Worker 30 秒，超时返回错误。重启恢复会对校验器匹配的 HTTP 部分响应使用 `Range`/`If-Range`；校验器缺失或变化、收到 `200`、`Content-Range` 无效、长度不一致，或响应没有校验器时，都会从零开始。
+  活跃 HTTP Worker 现在支持响应块边界 `task.pause`、同进程 `task.resume` 和破坏性 `task.remove` 取消；响应体读取按 1 秒无数据窗口检查暂停／取消，连续 8 次无数据判为停滞；删除最多等待 Worker 10 秒，超时返回错误。重启恢复会对校验器匹配的 HTTP 部分响应使用 `Range`/`If-Range`；校验器缺失或变化、收到 `200`、`Content-Range` 无效、长度不一致，或响应没有校验器时，都会从零开始。
 
-  Active HTTP workers now support chunk-boundary `task.pause`, same-process `task.resume`, and destructive `task.remove` cancellation; response-body reads check pause/cancel at one-second no-data windows and fail as stalled after eight consecutive empty windows. Removal waits up to 30 seconds for the worker and returns an error on timeout. Restart recovery resumes a validator-matched HTTP partial with `Range`/`If-Range`; missing or changed validators, a `200` response, invalid `Content-Range`, inconsistent length, or a response without a validator fall back to byte zero.
+  Active HTTP workers now support chunk-boundary `task.pause`, same-process `task.resume`, and destructive `task.remove` cancellation; response-body reads check pause/cancel at one-second no-data windows and fail as stalled after eight consecutive empty windows. Removal waits up to 10 seconds for the worker and returns an error on timeout. Restart recovery resumes a validator-matched HTTP partial with `Range`/`If-Range`; missing or changed validators, a `200` response, invalid `Content-Range`, inconsistent length, or a response without a validator fall back to byte zero.
 
   客户端可以通过独立 `events.subscribe` TCP 连接接收带序号的 Task/Scheduler 通知；事件流没有回放缓冲，连接或重连后客户端会刷新完整快照。配置的 `max_connections` 会在 TCP 接入时执行，超出上限的连接会立即关闭。
 

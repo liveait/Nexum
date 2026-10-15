@@ -184,9 +184,9 @@ The default policy permits three retries. Claiming a new attempt resets the pers
 
 Active HTTP transfers can be paused at a response chunk boundary and resumed in the same server process; the temporary file and open response are retained while paused. `task.remove` cancels an active HTTP worker, removes the task, and leaves the existing destination untouched.
 
-响应体读取按 1 秒无数据窗口检查暂停／取消，连续 8 次无数据判为停滞。`task.remove` 最多等待 Worker 退出 30 秒；超时返回错误，退出后可重试删除。
+响应体读取按 1 秒无数据窗口检查暂停／取消，连续 8 次无数据判为停滞。`task.remove` 最多等待 Worker 退出 10 秒；超时返回错误，退出后可重试删除。
 
-Response-body reads check pause/cancel at one-second no-data windows and fail as stalled after eight consecutive empty windows. `task.remove` waits up to 30 seconds for worker exit; a timeout returns an error, and removal can be retried after exit.
+Response-body reads check pause/cancel at one-second no-data windows and fail as stalled after eight consecutive empty windows. `task.remove` waits up to 10 seconds for worker exit; a timeout returns an error, and removal can be retried after exit.
 
 Server 重启后，只有 sidecar 校验器匹配且服务端返回匹配的 `206 Partial Content` 时，中断的 HTTP 响应才会使用 `Range` 与 `If-Range` 续传。收到 `200`、校验器变化或缺失、`Content-Range` 无效或长度不一致时，会删除部分响应并从零开始；没有 ETag 或 Last-Modified 的响应在中断后也会从零开始。
 
