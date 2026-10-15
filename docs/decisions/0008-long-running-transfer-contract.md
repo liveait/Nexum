@@ -14,9 +14,9 @@
 
 ## 背景 / Context
 
-当前 `EngineAdapter` trait 是同步的：`start()` 立即返回句柄，而实际传输在独立 worker 中运行。Server 层拥有 HTTP worker 并派发任务。同步契约适用于 HTTP（Server 管理 worker 线程），但无法表达 FTP（可能需要数分钟连接、认证和列出目录）或涉及多步协商的未来协议所需的语义。
+设计前的 `EngineAdapter` trait 只有同步启动接口；HTTP Adapter 的 `start()` 等待完整下载后才返回句柄，Server 则使用自有 Worker 提供异步执行与控制。该接口没有统一表达连接、认证、协商、持续进度、暂停／取消及跨重启恢复等长期传输阶段，后续 FTP 等协议需要可观察、可控制的统一 session 契约。
 
-The current `EngineAdapter` trait is synchronous: `start()` returns immediately with a handle, while the real transfer runs in a separate worker. The server layer owns the HTTP worker and dispatches tasks. The synchronous contract works for HTTP (where the server manages a worker thread) but cannot express the semantics needed for FTP (which may take minutes to connect, authenticate, and list directories) or future protocols that involve multi-step negotiations.
+Before this design, `EngineAdapter` exposed a synchronous start interface: the HTTP adapter's `start()` waits for the whole download before returning a handle, while the Server uses its own worker for asynchronous execution and controls. This interface does not uniformly express connection, authentication, negotiation, ongoing progress, pause/cancel, or restart recovery. Future protocols such as FTP need one observable, controllable session contract for these long-running phases.
 
 M5 计划要求：“为长期运行的引擎定义能力声明、异步启动／进度、暂停／取消、重试、恢复元数据、错误和 Server 派发。现有 `EngineAdapter::start` 同步返回，而实际 HTTP 控制位于独立 Server worker；在添加新协议前，先让 HTTP 通过新契约，并保持 M2–M4 无回归。”
 
@@ -123,13 +123,26 @@ The plan for M5 says: “Define capability declarations, asynchronous start/prog
 6. **向后兼容**：为 `InMemoryEngine` 及其他同步引擎保留现有同步 `EngineAdapter::start()`。新的 session API 为可选；实现它的引擎获得增强的能力声明和长期运行支持。<br>
    **Backward compatibility**: Retain the existing synchronous `EngineAdapter::start()` for `InMemoryEngine` and other synchronous engines. The new session API is opt-in; engines that implement it get enhanced capability declarations and long-running support.
 
+<a id="implementation-status"></a>
+<a id="实施状态"></a>
+
+## 实施状态 / Implementation Status
+
+截至 2026-10-15，能力字段、`TransferSession`、`ResumableEngine` 和 `ResumeMetadata` 已定义，HTTP session 与 Server 消费者已接线。PR #58 在 `f1817f4` 修复单连接续传的整文件进度、响应长度、具体错误、控制响应和完成凭证，并在网络派发前执行启动对账；验证记录见[开发指南](../DEVELOPMENT.md#development-workflow-entry)。
+
+As of 2026-10-15, capability fields, `TransferSession`, `ResumableEngine`, and `ResumeMetadata` are defined, and the HTTP session is wired through its Server consumer. PR #58 at `f1817f4` repairs whole-file resume progress, response lengths, specific errors, control responsiveness, and completion receipts in the single-connection path, and performs startup reconciliation before network dispatch. See the [Development Guide](../DEVELOPMENT.md#development-workflow-entry) for verification records.
+
+本轮将 Server HTTP/HTTPS 派发统一到单连接 session，移除自动分段／探测及 fixture URL 特判；本次改动同样须满足独立审查、完整门槛及合并前后 CI。保留的分段 API 是未验收的 M4 基础，不能据此宣称支持安全多连接、段级恢复或安全回退。Server 仍直接选择 HTTP/HTTPS，尚未按 Engine Registry 的能力声明通用路由；`ResumableEngine` 尚无可用实现，FTP/FTPS 的凭据、控制、续传和重启恢复均未实现。因此本 ADR 的设计接受与单连接 HTTP 回归修复不等于 M4 或 M5 完成。
+
+This change confines Server HTTP/HTTPS dispatch to the single-connection session, removing automatic segmentation/probing and fixture-URL special cases; it must also satisfy independent review, complete gates, and CI before and after merge. Retained segment APIs are unaccepted M4 foundations and do not establish safe multi-connection downloads, segment recovery, or safe fallback. The Server still selects HTTP/HTTPS directly instead of routing generically through Engine Registry capability declarations. `ResumableEngine` has no usable implementation, and FTP/FTPS credentials, controls, resume, and restart recovery remain unimplemented. Acceptance of this design and the single-connection HTTP regression fixes therefore do not complete M4 or M5.
+
 <a id="rationale"></a>
 <a id="理由"></a>
 
 ## 理由 / Rationale
 
-- **FTP 和其他长期协议**需要在开始下载前连接、认证、协商，甚至列出目录。这些步骤可能耗时数分钟，无法由立即返回的同步 `start()` 建模。<br>
-  **FTP and other long-running protocols** need to connect, authenticate, negotiate, and potentially list directories before starting a download. These steps can take minutes and cannot be modeled by a synchronous `start()` that returns immediately.
+- **FTP 和其他长期协议**需要在开始下载前连接、认证、协商，甚至列出目录。这些步骤可能耗时数分钟；同步 `start()` 无法为调用者提供覆盖各阶段的统一观察与控制句柄。<br>
+  **FTP and other long-running protocols** need to connect, authenticate, negotiate, and potentially list directories before starting a download. These steps can take minutes; synchronous `start()` does not give callers a uniform handle for observing and controlling every phase.
 - **能力声明**使 Scheduler 能根据来源协议和引擎能力，将任务路由到合适的引擎。<br>
   **Capability declarations** enable the scheduler to route tasks to appropriate engines based on source protocol and engine capabilities.
 - **异步 Session API**在管理队列、任务领取和重试预算的 Scheduler 与管理实际传输生命周期的 Engine 之间提供边界。<br>

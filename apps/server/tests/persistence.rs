@@ -656,6 +656,129 @@ impl HttpFixture {
     }
 }
 
+// Advertise real Range support so a large localhost response exercises the
+// same Server consumer path as a public origin, including any probe requests.
+struct RangeAdvertisingHttpFixture {
+    source: String,
+    stop: Sender<()>,
+    worker: Option<JoinHandle<Vec<String>>>,
+}
+
+impl RangeAdvertisingHttpFixture {
+    fn new(body: Vec<u8>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let source = format!(
+            "http://localhost:{}/large",
+            listener.local_addr().unwrap().port()
+        );
+        let (stop, stopped) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut requests = Vec::new();
+            loop {
+                if stopped.try_recv().is_ok() {
+                    return requests;
+                }
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("could not accept HTTP fixture request: {error}"),
+                };
+                // macOS can inherit O_NONBLOCK from the listening socket.
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let head = request.starts_with("HEAD ");
+                let range = request.lines().find_map(|line| {
+                    let line = line.to_ascii_lowercase();
+                    let value = line.strip_prefix("range: bytes=")?;
+                    let (start, end) = value.split_once('-').unwrap();
+                    Some((
+                        start.parse::<usize>().unwrap(),
+                        if end.is_empty() {
+                            body.len() - 1
+                        } else {
+                            end.parse::<usize>().unwrap()
+                        },
+                    ))
+                });
+                requests.push(request);
+                let (status, start, end) = match range {
+                    Some((start, end)) => ("206 Partial Content", start, end),
+                    None => ("200 OK", 0, body.len() - 1),
+                };
+                let mut response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"large-v1\"\r\nConnection: close\r\n",
+                    end - start + 1,
+                );
+                if range.is_some() {
+                    response.push_str(&format!(
+                        "Content-Range: bytes {start}-{end}/{}\r\n",
+                        body.len()
+                    ));
+                }
+                response.push_str("\r\n");
+                // A probe may drop its connection as soon as headers arrive.
+                let _ = stream.write_all(response.as_bytes());
+                if !head {
+                    let _ = stream.write_all(&body[start..=end]);
+                }
+            }
+        });
+        Self {
+            source,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        self.stop.send(()).unwrap();
+        self.worker.take().unwrap().join().unwrap()
+    }
+}
+
+impl Drop for RangeAdvertisingHttpFixture {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let _ = self.stop.send(());
+            let _ = worker.join();
+        }
+    }
+}
+
+fn large_http_body() -> Vec<u8> {
+    // Distinct bytes across the former segments expose wrong offsets or
+    // reordered data; the exact content is also checked against its receipt.
+    (0..1536 * 1024 + 137)
+        .map(|index| (((index * 31) ^ (index >> 9)) % 251) as u8)
+        .collect()
+}
+
+fn assert_one_full_http_get(requests: &[String]) {
+    assert_eq!(requests.len(), 1, "unexpected HTTP requests: {requests:#?}");
+    assert!(requests[0].starts_with("GET /large HTTP/1.1\r\n"));
+    assert!(
+        !requests[0]
+            .lines()
+            .any(|line| line.to_ascii_lowercase().starts_with("range:"))
+    );
+}
+
 struct ResumableHttpFixture {
     source: String,
     first_chunk_sent: Receiver<()>,
@@ -1076,6 +1199,142 @@ fn removing_a_stalled_download_returns_within_budget() {
     );
     fixture.finish();
     server.stop();
+}
+
+#[test]
+fn large_http_download_uses_one_get_and_persists_exact_completion() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let body = large_http_body();
+    let fixture = RangeAdvertisingHttpFixture::new(body.clone());
+    let id = "large-http-completion";
+    let destination = dir.output_path(id);
+    let mut server = ServerProcess::start(dir.path());
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": id,
+            "source": fixture.source,
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    server.call("task.queue", Some(json!({"id": id})));
+    server.wait_for_state(id, "Completed");
+    let task = server.call("task.get", Some(json!({"id": id})));
+    server.stop();
+    assert_one_full_http_get(&fixture.finish());
+    assert_eq!(fs::read(&destination).unwrap(), body);
+    assert_eq!(task["downloaded_bytes"], body.len());
+    assert_eq!(task["total_bytes"], body.len());
+    assert_eq!(task["error"], Value::Null);
+    let repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+    let stored = repository.get(&TaskId::from(id)).unwrap().unwrap();
+    assert_eq!(stored.state, TaskState::Completed);
+    assert_eq!(stored.progress.downloaded_bytes, body.len() as u64);
+    assert_eq!(stored.progress.total_bytes, Some(body.len() as u64));
+    assert!(!completion_receipt_path(&CompletionContext::new(id, dir.path())).exists());
+}
+
+#[test]
+fn large_http_completion_sqlite_failure_recovers_without_origin() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let body = large_http_body();
+    let fixture = RangeAdvertisingHttpFixture::new(body.clone());
+    let id = "large-http-completion-save-failure";
+    let destination = dir.output_path(id);
+    let context = CompletionContext::new(id, dir.path());
+    let mut server = ServerProcess::start(dir.path());
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": id,
+            "source": fixture.source,
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    let connection = rusqlite::Connection::open(dir.path().join("nexum.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_large_completion BEFORE UPDATE ON tasks
+         WHEN NEW.state = 'completed' BEGIN SELECT RAISE(FAIL, 'completion save refused'); END;",
+        )
+        .unwrap();
+    server.call("task.queue", Some(json!({"id": id})));
+    server.wait_for_state(id, "Failed");
+    assert_eq!(fs::read(&destination).unwrap(), body);
+    let receipt_path = completion_receipt_path(&context);
+    assert!(
+        receipt_path.exists(),
+        "completed large response lost its recovery receipt"
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(
+        receipt["file"]["sha256"],
+        "f1fee4f08908ad9f81ebd057747783a9783aac7bba5625e02379566f014d21cc"
+    );
+    assert_eq!(receipt["downloaded_bytes"], body.len());
+    assert_eq!(receipt["total_bytes"], body.len());
+    server.stop();
+    let requests = fixture.finish();
+    assert_one_full_http_get(&requests);
+    connection
+        .execute_batch("DROP TRIGGER reject_large_completion")
+        .unwrap();
+    drop(connection);
+
+    // The listener is closed before startup: successful receipt recovery must
+    // persist Completed without fetching the origin again.
+    let mut restarted = ServerProcess::start(dir.path());
+    restarted.wait_for_state(id, "Completed");
+    let task = restarted.call("task.get", Some(json!({"id": id})));
+    assert_eq!(task["downloaded_bytes"], body.len());
+    assert_eq!(task["total_bytes"], body.len());
+    assert_eq!(task["error"], Value::Null);
+    assert_eq!(fs::read(&destination).unwrap(), body);
+    assert!(!receipt_path.exists());
+    restarted.stop();
+    let repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+    let stored = repository.get(&TaskId::from(id)).unwrap().unwrap();
+    assert_eq!(stored.state, TaskState::Completed);
+    assert_eq!(stored.progress.downloaded_bytes, body.len() as u64);
+    assert_eq!(stored.progress.total_bytes, Some(body.len() as u64));
+}
+
+#[test]
+fn large_http_download_preserves_existing_destination() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let fixture = RangeAdvertisingHttpFixture::new(large_http_body());
+    let id = "large-http-existing-destination";
+    let destination = dir.output_path(id);
+    let original = b"existing file must survive a large download";
+    fs::write(&destination, original).unwrap();
+    let mut server = ServerProcess::start(dir.path());
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": id,
+            "source": fixture.source,
+            "destination": destination.to_string_lossy(),
+        })),
+    );
+    server.call("task.queue", Some(json!({"id": id})));
+    server.wait_for_state(id, "Failed");
+    let task = server.call("task.get", Some(json!({"id": id})));
+    assert!(
+        task["error"]
+            .as_str()
+            .unwrap()
+            .contains("destination already exists")
+    );
+    assert_eq!(fs::read(&destination).unwrap(), original);
+    assert!(!completion_receipt_path(&CompletionContext::new(id, dir.path())).exists());
+    server.stop();
+    assert!(
+        fixture.finish().is_empty(),
+        "an existing target must be rejected before HTTP requests"
+    );
 }
 
 #[test]

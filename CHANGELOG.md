@@ -3,9 +3,9 @@
 
 # 变更日志 / Changelog
 
-此处记录 Nexum 的重要变更。条目记录开发历史，不代表当前提交已验收。对 `3768c3a` 的审查发现下载回归及 Server 测试排除；PR #58 仍待最终 SHA 的独立审查和完整门槛验证。M4/M5 属于部分实现，待补齐与验收。
+此处记录 Nexum 的重要变更，条目不代表所有里程碑已验收。PR #58 已合并为 `f1817f4`，恢复单连接 HTTP 与启动完成对账，验证记录见[开发指南](docs/DEVELOPMENT.md#development-workflow-entry)。本次 Server 单连接收敛须满足独立审查、完整门槛及合并前后 CI；M4/M5 仍属部分实现，M0/M1/M3 的剩余验收见[开发计划](docs/DEVELOPMENT_PLAN.md)。
 
-All notable changes to Nexum will be documented here. Entries record development history, not acceptance of the current commit. The `3768c3a` review found download regressions and Server test exclusions; PR #58 awaits independent review and full gates at its final SHA. M4/M5 remain partially implemented, with missing behavior and acceptance remaining.
+This changelog records notable changes, not acceptance of every milestone. PR #58 merged as `f1817f4`, restoring single-connection HTTP and startup completion reconciliation; see the [Development Guide](docs/DEVELOPMENT.md#development-workflow-entry) for verification records. This change confining the Server to a single connection must satisfy independent review, complete gates, and CI before and after merge. M4/M5 remain partial; see the [Development Plan](docs/DEVELOPMENT_PLAN.md) for remaining M0/M1/M3 acceptance.
 
 <a id="unreleased"></a>
 <a id="未发布"></a>
@@ -17,24 +17,24 @@ All notable changes to Nexum will be documented here. Entries record development
 
 ### 新增 / Added
 
-- **单文件多连接 HTTP 下载——部分实现，待补齐与验收**：引擎用 `Range: bytes=0-0` 探测 Range 支持、文件大小和 ETag/Last-Modified。支持 Range 且超过 1 MiB 的文件最多分为 8 个并发段；每段在独立的 current-thread Tokio runtime 和分离 std 线程中运行。
+- **单文件多连接 HTTP 基础——未接入产品，待补齐与验收**：引擎保留 `probe_range()`、`split_segments()` 和 `download_to_segments()`；分段实现以 `Range: bytes=0-0` 探测能力，可为文件构造最多 8 个并发段，每段使用独立的 current-thread Tokio runtime 和 std 线程。这些 API 的存在及辅助测试不代表多连接下载已支持。
 
-  **Multi-connection HTTP downloads — partially implemented, awaiting completion and verification**: the engine probes with `Range: bytes=0-0` for Range support, file length, and ETag/Last-Modified. Supported files larger than 1 MiB split into up to 8 concurrent segments; each runs in its own current-thread Tokio runtime on a detached std thread.
+  **Multi-connection HTTP foundations — outside the product path, incomplete and unaccepted**: the engine retains `probe_range()`, `split_segments()`, and `download_to_segments()`. The segment implementation probes with `Range: bytes=0-0` and can construct up to 8 concurrent segments, using a separate current-thread Tokio runtime and std thread per segment. API presence and helper tests do not establish multi-connection download support.
 
   各段共享 `HttpTransferControl` 实现全局带宽上限，在预分配的稀疏部分文件中定位写入。既有合约要求失败／取消时中止全部 Worker 并清理部分文件、保护已有目标，并在服务端不支持、校验失败或段长度异常时安全回退单连接。
 
   Segments share `HttpTransferControl` for a global bandwidth cap and seek within a pre-allocated sparse partial file. The intended contract aborts all workers and removes the partial on failure/cancel, preserves existing destinations, and falls back safely to a single connection for unsupported servers, failed validation, or abnormal segment lengths.
 
-  设计要求已有部分文件跳过探测以减少请求，仍须验收实际路径。现有引擎测试覆盖 `split_segments`（均衡、零长度、精确分割）和 `probe_range`（206／非 206）。
+  本轮 Server 移除自动分段／探测入口及按 fixture URL 绕过探测的逻辑，全部 HTTP/HTTPS 下载统一进入带完成凭证的单连接 session。此项收敛不等于 M4 完成；段级持久化、跨重启段恢复、安全单连接回退及真实分段路径的保护仍待实现和验收。
 
-  The design skips probing for existing partials to avoid extra requests, subject to final-path verification. Existing engine tests cover `split_segments` (balance, zero-length, exact splits) and `probe_range` (206/non-206).
+  This change removes automatic segmentation/probing and fixture-URL probing bypasses from the Server; every HTTP/HTTPS download uses the single-connection session with completion receipts. This does not complete M4: durable segment state, cross-restart segment recovery, safe single-connection fallback, and protection through the real segment path remain to be implemented and accepted.
 
-  直接审查已复现错误 Range／校验器被接受、不安全的部分文件处理及取消后仍发布；辅助函数测试不能证明新执行路径满足上述合约。PR #58 仍待最终 SHA 复验。
+  对 `3768c3a` 的直接审查曾复现错误 Range／校验器被接受、不安全的部分文件处理及取消后仍发布。PR #58 修复单连接 session 与启动恢复，但没有验收分段执行；未完成这些保护前不重新启用产品分段入口。
 
-  Direct review reproduced incorrect Range/validator acceptance, unsafe partial-file handling, and publication after cancellation; these helpers do not prove the new execution path meets that contract. PR #58 remains pending final-SHA verification.
+  Direct review at `3768c3a` reproduced incorrect Range/validator acceptance, unsafe partial-file handling, and publication after cancellation. PR #58 repairs the single-connection session and startup recovery, without accepting segment execution. Product segment dispatch remains disabled until these protections are complete.
 
-- **HTTP 完成对账**：发布前以私有凭证绑定完整字节和任务／文件身份。重启 worker 可无网络校验已发布文件或重新发布完整暂存文件，包括无 validator 且未知长度的响应。最终进度与 Completed 一次持久化；清理和 ID 复用保护冲突文件。对 `3768c3a` 的审查发现新 Worker 路径绕过凭证并丢弃最终进度；须通过实际 Server 路径恢复并验证这项已有保护。<br>
-  **HTTP completion reconciliation**: private receipts bind complete bytes to task/file identity before publication. A restarted worker can verify a published file or republish complete staging bytes without network access, including unknown-length responses without validators. Final progress and Completed persist together; cleanup and ID reuse preserve conflicting files. The `3768c3a` review found the new worker paths bypass receipts and discard final progress; this historical protection must be restored and verified through the active Server path.
+- **HTTP 完成对账**：单连接 session 在发布前以私有凭证绑定完整字节和任务／文件身份。PR #58 恢复 session 的凭证接线、最终进度与 `Completed` 一次持久化，并在 Server 监听和网络派发前真正执行启动对账；可无网络校验已发布文件或重新发布完整暂存文件，包括无 validator 且未知长度的完整响应。清理和 ID 复用保留冲突文件，具体失败原因进入任务视图。<br>
+  **HTTP completion reconciliation**: before publication, the single-connection session binds complete bytes to task/file identity using private receipts. PR #58 restores session receipt wiring, atomic final progress/`Completed` persistence, and startup reconciliation before the Server listens or dispatches network work. Published files can verify or complete staging bytes can republish without network access, including complete unknown-length responses without validators. Cleanup and ID reuse preserve conflicting files, and task views retain specific failure causes.
 
 - **Desktop 托管 Server**：随包可执行文件校验、私有鉴权启动、稳定 App 数据、有限子进程管理、托管／外部设置、后端生成任务 ID 和不冲突目标。关闭窗口保留下载，退出停止拥有的子进程。M1 最终发布验收仍待完成。<br>
   **Desktop managed Server**: bundled executable verification, private authenticated startup, stable App storage, bounded child supervision, Managed/External settings, backend-generated IDs and collision-safe destinations. Closing the window keeps downloads running; Quit stops the owned child. M1 final release acceptance remains open.
@@ -64,9 +64,9 @@ All notable changes to Nexum will be documented here. Entries record development
 
   Failures preserve the error in `TaskView` and requeue while the default three-retry budget remains; the dispatcher starts the retry when a slot is available, and after the budget is exhausted the task stays `Failed`. A new claim clears the previous error.
 
-  活跃 HTTP Worker 现在支持响应块边界 `task.pause`、同进程 `task.resume` 和破坏性 `task.remove` 取消；阻塞中的响应读取可能让暂停等到 30 分钟 HTTP 超时，删除最多等待 30 秒后返回错误。重启恢复会对校验器匹配的 HTTP 部分响应使用 `Range`/`If-Range`；校验器缺失或变化、收到 `200`、`Content-Range` 无效、长度不一致，或响应没有校验器时，都会从零开始。
+  活跃 HTTP Worker 现在支持响应块边界 `task.pause`、同进程 `task.resume` 和破坏性 `task.remove` 取消；响应体读取按 1 秒无数据窗口检查暂停／取消，连续 8 次无数据判为停滞；删除最多等待 Worker 30 秒，超时返回错误。重启恢复会对校验器匹配的 HTTP 部分响应使用 `Range`/`If-Range`；校验器缺失或变化、收到 `200`、`Content-Range` 无效、长度不一致，或响应没有校验器时，都会从零开始。
 
-  Active HTTP workers now support chunk-boundary `task.pause`, same-process `task.resume`, and destructive `task.remove` cancellation; a blocking response read can delay pause until the 30-minute HTTP timeout, while remove waits up to 30 seconds before returning an error. Restart recovery resumes a validator-matched HTTP partial with `Range`/`If-Range`; missing or changed validators, a `200` response, invalid `Content-Range`, inconsistent length, or a response without a validator fall back to byte zero.
+  Active HTTP workers now support chunk-boundary `task.pause`, same-process `task.resume`, and destructive `task.remove` cancellation; response-body reads check pause/cancel at one-second no-data windows and fail as stalled after eight consecutive empty windows. Removal waits up to 30 seconds for the worker and returns an error on timeout. Restart recovery resumes a validator-matched HTTP partial with `Range`/`If-Range`; missing or changed validators, a `200` response, invalid `Content-Range`, inconsistent length, or a response without a validator fall back to byte zero.
 
   客户端可以通过独立 `events.subscribe` TCP 连接接收带序号的 Task/Scheduler 通知；事件流没有回放缓冲，连接或重连后客户端会刷新完整快照。配置的 `max_connections` 会在 TCP 接入时执行，超出上限的连接会立即关闭。
 

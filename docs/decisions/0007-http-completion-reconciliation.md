@@ -32,6 +32,15 @@
 5. 删除残留暂存路径前校验文件身份，包括 hard-link 回退后两个路径同时存在的情况。删除任务先停止 worker、删除数据库任务，再清理凭证。清理失败时报告错误，并将剩余私有凭证保留为孤儿证据；不会重新创建已删除的数据库任务。复用不存在的任务 ID 前必须成功清理孤儿凭证，避免旧任务证据误认新任务。清理不删除最终目标。<br>
    Cleanup of a leftover staging path checks file identity before unlinking it, including the hard-link case where both paths remain. Task removal stops its worker and deletes the database task before clearing the receipt. If cleanup fails, report the error and retain any remaining private receipt as orphan evidence; the removed database task is not resurrected. Reuse of an absent task ID requires successful orphan-receipt cleanup before creation, so a previous task's evidence cannot complete a new task. Cleanup never deletes the final destination.
 
+<a id="implementation-status"></a>
+<a id="实施状态"></a>
+
+## 实施状态 / Implementation Status
+
+截至 2026-10-15，`f1817f4` 的 `open_core` 在监听前同步执行完整凭证对账，包括待恢复文件的 SHA-256 校验。这恢复了完成状态，但偏离第 4 条“就绪后 Worker 校验”的设计；大文件读取可能超出托管 Server 六秒就绪预算。本次单连接收敛未改变该启动路径；启动预算仍需修复及大文件原生恢复验收，现有小型 fixture 与 CI 不能证明符合该约束。第 4 条的设计要求保持有效，验证记录见[开发指南](../DEVELOPMENT.md#development-workflow-entry)。
+
+As of 2026-10-15, `open_core` at `f1817f4` performs complete receipt reconciliation synchronously before listening, including SHA-256 validation of files awaiting recovery. This restores completion state but deviates from decision 4, which requires hashing in workers after readiness; reading large files can exceed the managed Server's six-second readiness budget. This change confining downloads to one connection leaves that startup path unchanged. The budget still needs a fix and native large-file recovery acceptance; existing small fixtures and CI do not establish compliance. Decision 4 remains a design requirement. See the [Development Guide](../DEVELOPMENT.md#development-workflow-entry) for verification records.
+
 <a id="verification-plan"></a>
 <a id="验证计划"></a>
 
