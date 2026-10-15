@@ -27,9 +27,9 @@ Server 在数据目录（默认 `./data`）下打开 `nexum.sqlite`，启动时�
 
 The server opens `nexum.sqlite` under its data directory (default `./data`) and recovers stored tasks on startup. Queuing a supported HTTP/HTTPS task, restarting the server with a queued task, or completing/failing an active HTTP transfer causes the server to fill available scheduler slots automatically.
 
-跨重启续传合约要求稳定的部分文件、sidecar 及 ETag 或 Last-Modified 校验器与服务端确认的范围匹配；已审查的新路径仍须对照该合约复验。`task.start` 仍可作为手动 kick 和兼容接口，用于启动一个排队的 HTTP/HTTPS 任务，之后同一派发器会继续填充其他可用槽位。
+单连接 HTTP session 使用稳定部分文件、sidecar 及 ETag 或 Last-Modified 校验器恢复下载，并校验服务端返回的范围；进度包含已有偏移，表示整个文件。`task.start` 仍是启动一个排队 HTTP/HTTPS 任务的手动 kick 与兼容接口，之后同一派发器继续填充其他可用槽位。
 
-The restart-resume contract requires the stable partial file, sidecar, and ETag or Last-Modified validator to match a server-confirmed range; the reviewed new path still needs verification against this contract. `task.start` remains a manual kick and compatibility method for starting one queued HTTP/HTTPS task, after which the same dispatcher fills other available slots.
+The single-connection HTTP session resumes using stable partial files, sidecars, and ETag or Last-Modified validators, checking the returned range. Progress includes saved offsets and represents the whole file. `task.start` remains a manual kick and compatibility method for starting one queued HTTP/HTTPS task, after which the same dispatcher fills other available slots.
 
 Desktop 现在通过独立 TCP 事件流订阅进行去抖的实时任务刷新；事件流不可用时按已配置的刷新策略回退到轮询。Magnet 和本地文件来源可以创建任务，但尚无传输路径。
 
@@ -55,17 +55,17 @@ Executable plugins and real media processing are not active in the running serve
 
 See [Architecture](docs/ARCHITECTURE.md) for the code-level boundaries and current call paths, and the [Development Plan](docs/DEVELOPMENT_PLAN.md) for remaining integration work.
 
-ADR 0007 规定 HTTP 完成凭证须在重启后对账完整响应，覆盖文件发布与 SQLite 完成保存之间的窗口；文件身份和 SHA-256 须同时匹配，并保留无关目标文件。对 `3768c3a` 的审查发现新 Worker 路径绕过了这项保护，当前仍待验收。详见 [ADR 0007](docs/decisions/0007-http-completion-reconciliation.md)。M0 实际 VoiceOver 朗读和 M1 全新用户／升级最终验收也仍待完成。
+HTTP 完成凭证绑定完整字节、任务／文件身份及 SHA-256，覆盖文件发布与 SQLite 完成保存之间的窗口。PR #58 在 `f1817f4` 恢复单连接 session 的凭证接线和最终进度，并在 Server 监听及网络派发前执行启动对账，保留无关目标文件。详见 [ADR 0007](docs/decisions/0007-http-completion-reconciliation.md)。M0 VoiceOver、M1 全新用户／中断／升级和 M3 分发验收仍待完成。
 
-ADR 0007 defines HTTP completion receipts that reconcile fully received files after restart, including the publication/SQLite completion window. File identity and SHA-256 must match; unrelated destinations must be preserved. The `3768c3a` review found that the new worker paths bypass this protection; current acceptance remains pending. See [ADR 0007](docs/decisions/0007-http-completion-reconciliation.md). M0 actual VoiceOver speech and M1 final clean-user/upgrade acceptance also remain open.
+HTTP completion receipts bind complete bytes, task/file identity, and SHA-256 across the publication/SQLite completion window. PR #58 at `f1817f4` restores single-connection session receipt wiring and final progress, and reconciles at startup before the Server listens or dispatches network work, preserving unrelated destinations. See [ADR 0007](docs/decisions/0007-http-completion-reconciliation.md). M0 VoiceOver, M1 clean-user/interruption/upgrade, and M3 distribution acceptance remain open.
 
-PR #56/#57 引入多连接 HTTP 探测和分段：检查目标服务端的 Range 支持，超过 1 MiB 的文件可使用最多 8 个并发段。既有合约要求 Range 不可用时回退单连接、原子重组、失败／取消时中止所有 Worker，并保护目标文件。
+本轮 Server 移除自动分段／Range 探测和 fixture URL 特判，所有 HTTP/HTTPS 下载统一使用带完成凭证的单连接 session。引擎保留的探测／拆段／下载辅助 API 是未验收的 M4 基础；安全分段、段级持久化、重启恢复和单连接回退尚待完成。M5 能力路由、通用恢复及 FTP/FTPS 也未完成。
 
-PRs #56/#57 introduced multi-connection HTTP probing and segmentation: targets are checked for Range support, and files larger than 1 MiB can use up to 8 concurrent segments. The intended contract includes single-connection fallback when Range is unavailable, atomic assembly, cancellation of all workers on failure/cancel, and preservation of the destination.
+This change removes automatic segmentation/Range probing and fixture-URL special cases from the Server. All HTTP/HTTPS downloads use the single-connection session with completion receipts. Retained probe/split/download helper APIs are unaccepted M4 foundations; safe segments, durable segment state, restart recovery, and single-connection fallback remain incomplete. M5 capability routing, general recovery, and FTP/FTPS are also unfinished.
 
-对 `3768c3a` 的独立审查已复现 Range／校验器检查缺失、不安全的部分文件处理、最终进度丢失、完成凭证绕过及取消后仍发布文件。M4/M5 属于部分实现，待补齐与验收；PR #58 仍需对最终 SHA 完成审查和 CI。
+PR #58 已合并到 `main@f1817f4`，其单连接 HTTP 与启动对账修复的验证记录见[开发指南](docs/DEVELOPMENT.md#development-workflow-entry)。本次 Server 单连接收敛也须满足独立审查、完整门槛及合并前后 CI；这些门槛不代表 M4/M5 完成。
 
-Independent review of `3768c3a` reproduced missing Range/validator checks, unsafe partial-file handling, lost final progress, bypassed completion receipts, and publication after cancellation. M4/M5 are partially implemented, with missing behavior and acceptance remaining; PR #58 is awaiting review and CI against its final SHA.
+PR #58 merged into `main@f1817f4`; see the [Development Guide](docs/DEVELOPMENT.md#development-workflow-entry) for verification of its single-connection HTTP and startup reconciliation fixes. This change confining the Server to one connection must also satisfy independent review, complete gates, and CI before and after merge. These gates do not complete M4/M5.
 
 排除 Server unit/persistence 的绿色运行不能证明验收通过。
 
@@ -160,21 +160,21 @@ Excess calls with an `id` receive JSON-RPC error `-32002`; HTTP replies keep sta
 
 Invalid or incomplete rate-limit settings and an unreadable file explicitly passed with `--config` stop server startup. See the [Development Guide](docs/DEVELOPMENT.md) for examples and counting rules.
 
-以下描述既有传输合约和验收标准；上文列出的新路径回归仍待复验。`task.queue` 在任务持久化并完成一次可用 HTTP Worker 槽位的派发尝试后返回。
+以下描述当前单连接传输路径；具体基线验证与里程碑边界见[开发指南](docs/DEVELOPMENT.md#development-workflow-entry)和[开发计划](docs/DEVELOPMENT_PLAN.md)。`task.queue` 在任务持久化并完成一次可用 HTTP Worker 槽位的派发尝试后返回。
 
-The following describes the existing transfer contract and acceptance criteria; the known new-path regressions above remain pending verification. `task.queue` returns after the task is persisted and the server has attempted to fill available HTTP worker slots.
+The following describes the current single-connection transfer path; see the [Development Guide](docs/DEVELOPMENT.md#development-workflow-entry) and [Development Plan](docs/DEVELOPMENT_PLAN.md) for baseline verification and milestone boundaries. `task.queue` returns after the task is persisted and the Server has attempted to fill available HTTP worker slots.
 
-`task.start` 仍可作为手动 kick，启动一个 HTTP Worker 后返回。Worker 每写入一个响应块就报告进度；Server 自上次写入起累计至少 1 MiB 或经过 250 ms 时持久化一次中间快照，并在任务标记为 `Completed` 前刷新最终快照。
+`task.start` 仍可作为手动 kick，启动一个 HTTP Worker 后返回。Worker 每写入一个响应块就报告进度；Server 自上次写入起累计至少 1 MiB 或经过 250 ms 时持久化一次中间快照，并在一次 repository update 中同时保存最终进度与 `Completed`。
 
-`task.start` remains available as a manual kick and returns after launching one HTTP worker. Workers report progress after each response chunk; the server persists an intermediate snapshot when at least 1 MiB has arrived or 250 ms have elapsed since the previous write, then flushes the final snapshot before marking the task `Completed`.
+`task.start` remains available as a manual kick and returns after launching one HTTP worker. Workers report progress after each response chunk; the server persists an intermediate snapshot when at least 1 MiB has arrived or 250 ms have elapsed since the previous write, then saves final progress and `Completed` together in one repository update.
 
 成功后会写入 `./example.html` 并记录最终下载字节数；此期间 `task list` 可能显示 `Downloading`。`task.get` 和 `task.list` 返回持久化进度，以及表示最近一次传输错误的 `error` 字段。
 
 On success it writes `./example.html` and records the final byte count; `task list` may show `Downloading` until then. The `task.get` and `task.list` views expose the persisted progress and an `error` field containing the most recent transfer error.
 
-完整响应先写入目标旁的隐藏稳定部分文件，sidecar 保存来源、目标、校验器和预期长度，完整后原子发布到不存在的目标路径，不覆盖已有目标文件。传输失败会保留已有目标文件、记录 Server 错误、将错误保存到任务，并在重试策略允许时重新排队；有可用槽位时 Server 会自动派发该重试。
+完整响应先写入目标旁的隐藏稳定部分文件，sidecar 保存来源、目标、校验器和预期长度，完整后先写私有完成凭证，再原子发布到不存在的目标路径，不覆盖已有目标文件。传输失败会保留已有目标文件、记录 Server 错误、将错误保存到任务，并在重试策略允许时重新排队；有可用槽位时 Server 会自动派发该重试。
 
-The complete response is staged in a hidden stable partial file beside the destination, then published atomically without replacing an existing destination; the sidecar records the source, destination, validator, and expected length. A failed transfer preserves an existing destination, logs the failure, stores the error on the task, and requeues it while the retry policy allows; the server automatically dispatches that retry when a slot is available.
+The complete response is staged in a hidden stable partial file beside the destination, then protected by a private completion receipt and published atomically without replacing an existing destination; the sidecar records the source, destination, validator, and expected length. A failed transfer preserves an existing destination, logs the failure, stores the error on the task, and requeues it while the retry policy allows; the server automatically dispatches that retry when a slot is available.
 
 默认策略允许重试三次。领取新一轮传输时会重置持久化快照并清除旧错误；如果有可用的校验部分文件，Server 随后会恢复其进度。
 
@@ -184,9 +184,9 @@ The default policy permits three retries. Claiming a new attempt resets the pers
 
 Active HTTP transfers can be paused at a response chunk boundary and resumed in the same server process; the temporary file and open response are retained while paused. `task.remove` cancels an active HTTP worker, removes the task, and leaves the existing destination untouched.
 
-`task.pause` 可能因阻塞的响应读取等待到 30 分钟 HTTP 请求超时。`task.remove` 最多等待 Worker 30 秒；超时会返回错误，Worker 可能继续阻塞到该 HTTP 超时，退出后可以重试删除。
+响应体读取按 1 秒无数据窗口检查暂停／取消，连续 8 次无数据判为停滞。`task.remove` 最多等待 Worker 退出 10 秒；超时返回错误，退出后可重试删除。
 
-`task.pause` can wait for a blocking response read until the 30-minute HTTP request timeout. `task.remove` waits up to 30 seconds for the worker; if it times out, it returns an error while the worker can remain blocked until that HTTP timeout, and the removal can be retried after the worker exits.
+Response-body reads check pause/cancel at one-second no-data windows and fail as stalled after eight consecutive empty windows. `task.remove` waits up to 10 seconds for worker exit; a timeout returns an error, and removal can be retried after exit.
 
 Server 重启后，只有 sidecar 校验器匹配且服务端返回匹配的 `206 Partial Content` 时，中断的 HTTP 响应才会使用 `Range` 与 `If-Range` 续传。收到 `200`、校验器变化或缺失、`Content-Range` 无效或长度不一致时，会删除部分响应并从零开始；没有 ETag 或 Last-Modified 的响应在中断后也会从零开始。
 

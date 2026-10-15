@@ -350,10 +350,6 @@ const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
 // a cancel is observed at the next read boundary, so a worker that is not going
 // to stop within this window is stuck, not merely slow.
 const HTTP_CONTROL_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Minimum file size (bytes) to justify multi-connection overhead.
-const MULTI_CONNECTION_MIN_BYTES: u64 = 1024 * 1024;
-/// Maximum parallel segments per download.
-const MAX_SEGMENTS: usize = 8;
 
 fn resumable_partial_path(destination: &Path) -> PathBuf {
     let file_name = destination
@@ -593,110 +589,16 @@ impl ServerConfig {
 }
 
 fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
-    let progress_task_id = transfer.id.clone();
-    let destination_path = transfer.destination_path.clone();
     let completion = Arc::clone(&transfer.completion);
 
-    // Probe: does the server support Range, and how large is the file?
-    // Skip probing for local test fixtures (127.0.0.1) and when a valid
-    // resumable partial exists — both avoid sending a probe request to
-    // sources not designed to handle extra HTTP connections.
-    let has_valid_partial = resumable_partial_progress(
-        &transfer.source,
-        &transfer.destination,
-        &transfer.partial_path,
-    )
-    .is_ok_and(|p| p.is_some());
-
-    let probe_result = if has_valid_partial || transfer.source.contains("127.0.0.1") {
-        None
-    } else {
-        HttpEngine::new().probe_range(&transfer.source)
-    };
-    let should_multi = probe_result.as_ref().is_some_and(|cap| {
-        cap.supports_ranges
-            && cap
-                .length
-                .is_some_and(|len| len > MULTI_CONNECTION_MIN_BYTES)
-    });
-    let id = transfer.id.clone();
-
-    let (outcome, dispatch_next) = match should_multi {
-        true => run_multi_connection(&state, &id, &destination_path, &transfer, &progress_task_id),
-        false => run_session_download(&state, &transfer),
-    };
+    // Every source uses the session's validated resume and completion-receipt
+    // path. Segment execution must satisfy the same safety and control
+    // invariants before the server can enable it (see M4 in the plan).
+    let (outcome, dispatch_next) = run_session_download(&state, &transfer);
 
     completion.finish(outcome);
     if dispatch_next {
         dispatch_available_http_tasks(&state);
-    }
-}
-
-/// Runs the synchronous multi-connection download path.
-fn run_multi_connection(
-    state: &Arc<Mutex<ServerState>>,
-    id: &TaskId,
-    destination_path: &Path,
-    transfer: &HttpTransfer,
-    progress_task_id: &TaskId,
-) -> (HttpWorkerOutcome, bool) {
-    let has_valid = resumable_partial_progress(
-        &transfer.source,
-        &transfer.destination,
-        &transfer.partial_path,
-    )
-    .is_ok_and(|p| p.is_some());
-    let cap = probe_result_inner(&transfer.source, has_valid);
-    let capability = match &cap {
-        Some(cap) => cap,
-        None => {
-            // Multi-connection chose probe but got None — fall back to session.
-            return run_session_download(state, transfer);
-        }
-    };
-    let total = capability.length.unwrap_or(MULTI_CONNECTION_MIN_BYTES);
-    let segments = HttpEngine::split_segments(total, MAX_SEGMENTS);
-
-    let result = HttpEngine::new().download_to_segments(
-        &transfer.source,
-        &segments,
-        &transfer.destination,
-        &transfer.partial_path,
-        total,
-        capability.validator.as_ref(),
-        &transfer.control,
-        |progress| {
-            let mut state = state.lock().expect("server state mutex poisoned");
-            state
-                .core
-                .update_progress(progress_task_id, progress)
-                .map_err(|error| {
-                    EngineError::Failed(format!("could not persist download progress: {error:?}"))
-                })
-        },
-    );
-
-    complete_http_transfer(
-        state,
-        id,
-        destination_path,
-        &transfer.source,
-        &transfer.destination,
-        &transfer.partial_path,
-        &transfer.completion_context,
-        result,
-    )
-}
-
-/// Probe helper used by the multi-connection path.
-fn probe_result_inner(
-    source: &str,
-    has_valid_partial: bool,
-) -> Option<nexum_core::nexum_engine::RangeCapability> {
-    if has_valid_partial || source.contains("127.0.0.1") {
-        None
-    } else {
-        HttpEngine::new().probe_range(source)
     }
 }
 
