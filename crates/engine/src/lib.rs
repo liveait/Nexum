@@ -3,7 +3,10 @@
 use nexum_domain::{Progress, TaskId};
 use nexum_task::TaskState;
 use reqwest::StatusCode;
-use reqwest::header::{CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE};
+use reqwest::header::{
+    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderMap, HeaderName,
+    HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
@@ -34,6 +37,9 @@ const READ_STALL_TIMEOUT: Duration = Duration::from_secs(1);
 /// Any byte read resets the counter, so a slow-but-flowing connection never trips
 /// this; only a connection that delivers nothing for the whole window does.
 const MAX_CONSECUTIVE_STALLS: u32 = 8;
+
+/// A range probe is optional and must not inherit the full transfer's timeout.
+const RANGE_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Sliding-window estimate of transfer speed in bytes/second over the trailing
 /// samples. Created per download and observed once per chunk.
@@ -1666,22 +1672,155 @@ impl Segment {
     }
 
     /// The inclusive byte count of the range.
+    /// Invalid or unrepresentable ranges have no usable length.
     pub fn length(&self) -> u64 {
-        self.end - self.start + 1
+        self.end
+            .checked_sub(self.start)
+            .and_then(|length| length.checked_add(1))
+            .unwrap_or(0)
     }
+}
+
+fn validate_segment_coverage(segments: &[Segment], total: u64) -> Result<(), EngineError> {
+    if total == 0 || segments.is_empty() {
+        return Err(EngineError::Failed(
+            "segment coverage requires a nonempty file and segment collection".into(),
+        ));
+    }
+    let mut next = 0;
+    for segment in segments {
+        if segment.start != next || segment.end < segment.start || segment.end >= total {
+            return Err(EngineError::Failed(
+                "invalid segment coverage: ranges must cover the file in order without gaps or overlaps"
+                    .into(),
+            ));
+        }
+        next = segment.end.checked_add(1).ok_or_else(|| {
+            EngineError::Failed("invalid segment coverage: range overflow".into())
+        })?;
+    }
+    if next != total {
+        return Err(EngineError::Failed(
+            "invalid segment coverage: ranges do not cover the complete file".into(),
+        ));
+    }
+    Ok(())
+}
+
+// A weak ETag and a bare Last-Modified date cannot prove byte identity across
+// concurrent requests. Keep this conservative policy local to the prototype;
+// single-connection resume retains its separate validator policy.
+fn strong_segment_etag(validator: Option<&HttpResumeValidator>) -> Result<&str, EngineError> {
+    let Some(HttpResumeValidator::Etag(value)) = validator else {
+        return Err(EngineError::Failed(
+            "segment validator must be a strong ETag".into(),
+        ));
+    };
+    let bytes = value.as_bytes();
+    if bytes.len() < 2
+        || bytes[0] != b'"'
+        || bytes[bytes.len() - 1] != b'"'
+        || !bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte) || *byte >= 0x80)
+    {
+        return Err(EngineError::Failed(
+            "segment validator must be a syntactically valid strong ETag".into(),
+        ));
+    }
+    // Confirm that an API-provided validator can actually be sent as a header.
+    HeaderValue::from_str(value)
+        .map_err(|_| EngineError::Failed("invalid segment validator header".into()))?;
+    Ok(value)
+}
+
+fn unique_segment_header(
+    headers: &HeaderMap,
+    name: HeaderName,
+) -> Result<Option<&HeaderValue>, EngineError> {
+    let mut values = headers.get_all(&name).iter();
+    let value = values.next();
+    if values.next().is_some() {
+        return Err(EngineError::Failed(format!(
+            "ambiguous segment response header: {name}"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_segment_encoding(headers: &HeaderMap) -> Result<(), EngineError> {
+    if let Some(encoding) = unique_segment_header(headers, CONTENT_ENCODING)?
+        && !encoding
+            .to_str()
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("identity"))
+    {
+        return Err(EngineError::Failed(
+            "unsupported segment response encoding".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_segment_decimal(value: &str) -> Option<u64> {
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
+}
+
+fn parse_segment_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let (start, end, total) = (
+        parse_segment_decimal(start)?,
+        parse_segment_decimal(end)?,
+        parse_segment_decimal(total)?,
+    );
+    (end >= start && total > end).then_some((start, end, total))
+}
+
+fn validate_segment_response(
+    headers: &HeaderMap,
+    segment: Segment,
+    total: u64,
+    expected_etag: &str,
+) -> Result<(), EngineError> {
+    validate_segment_encoding(headers)?;
+    let range = unique_segment_header(headers, CONTENT_RANGE)?
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_segment_content_range);
+    if range != Some((segment.start, segment.end, total)) {
+        return Err(EngineError::Failed(
+            "segment Content-Range does not match the requested range and total".into(),
+        ));
+    }
+    if unique_segment_header(headers, ETAG)?.and_then(|value| value.to_str().ok())
+        != Some(expected_etag)
+    {
+        return Err(EngineError::Failed(
+            "segment response validator does not match the strong ETag".into(),
+        ));
+    }
+    if let Some(value) = unique_segment_header(headers, CONTENT_LENGTH)?
+        && value.to_str().ok().and_then(parse_segment_decimal) != Some(segment.length())
+    {
+        return Err(EngineError::Failed(
+            "abnormal segment length: Content-Length differs from the requested range".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// What a lightweight probe learned about a source's range support, used to
 /// decide between a multi-connection download and the single-connection path.
 #[derive(Clone, Debug)]
 pub struct RangeCapability {
-    /// True when the probe received a `206 Partial Content`, meaning the server
-    /// honours `Range` requests. A `200` (server ignored the range) is false.
+    /// True only after an exact single-byte `206 Partial Content` response with
+    /// a strong ETag and identity encoding has been validated through EOF.
     pub supports_ranges: bool,
     /// The whole-file length in bytes, when the server reported one.
     pub length: Option<u64>,
-    /// The strongest validator (`ETag`, else `Last-Modified`) from the probe,
-    /// sent with `If-Range` so a mid-download change fails the multi download.
+    /// Validated strong ETag, sent with `If-Range` on every segment request.
+    /// Unsupported (non-206) responses can retain metadata for diagnostics.
     pub validator: Option<HttpResumeValidator>,
 }
 
@@ -1694,6 +1833,7 @@ async fn pump_segment(
     source: &str,
     segment: Segment,
     partial_path: &Path,
+    total: u64,
     validator: Option<&HttpResumeValidator>,
     control: &HttpTransferControl,
     shared: &Arc<AtomicU64>,
@@ -1701,6 +1841,7 @@ async fn pump_segment(
 ) -> Result<u64, EngineError> {
     let mut request = client
         .get(source)
+        .header(ACCEPT_ENCODING, "identity")
         .header(RANGE, format!("bytes={}-{}", segment.start, segment.end));
     if let Some(validator) = validator {
         request = request.header(IF_RANGE, validator.value());
@@ -1723,6 +1864,12 @@ async fn pump_segment(
             "segment request returned {status}"
         )));
     }
+    validate_segment_response(
+        response.headers(),
+        segment,
+        total,
+        strong_segment_etag(validator)?,
+    )?;
     let expected = segment.length();
     // A declared length that does not match the requested range is abnormal and
     // would corrupt the assembled file.
@@ -1776,7 +1923,7 @@ async fn pump_segment(
             }
         };
         consecutive_stalls = 0;
-        if downloaded + chunk.len() as u64 > expected {
+        if chunk.len() as u64 > expected.saturating_sub(downloaded) {
             return Err(EngineError::Failed(format!(
                 "abnormal segment length: the server sent more than the {expected}-byte range"
             )));
@@ -1786,11 +1933,8 @@ async fn pump_segment(
             .map_err(|error| EngineError::Failed(error.to_string()))?;
         downloaded += chunk.len() as u64;
         shared.fetch_add(chunk.len() as u64, Ordering::SeqCst);
-        // A known-length range is complete as soon as the requested byte count
-        // has been written, so a keep-alive connection need not close for EOF.
-        if downloaded >= expected {
-            break;
-        }
+        // Continue to framed EOF even after the expected bytes: chunked bodies
+        // can append an extra chunk. The inactivity bound above still applies.
     }
     // An EOF before the declared range is complete is an abnormal, short body.
     if downloaded != expected {
@@ -2021,61 +2165,101 @@ impl HttpEngine {
 
     /// Probes `source` with a single `Range: bytes=0-0` request to learn whether
     /// the server honours range requests, what the total file length is, and which
-    /// validator (ETag or Last-Modified) the server sends. These callers build
-    /// their own runtime; this is a synchronous convenience on top of the async
-    /// internals.
+    /// strong ETag the server sends. The complete probe (headers and body) is
+    /// bounded independently of a normal transfer. These callers build their
+    /// own runtime; this is a synchronous convenience on top of async internals.
     pub fn probe_range(&self, source: &str) -> Option<RangeCapability> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
             .ok()?;
-        runtime.block_on((|| async {
-            let mut response = self
-                .client
-                .get(source)
-                .header(RANGE, "bytes=0-0")
-                .send()
-                .await
+        runtime.block_on(async {
+            tokio::time::timeout(RANGE_PROBE_TIMEOUT, async {
+                let mut response = self
+                    .client
+                    .get(source)
+                    .header(ACCEPT_ENCODING, "identity")
+                    .header(RANGE, "bytes=0-0")
+                    .send()
+                    .await
+                    .ok()?;
+                if response.status() != StatusCode::PARTIAL_CONTENT {
+                    // A server ignoring Range might return an arbitrarily large or
+                    // stalled body. Do not consume it just to reject the probe.
+                    return Some(RangeCapability {
+                        supports_ranges: false,
+                        length: response.content_length(),
+                        validator: HttpResumeValidator::from_headers(response.headers()),
+                    });
+                }
+                let (start, end, total) = unique_segment_header(response.headers(), CONTENT_RANGE)
+                    .ok()??
+                    .to_str()
+                    .ok()
+                    .and_then(parse_segment_content_range)?;
+                if start != 0 || end != 0 {
+                    return None;
+                }
+                let validator = HttpResumeValidator::Etag(
+                    unique_segment_header(response.headers(), ETAG)
+                        .ok()??
+                        .to_str()
+                        .ok()?
+                        .to_owned(),
+                );
+                let expected_etag = strong_segment_etag(Some(&validator)).ok()?;
+                validate_segment_response(
+                    response.headers(),
+                    Segment::new(0, 0),
+                    total,
+                    expected_etag,
+                )
                 .ok()?;
-            let supports_ranges = response.status() == StatusCode::PARTIAL_CONTENT;
-            let total = if supports_ranges {
-                response
-                    .headers()
-                    .get(CONTENT_RANGE)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(parse_content_range)
-                    .map(|(_, _, total)| total)
-            } else {
-                response.content_length()
-            };
-            let validator = HttpResumeValidator::from_headers(response.headers());
-            let _ = response.chunk().await; // drain so the connection closes cleanly.
-            Some(RangeCapability {
-                supports_ranges,
-                length: total,
-                validator,
+                let mut received = 0;
+                while let Some(chunk) = response.chunk().await.ok()? {
+                    if chunk.len() > 1 - received {
+                        return None;
+                    }
+                    received += chunk.len();
+                }
+                if received != 1 {
+                    return None;
+                }
+                Some(RangeCapability {
+                    supports_ranges: true,
+                    length: Some(total),
+                    validator: Some(validator),
+                })
             })
-        })())
+            .await
+            .ok()
+            .flatten()
+        })
     }
 
     /// Splits a file of `total` bytes into at most `max_segments` contiguous
     /// [`Segment`]s. The trailing segment may be shorter than the others.
     pub fn split_segments(total: u64, max_segments: usize) -> Vec<Segment> {
         let max_segments = max_segments.max(1);
-        let size = (total as f64 / max_segments as f64).ceil() as u64;
-        if size == 0 {
-            return vec![Segment::new(0, 0)];
+        if total == 0 {
+            return Vec::new();
         }
-        (0..total)
-            .step_by(size as usize)
-            .map(|start| Segment::new(start, (start + size - 1).min(total - 1)))
-            .collect()
+        let size = total.div_ceil(max_segments as u64);
+        let mut segments = Vec::new();
+        let mut start = 0;
+        while start < total {
+            let end = start.saturating_add(size - 1).min(total - 1);
+            segments.push(Segment::new(start, end));
+            start = end + 1;
+        }
+        segments
     }
 
     /// Downloads a source in multiple concurrent HTTP Range segments, reassembles
-    /// them atomically, and falls back to a single connection when the server
-    /// does not support Range.
+    /// them without replacing an existing destination. Requires complete,
+    /// ordered segment coverage and a syntactically valid strong ETag. A server
+    /// rejecting Range returns an error; this prototype does not fall back.
     ///
     /// Creates a sparse pre-allocated partial file, then spawns one std thread per
     /// segment. Each thread builds its own current-thread Tokio runtime and runs
@@ -2104,6 +2288,10 @@ impl HttpEngine {
     {
         use std::sync::mpsc;
 
+        // Invalid caller input must not send requests, create directories, or
+        // truncate an existing staging file.
+        validate_segment_coverage(segments, total)?;
+        strong_segment_etag(validator)?;
         control.check_cancelled()?;
         let partial = partial_path.as_ref();
         ensure_destination_absent(Path::new(destination))?;
@@ -2158,12 +2346,13 @@ impl HttpEngine {
                                 "could not start segment-{index} runtime: {error}"
                             ))
                         });
-                    let mut result = match runtime {
+                    let result = match runtime {
                         Ok(runtime) => runtime.block_on(pump_segment(
                             &client,
                             &source,
                             segment,
                             &partial,
+                            total,
                             validator.as_ref(),
                             &control,
                             &shared,
@@ -2171,9 +2360,6 @@ impl HttpEngine {
                         )),
                         Err(error) => Err(error),
                     };
-                    if result.is_err() {
-                        result = Err(EngineError::Failed("segment failed".to_owned()));
-                    }
                     let _ = result_tx.send(result);
                 })
             })
@@ -2231,7 +2417,16 @@ impl HttpEngine {
 
         // Join workers (in case some are still running when the channel closes).
         for handle in handles {
-            let _ = handle.join();
+            if handle.join().is_err() && first_error.is_none() {
+                first_error = Some(EngineError::Failed("segment worker panicked".into()));
+            }
+        }
+        if first_error.is_none()
+            && (received != segments.len() || shared.load(Ordering::SeqCst) != total)
+        {
+            first_error = Some(EngineError::Failed(
+                "incomplete segment workers: received byte count does not match total".into(),
+            ));
         }
 
         if let Some(error) = first_error {
@@ -4005,18 +4200,15 @@ mod tests {
 
     #[test]
     fn split_segments_zero_length() {
-        // The implementation returns one segment for zero-length, but
-        // Segment::new(0, 0 - 1) would underflow. We verify the function
-        // doesn't panic on zero-length input (the implementation wraps
-        // via saturating sub or similar).
+        // Empty files have no valid inclusive byte range.
         let segments = HttpEngine::split_segments(0, 4);
-        assert_eq!(segments.len(), 1);
+        assert!(segments.is_empty());
     }
 
     #[test]
     fn probe_range_rejects_non_206_server() {
         static RESPONSE: LazyLock<Vec<u8>> =
-            LazyLock::new(|| http_response("200 OK", "ETag: \"test-v1\"", b"full body"));
+            LazyLock::new(|| http_response("200 OK", "ETag: \"test-v1\"\r\n", b"full body"));
         let (address, server) = serve_once(&RESPONSE);
         let cap = HttpEngine::new().probe_range(&address);
         assert!(cap.is_some());
@@ -4031,7 +4223,7 @@ mod tests {
         static RESPONSE: LazyLock<Vec<u8>> = LazyLock::new(|| {
             http_response(
                 "206 Partial Content",
-                "Content-Range: bytes 0-0/9\r\nETag: \"probe-v1\"",
+                "Content-Range: bytes 0-0/9\r\nETag: \"probe-v1\"\r\n",
                 b"x",
             )
         });

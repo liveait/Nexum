@@ -3,9 +3,9 @@
 
 # 变更日志 / Changelog
 
-此处记录 Nexum 的重要变更，条目不代表所有里程碑已验收。PR #58 已合并为 `f1817f4`，恢复单连接 HTTP 与启动完成对账，验证记录见[开发指南](docs/DEVELOPMENT.md#development-workflow-entry)。本次 Server 单连接收敛须满足独立审查、完整门槛及合并前后 CI；M4/M5 仍属部分实现，M0/M1/M3 的剩余验收见[开发计划](docs/DEVELOPMENT_PLAN.md)。
+此处记录 Nexum 的重要变更，条目不代表所有里程碑已验收。PR #58 已合并为 `f1817f4`，恢复单连接 HTTP 与启动完成对账，验证记录见[开发指南](docs/DEVELOPMENT.md#development-workflow-entry)。PR #61 已将大文件下载统一到会话路径，并通过合并后 Rust 与 Desktop macOS CI；M4/M5 仍属部分实现，M0/M1/M3 的剩余验收见[开发计划](docs/DEVELOPMENT_PLAN.md)。
 
-This changelog records notable changes, not acceptance of every milestone. PR #58 merged as `f1817f4`, restoring single-connection HTTP and startup completion reconciliation; see the [Development Guide](docs/DEVELOPMENT.md#development-workflow-entry) for verification records. This change confining the Server to a single connection must satisfy independent review, complete gates, and CI before and after merge. M4/M5 remain partial; see the [Development Plan](docs/DEVELOPMENT_PLAN.md) for remaining M0/M1/M3 acceptance.
+This changelog records notable changes, not acceptance of every milestone. PR #58 merged as `f1817f4`, restoring single-connection HTTP and startup completion reconciliation; see the [Development Guide](docs/DEVELOPMENT.md#development-workflow-entry) for verification records. PR #61 routes large downloads through the session path and passed post-merge Rust and Desktop macOS CI. M4/M5 remain partial; see the [Development Plan](docs/DEVELOPMENT_PLAN.md) for remaining M0/M1/M3 acceptance.
 
 <a id="unreleased"></a>
 <a id="未发布"></a>
@@ -25,13 +25,21 @@ This changelog records notable changes, not acceptance of every milestone. PR #5
 
   Segments share `HttpTransferControl` for a global bandwidth cap and seek within a pre-allocated sparse partial file. The intended contract aborts all workers and removes the partial on failure/cancel, preserves existing destinations, and falls back safely to a single connection for unsupported servers, failed validation, or abnormal segment lengths.
 
-  本轮 Server 移除自动分段／探测入口及按 fixture URL 绕过探测的逻辑，全部 HTTP/HTTPS 下载统一进入带完成凭证的单连接 session。此项收敛不等于 M4 完成；段级持久化、跨重启段恢复、安全单连接回退及真实分段路径的保护仍待实现和验收。
+  PR #61 已移除 Server 自动分段／探测入口及按 fixture URL 绕过探测的逻辑，全部 HTTP/HTTPS 下载统一进入带完成凭证的单连接 session。此项收敛不等于 M4 完成；段级持久化、跨重启段恢复、安全单连接回退及真实分段路径的保护仍待实现和验收。
 
-  This change removes automatic segmentation/probing and fixture-URL probing bypasses from the Server; every HTTP/HTTPS download uses the single-connection session with completion receipts. This does not complete M4: durable segment state, cross-restart segment recovery, safe single-connection fallback, and protection through the real segment path remain to be implemented and accepted.
+  PR #61 removed automatic segmentation/probing and fixture-URL probing bypasses from the Server; every HTTP/HTTPS download uses the single-connection session with completion receipts. This does not complete M4: durable segment state, cross-restart segment recovery, safe single-connection fallback, and protection through the real segment path remain to be implemented and accepted.
 
   对 `3768c3a` 的直接审查曾复现错误 Range／校验器被接受、不安全的部分文件处理及取消后仍发布。PR #58 修复单连接 session 与启动恢复，但没有验收分段执行；未完成这些保护前不重新启用产品分段入口。
 
   Direct review at `3768c3a` reproduced incorrect Range/validator acceptance, unsafe partial-file handling, and publication after cancellation. PR #58 repairs the single-connection session and startup recovery, without accepting segment execution. Product segment dispatch remains disabled until these protections are complete.
+
+- **分段原型的输入与响应校验**：要求按序、无缺口／重叠的完整段集合及有效强 ETag，在请求／创建暂存文件前拒绝零长、越界、整数溢出以及缺失、弱或语法无效的 ETag。Range 探测校验精确的一字节范围与实际响应，响应头至 EOF 的总等待上限为 3 秒；拒绝重复的关键响应头。各段校验 `206`、起止／总长、相同 ETag、identity 编码及实际长度，保留具体失败原因。零字节文件不分段，拆段不再使用浮点计算。
+
+  **Input and response checks for the segment prototype**: require ordered, complete segments without gaps/overlap and a valid strong ETag. Before requests/staging creation, reject zero length, out-of-bounds ranges, integer overflow, and missing, weak or syntactically invalid ETags. Range probes validate the exact one-byte range and body within a three-second total deadline through headers and EOF. Reject duplicate critical response headers; each segment checks `206`, bounds/total, a matching ETag, identity encoding and actual length, preserving specific failure causes. Empty files are not segmented, and splitting no longer uses floating-point arithmetic.
+
+  此项不改变单连接的 ETag/Last-Modified 策略；可信暂存句柄、所有 Worker 控制屏障、完成凭证、恢复和安全回退仍待实现，多连接仍未接回 Server。
+
+  This preserves the single-connection ETag/Last-Modified policy. Trusted staging handles, all-worker control barriers, completion receipts, recovery and safe fallback remain unfinished; Server multi-connection dispatch remains disabled.
 
 - **HTTP 完成对账**：单连接 session 在发布前以私有凭证绑定完整字节和任务／文件身份。PR #58 恢复 session 的凭证接线、最终进度与 `Completed` 一次持久化，并在 Server 监听和网络派发前真正执行启动对账；可无网络校验已发布文件或重新发布完整暂存文件，包括无 validator 且未知长度的完整响应。清理和 ID 复用保留冲突文件，具体失败原因进入任务视图。<br>
   **HTTP completion reconciliation**: before publication, the single-connection session binds complete bytes to task/file identity using private receipts. PR #58 restores session receipt wiring, atomic final progress/`Completed` persistence, and startup reconciliation before the Server listens or dispatches network work. Published files can verify or complete staging bytes can republish without network access, including complete unknown-length responses without validators. Cleanup and ID reuse preserve conflicting files, and task views retain specific failure causes.
