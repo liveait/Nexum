@@ -10,7 +10,7 @@ use reqwest::header::{
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -18,6 +18,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod completion;
+mod file_identity;
+mod segment_staging;
 pub use completion::{
     CompletionContext, cleanup_completion_partial, clear_completion, completion_receipt_path,
     has_pending_completion, reconcile_completion,
@@ -1843,13 +1845,14 @@ async fn pump_segment(
     client: &reqwest::Client,
     source: &str,
     segment: Segment,
-    partial_path: &Path,
+    staging: &segment_staging::SegmentStaging,
     total: u64,
     validator: Option<&HttpResumeValidator>,
     control: &HttpTransferControl,
     shared: &Arc<AtomicU64>,
     abort: &Arc<AtomicBool>,
 ) -> Result<u64, EngineError> {
+    staging.ensure_owned()?;
     let mut request = client
         .get(source)
         .header(ACCEPT_ENCODING, "identity")
@@ -1892,13 +1895,6 @@ async fn pump_segment(
         )));
     }
 
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(partial_path)
-        .map_err(|error| EngineError::Failed(error.to_string()))?;
-    file.seek(SeekFrom::Start(segment.start))
-        .map_err(|error| EngineError::Failed(error.to_string()))?;
-
     let mut downloaded = 0u64;
     let mut consecutive_stalls = 0u32;
     loop {
@@ -1940,8 +1936,8 @@ async fn pump_segment(
             )));
         }
         control.wait_for_budget(chunk.len() as u64)?;
-        file.write_all(&chunk)
-            .map_err(|error| EngineError::Failed(error.to_string()))?;
+        control.check_cancelled()?;
+        staging.write_all_at(&chunk, segment.start + downloaded)?;
         downloaded += chunk.len() as u64;
         shared.fetch_add(chunk.len() as u64, Ordering::SeqCst);
         // Continue to framed EOF even after the expected bytes: chunked bodies
@@ -2272,16 +2268,17 @@ impl HttpEngine {
     /// ordered segment coverage and a syntactically valid strong ETag. A server
     /// rejecting Range returns an error; this prototype does not fall back.
     ///
-    /// Creates a sparse pre-allocated partial file, then spawns one std thread per
-    /// segment. Each thread builds its own current-thread Tokio runtime and runs
-    /// [`pump_segment`] on it; all threads share one `HttpTransferControl` so the
-    /// total bandwidth cap is respected.
+    /// Exclusively creates a sparse partial file, rejecting pre-existing paths,
+    /// then spawns one std thread per segment. Each thread builds its own
+    /// current-thread Tokio runtime and runs [`pump_segment`] on it. Workers
+    /// share a held file handle, write at explicit offsets and share one
+    /// `HttpTransferControl` for the total bandwidth cap.
     ///
-    /// A segment failure aborts all workers, removes the partial, and returns the
-    /// first error. A cancelled transfer cleans the partial the same way. If the
-    /// caller requested pause, the transfer proceeds until cancelled or completed
-    /// (pause is primarily a server concern: the main thread's call can request
-    /// pause, and each segment honour it between reads).
+    /// Failure/cancellation attempts cleanup only while the partial path still
+    /// matches the owned file identity; unrelated files and sidecars are kept.
+    /// Identity checks and path-based publish/unlink are not atomic. All-worker
+    /// pause/termination barriers and atomic cancellation/publication remain
+    /// unfinished; this prototype is not routed from the Server.
     #[allow(clippy::too_many_arguments)]
     pub fn download_to_segments<F>(
         &self,
@@ -2314,22 +2311,7 @@ impl HttpEngine {
         std::fs::create_dir_all(destination_parent)
             .map_err(|error| EngineError::Failed(error.to_string()))?;
 
-        // Pre-allocate a sparse file so workers can seek to any offset.
-        // Reject (and remove) any pre-existing symlink so that truncate
-        // creates a regular file instead of following the link.
-        if let Ok(metadata) = std::fs::symlink_metadata(partial)
-            && metadata.file_type().is_symlink()
-        {
-            let _ = std::fs::remove_file(partial);
-        }
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(partial)
-            .map_err(|error| EngineError::Failed(error.to_string()))?;
-        file.set_len(total)
-            .map_err(|error| EngineError::Failed(error.to_string()))?;
+        let staging = Arc::new(segment_staging::SegmentStaging::create(partial, total)?);
 
         let shared = Arc::new(AtomicU64::new(0));
         let abort = Arc::new(AtomicBool::new(false));
@@ -2341,7 +2323,7 @@ impl HttpEngine {
                 let client = self.client.clone();
                 let source = source.to_owned();
                 let segment = *segment;
-                let partial = partial.to_owned();
+                let staging = Arc::clone(&staging);
                 let validator = validator.cloned();
                 let control = control.clone();
                 let shared = Arc::clone(&shared);
@@ -2362,7 +2344,7 @@ impl HttpEngine {
                             &client,
                             &source,
                             segment,
-                            &partial,
+                            &staging,
                             total,
                             validator.as_ref(),
                             &control,
@@ -2441,56 +2423,28 @@ impl HttpEngine {
         }
 
         if let Some(error) = first_error {
-            remove_resumable_files(partial);
+            let error = staging.cleanup_after_error(error);
             control.mark_finished();
             return Err(error);
         }
 
-        // Verify the partial file reached the expected total before committing.
-        let actual = match std::fs::symlink_metadata(partial) {
-            Ok(metadata) if metadata.file_type().is_file() => metadata.len(),
-            Ok(_) => {
-                remove_resumable_files(partial);
-                control.mark_finished();
-                return Err(EngineError::Failed(format!(
-                    "download partial is not a file: {}",
-                    partial_path.as_ref().display()
-                )));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                remove_resumable_files(partial);
-                control.mark_finished();
-                return Err(EngineError::Failed(format!(
-                    "download partial disappeared: {}",
-                    partial_path.as_ref().display()
-                )));
-            }
-            Err(error) => {
-                control.mark_finished();
-                return Err(EngineError::Failed(error.to_string()));
-            }
-        };
-        if actual != total {
-            remove_resumable_files(partial);
+        // Cancellation before publication is checked after all workers join.
+        // Atomic coordination of cancellation and publication remains a later
+        // prototype gate; file ownership does not provide that state barrier.
+        if let Err(error) = control.check_cancelled() {
+            let error = staging.cleanup_after_error(error);
             control.mark_finished();
-            return Err(EngineError::Failed(format!(
-                "partial file size {actual} does not match expected {total}"
-            )));
+            return Err(error);
         }
-
-        // Check cancellation before publishing (P2: cancellation before
-        // publication must win).
-        control.check_cancelled()?;
-
-        // Publish atomically; never clobber an existing destination.
-        commit_download(partial, Path::new(destination)).inspect_err(|_error| {
-            remove_resumable_files(partial);
-        })?;
-        // Re-check after publication so a cancel during the rename wins.
+        if let Err(error) = staging.publish(Path::new(destination), total) {
+            let error = staging.cleanup_after_error(error);
+            control.mark_finished();
+            return Err(error);
+        }
+        // The existing cancellation/publication race is not widened into a
+        // destination removal: a published destination is never cleanup input.
         control.check_cancelled()?;
         control.finish_committed();
-        // Clean up the sparse partial — the destination now holds the data.
-        let _ = std::fs::remove_file(partial);
 
         Ok(Progress::new(total, Some(total)))
     }
