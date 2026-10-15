@@ -21,9 +21,9 @@ This changelog records notable changes, not acceptance of every milestone. PR #5
 
   **Multi-connection HTTP foundations — outside the product path, incomplete and unaccepted**: the engine retains `probe_range()`, `split_segments()`, and `download_to_segments()`. The segment implementation probes with `Range: bytes=0-0` and can construct up to 8 concurrent segments, using a separate current-thread Tokio runtime and std thread per segment. API presence and helper tests do not establish multi-connection download support.
 
-  各段共享 `HttpTransferControl` 实现全局带宽上限，在预分配的稀疏部分文件中定位写入。既有合约要求失败／取消时中止全部 Worker 并清理部分文件、保护已有目标，并在服务端不支持、校验失败或段长度异常时安全回退单连接。
+  各段共享 `HttpTransferControl` 实现全局带宽上限，通过持有的文件句柄按显式偏移写入预分配的稀疏部分文件。既有合约要求失败／取消时中止全部 Worker 并清理部分文件、保护已有目标，并在服务端不支持、校验失败或段长度异常时安全回退单连接。
 
-  Segments share `HttpTransferControl` for a global bandwidth cap and seek within a pre-allocated sparse partial file. The intended contract aborts all workers and removes the partial on failure/cancel, preserves existing destinations, and falls back safely to a single connection for unsupported servers, failed validation, or abnormal segment lengths.
+  Segments share `HttpTransferControl` for a global bandwidth cap and write to explicit offsets in a pre-allocated sparse partial file through a held file handle. The intended contract aborts all workers and removes the partial on failure/cancel, preserves existing destinations, and falls back safely to a single connection for unsupported servers, failed validation, or abnormal segment lengths.
 
   PR #61 已移除 Server 自动分段／探测入口及按 fixture URL 绕过探测的逻辑，全部 HTTP/HTTPS 下载统一进入带完成凭证的单连接 session。此项收敛不等于 M4 完成；段级持久化、跨重启段恢复、安全单连接回退及真实分段路径的保护仍待实现和验收。
 
@@ -37,9 +37,17 @@ This changelog records notable changes, not acceptance of every milestone. PR #5
 
   **Input and response checks for the segment prototype**: require ordered, complete segments without gaps/overlap and a valid strong ETag. Before requests/staging creation, reject zero length, out-of-bounds ranges, integer overflow, and missing, weak or syntactically invalid ETags. Range probes validate the exact one-byte range and body within a three-second total deadline through headers and EOF. Reject duplicate critical response headers; each segment checks `206`, bounds/total, a matching ETag, identity content encoding and actual length. Transfer-Encoding is limited to absent or a single `chunked` value, preserving specific failure causes. Empty files are not segmented, and splitting no longer uses floating-point arithmetic.
 
-  此项不改变单连接的 ETag/Last-Modified 策略；可信暂存句柄、所有 Worker 控制屏障、完成凭证、恢复和安全回退仍待实现，多连接仍未接回 Server。
+  PR #62 已通过完整门槛、独立审查及合并前后 CI，合并为 `3fcd259`。此项不改变单连接的 ETag/Last-Modified 策略，多连接仍未接回 Server。
 
-  This preserves the single-connection ETag/Last-Modified policy. Trusted staging handles, all-worker control barriers, completion receipts, recovery and safe fallback remain unfinished; Server multi-connection dispatch remains disabled.
+  PR #62 passed the full gates, independent review and CI before/after merge, landing as `3fcd259`. This preserves the single-connection ETag/Last-Modified policy; Server multi-connection dispatch remains disabled.
+
+- **分段原型的暂存文件持有与身份保护**：`create_new` 拒绝并保留已有普通文件、符号链接、FIFO 或目录。所有段共享持有的普通文件句柄，以显式偏移写入；在请求、写入及发布／清理边界核对文件身份，最终长度从持有句柄读取。已观察到路径被替换时拒绝后续写入、发布或清理替换文件；分段原型不删除其未创建的 JSON sidecar。
+
+  **Held staging files and identity checks for the segment prototype**: `create_new` rejects and preserves pre-existing regular files, symlinks, FIFOs and directories. Every segment writes at explicit offsets through one held regular-file handle. Requests, writes, publication and cleanup check file identity, and the final length comes from the held handle. An observed path replacement rejects further writes/publication or cleanup of the replacement. The segment prototype does not delete JSON sidecars it did not create.
+
+  身份检查与基于路径的 rename／hard-link／unlink 之间仍存在 TOCTOU，尚不能抵抗同权限进程持续并发改名；本项不代表原子文件所有权或取消／发布协议完成。所有 Worker 控制屏障、完成凭证、安全回退及段级恢复仍待实现和验收，Server 多连接保持禁用。
+
+  A TOCTOU window remains between identity checks and path-based rename/hard-link/unlink; continuous concurrent renames by a same-privilege process are not covered. This does not complete an atomic file-ownership or cancellation/publication protocol. All-worker control barriers, completion receipts, safe fallback and segment recovery still need implementation and acceptance; Server multi-connection routing remains disabled.
 
 - **HTTP 完成对账**：单连接 session 在发布前以私有凭证绑定完整字节和任务／文件身份。PR #58 恢复 session 的凭证接线、最终进度与 `Completed` 一次持久化，并在 Server 监听和网络派发前真正执行启动对账；可无网络校验已发布文件或重新发布完整暂存文件，包括无 validator 且未知长度的完整响应。清理和 ID 复用保留冲突文件，具体失败原因进入任务视图。<br>
   **HTTP completion reconciliation**: before publication, the single-connection session binds complete bytes to task/file identity using private receipts. PR #58 restores session receipt wiring, atomic final progress/`Completed` persistence, and startup reconciliation before the Server listens or dispatches network work. Published files can verify or complete staging bytes can republish without network access, including complete unknown-length responses without validators. Cleanup and ID reuse preserve conflicting files, and task views retain specific failure causes.

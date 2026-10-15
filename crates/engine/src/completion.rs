@@ -1,9 +1,10 @@
 //! A durable proof of a complete HTTP response, independent of HTTP validators.
 
+use super::file_identity::{FileIdentity, identity};
 use super::{EngineError, HttpTransferControl, Progress, TaskId, commit_download};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,14 +37,6 @@ pub fn completion_receipt_path(context: &CompletionContext) -> PathBuf {
         "{:x}.json",
         Sha256::digest(context.task_id.to_string().as_bytes())
     ))
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct FileIdentity {
-    device: u64,
-    file: u64,
-    created: Option<(u64, u32)>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -87,53 +80,6 @@ fn timestamp(value: SystemTime) -> Result<(u64, u32), EngineError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| failure("file timestamp is before the Unix epoch"))?;
     Ok((value.as_secs(), value.subsec_nanos()))
-}
-
-#[cfg(unix)]
-fn identity(_file: &File, metadata: &Metadata) -> Result<FileIdentity, EngineError> {
-    use std::os::unix::fs::MetadataExt;
-    Ok(FileIdentity {
-        device: metadata.dev(),
-        file: metadata.ino(),
-        created: metadata
-            .created()
-            .ok()
-            .and_then(|value| timestamp(value).ok()),
-    })
-}
-
-#[cfg(windows)]
-fn identity(file: &File, _metadata: &Metadata) -> Result<FileIdentity, EngineError> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
-    };
-    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-    // SAFETY: The file owns a live handle and info points to sufficient storage.
-    if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr()) } == 0 {
-        return Err(failure(std::io::Error::last_os_error().to_string()));
-    }
-    // SAFETY: A successful call initialized the structure.
-    let info = unsafe { info.assume_init() };
-    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(failure("file is a reparse point"));
-    }
-    let created = ((info.ftCreationTime.dwHighDateTime as u64) << 32)
-        | info.ftCreationTime.dwLowDateTime as u64;
-    Ok(FileIdentity {
-        device: info.dwVolumeSerialNumber as u64,
-        file: ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
-        // FILETIME's native ticks are sufficient for identity; this field need
-        // not use the Unix timestamp representation used for modification time.
-        created: Some((created, 0)),
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn identity(_file: &File, _metadata: &Metadata) -> Result<FileIdentity, EngineError> {
-    Err(failure(
-        "stable file identities are unsupported on this platform",
-    ))
 }
 
 fn snapshot(file: &File) -> Result<FileSnapshot, EngineError> {
