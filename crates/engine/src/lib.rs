@@ -5,7 +5,7 @@ use nexum_task::TaskState;
 use reqwest::StatusCode;
 use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderMap, HeaderName,
-    HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE,
+    HeaderValue, IF_RANGE, LAST_MODIFIED, RANGE, TRANSFER_ENCODING,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -1749,6 +1749,17 @@ fn unique_segment_header(
 }
 
 fn validate_segment_encoding(headers: &HeaderMap) -> Result<(), EngineError> {
+    // Hyper removes chunk framing, but does not decode arbitrary transfer
+    // codings. Accept only the one framing coding this client understands.
+    if let Some(encoding) = unique_segment_header(headers, TRANSFER_ENCODING)?
+        && !encoding
+            .to_str()
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("chunked"))
+    {
+        return Err(EngineError::Failed(
+            "unsupported segment response transfer encoding".into(),
+        ));
+    }
     if let Some(encoding) = unique_segment_header(headers, CONTENT_ENCODING)?
         && !encoding
             .to_str()

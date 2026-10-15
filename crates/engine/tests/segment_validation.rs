@@ -392,6 +392,81 @@ fn segment_api_rejects_ambiguous_response_headers() {
     }
 }
 
+fn transfer_encoded_response(request: &str, coding: &str) -> Vec<u8> {
+    let (start, end) = requested_range(request);
+    let body = &BODY[start..=end];
+    let bytes = if coding.contains("chunked") {
+        let mut bytes = format!("{:x}\r\n", body.len()).into_bytes();
+        bytes.extend_from_slice(body);
+        bytes.extend_from_slice(b"\r\n0\r\n\r\n");
+        bytes
+    } else {
+        body.to_vec()
+    };
+    response(
+        "206 Partial Content",
+        &format!(
+            "Content-Range: bytes {start}-{end}/{}\r\nETag: {ETAG}\r\nTransfer-Encoding: {coding}",
+            BODY.len()
+        ),
+        &bytes,
+    )
+}
+
+const UNSUPPORTED_TRANSFER_CODINGS: &[&str] = &[
+    "gzip",
+    "unknown",
+    "gzip, chunked",
+    "chunked\r\nTransfer-Encoding: chunked",
+];
+
+#[test]
+fn segment_api_rejects_unsupported_or_duplicate_transfer_codings() {
+    let mut accepted = Vec::new();
+    for &coding in UNSUPPORTED_TRANSFER_CODINGS {
+        let fixture = Fixture::new(move |request| transfer_encoded_response(request, coding));
+        let directory = Directory::new();
+        let destination = directory.0.join("download");
+        let result = HttpEngine::new().download_to_segments(
+            &fixture.url,
+            &[Segment::new(0, 10)],
+            destination.to_str().unwrap(),
+            directory.0.join("partial"),
+            BODY.len() as u64,
+            Some(&HttpResumeValidator::Etag(ETAG.into())),
+            &HttpTransferControl::new(),
+            |_| Ok(()),
+        );
+        if result.is_ok() {
+            accepted.push(coding);
+        } else {
+            assert!(!destination.exists());
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "published unsupported transfer codings: {accepted:?}"
+    );
+}
+
+#[test]
+fn probe_rejects_unsupported_or_duplicate_transfer_codings() {
+    let mut accepted = Vec::new();
+    for &coding in UNSUPPORTED_TRANSFER_CODINGS {
+        let fixture = Fixture::new(move |request| transfer_encoded_response(request, coding));
+        if HttpEngine::new()
+            .probe_range(&fixture.url)
+            .is_some_and(|capability| capability.supports_ranges)
+        {
+            accepted.push(coding);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted unsupported transfer codings: {accepted:?}"
+    );
+}
+
 #[test]
 fn segment_api_rejects_declared_short_and_chunked_extra_bodies() {
     assert_rejected_response(

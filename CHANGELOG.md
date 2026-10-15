@@ -33,9 +33,9 @@ This changelog records notable changes, not acceptance of every milestone. PR #5
 
   Direct review at `3768c3a` reproduced incorrect Range/validator acceptance, unsafe partial-file handling, and publication after cancellation. PR #58 repairs the single-connection session and startup recovery, without accepting segment execution. Product segment dispatch remains disabled until these protections are complete.
 
-- **分段原型的输入与响应校验**：要求按序、无缺口／重叠的完整段集合及有效强 ETag，在请求／创建暂存文件前拒绝零长、越界、整数溢出以及缺失、弱或语法无效的 ETag。Range 探测校验精确的一字节范围与实际响应，响应头至 EOF 的总等待上限为 3 秒；拒绝重复的关键响应头。各段校验 `206`、起止／总长、相同 ETag、identity 编码及实际长度，保留具体失败原因。零字节文件不分段，拆段不再使用浮点计算。
+- **分段原型的输入与响应校验**：要求按序、无缺口／重叠的完整段集合及有效强 ETag，在请求／创建暂存文件前拒绝零长、越界、整数溢出以及缺失、弱或语法无效的 ETag。Range 探测校验精确的一字节范围与实际响应，响应头至 EOF 的总等待上限为 3 秒；拒绝重复的关键响应头。各段校验 `206`、起止／总长、相同 ETag、identity 内容编码及实际长度；传输编码仅允许缺省或单一 `chunked`，保留具体失败原因。零字节文件不分段，拆段不再使用浮点计算。
 
-  **Input and response checks for the segment prototype**: require ordered, complete segments without gaps/overlap and a valid strong ETag. Before requests/staging creation, reject zero length, out-of-bounds ranges, integer overflow, and missing, weak or syntactically invalid ETags. Range probes validate the exact one-byte range and body within a three-second total deadline through headers and EOF. Reject duplicate critical response headers; each segment checks `206`, bounds/total, a matching ETag, identity encoding and actual length, preserving specific failure causes. Empty files are not segmented, and splitting no longer uses floating-point arithmetic.
+  **Input and response checks for the segment prototype**: require ordered, complete segments without gaps/overlap and a valid strong ETag. Before requests/staging creation, reject zero length, out-of-bounds ranges, integer overflow, and missing, weak or syntactically invalid ETags. Range probes validate the exact one-byte range and body within a three-second total deadline through headers and EOF. Reject duplicate critical response headers; each segment checks `206`, bounds/total, a matching ETag, identity content encoding and actual length. Transfer-Encoding is limited to absent or a single `chunked` value, preserving specific failure causes. Empty files are not segmented, and splitting no longer uses floating-point arithmetic.
 
   此项不改变单连接的 ETag/Last-Modified 策略；可信暂存句柄、所有 Worker 控制屏障、完成凭证、恢复和安全回退仍待实现，多连接仍未接回 Server。
 
