@@ -3,9 +3,9 @@ name: Website
 on:
   push:
     branches: [main]
-    paths: [apps/website/**, apps/desktop/src-tauri/icons/icon.png, docs/assets/native-macos/**, .github/workflows/website*.yml]
+    paths: [apps/website/**, apps/desktop/src-tauri/icons/**, docs/assets/native-macos/**, .github/workflows/website*.yml]
   pull_request:
-    paths: [apps/website/**, apps/desktop/src-tauri/icons/icon.png, docs/assets/native-macos/**, .github/workflows/website*.yml]
+    paths: [apps/website/**, apps/desktop/src-tauri/icons/**, docs/assets/native-macos/**, .github/workflows/website*.yml]
   workflow_dispatch:
 
 permissions:
@@ -47,10 +47,31 @@ jobs:
         with:
           path: apps/website/dist
 
+  main-ci:
+    name: Main push CI gate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: website
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Wait for this SHA's complete main push CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node apps/website/main-ci-gate.mjs
+
   deploy:
     name: Deploy GitHub Pages
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    needs: website
+    needs: [website, main-ci]
     runs-on: ubuntu-latest
     permissions:
       pages: write

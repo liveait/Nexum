@@ -21,9 +21,21 @@ node apps/website/build.mjs
 
 The website uses this repository's GitHub Pages project site at `https://liveait.github.io/Nexum/`, with `/Nexum/zh/` and `/Nexum/en/`. Select GitHub Actions under Settings → Pages. A custom domain can follow later; `SITE_BASE_PATH` supports both project prefixes and domain roots.
 
-`.github/workflows/website.yml` 在 PR 中只构建并上传 `website-preview` 产物，不部署生产。只有 `main` 的 push 或手动 workflow_dispatch 经过构建后才上传 Pages 产物并进入 `github-pages` environment 部署。生产使用独立并发组，不被 PR 取消；deploy job 独占 `pages: write`／`id-token: write`。远端 environment 的分支规则需另行核实，源码不配置或绕过它。工作流进入 main 并首次部署通过前，不宣称官网已上线。
+`.github/workflows/website.yml` 在 PR 中只构建并上传 `website-preview` 产物，不部署生产。只有 `main` 的 push 或手动 workflow_dispatch 才上传 Pages 产物；构建成功后，`main-ci` 屏障确认同仓库、同 SHA 的 `ci.yml` main push 验证，再允许进入 `github-pages` environment 部署。生产使用独立并发组，不被 PR 取消；deploy job 独占 `pages: write`／`id-token: write`。远端 environment 的分支规则需另行核实，源码不配置或绕过它。工作流进入 main 并首次部署通过前，不宣称官网已上线。
 
-The website workflow only builds/uploads `website-preview` artifacts for PRs. Only main push or main workflow_dispatch can upload a Pages artifact and deploy through the github-pages environment. Its separate concurrency group prevents PRs from cancelling production; only deploy receives Pages/OIDC write permissions. Verify remote environment branch rules separately; source neither configures nor bypasses them. The website is not live until the workflow is on main and deployment succeeds.
+The website workflow only builds/uploads `website-preview` artifacts for PRs. Only main push or main workflow_dispatch uploads a Pages artifact. After the build succeeds, the main-ci gate verifies the same repository/SHA's ci.yml main push before allowing deployment through github-pages. Its separate concurrency group prevents PRs from cancelling production; only deploy receives Pages/OIDC write permissions. Verify remote environment branch rules separately; source neither configures nor bypasses them. The website is not live until the workflow is on main and deployment succeeds.
+
+屏障使用只读 Actions API，最多等待 30 分钟，每 15 秒查询一次。它核对 run 的仓库 ID／名称、来源仓库、SHA、main 分支、push 事件和 workflow 路径，选择该 SHA 最新的 run，并读取其当前 attempt 的 jobs。Rust、Desktop macOS 及 `ci.yml` 中全部命名步骤必须存在且为 completed/success，其他实际步骤也不得失败或跳过；只看 workflow 总成功不足以放行。CI 的 job／步骤名称改变时需同步此契约。仅屏障 job 获得 `actions: read`，API token 不进入构建产物或日志。
+
+The gate uses read-only Actions APIs, polling every 15 seconds for at most 30 minutes. It verifies repository ID/name, source repository, SHA, main branch, push event and workflow path, selects that SHA's latest run and reads its current attempt's jobs. Rust, Desktop macOS and every named ci.yml step must exist with completed/success; other actual steps must also pass. Workflow success alone is insufficient. Update this contract when CI job/step names change. Only the gate job receives actions:read; the API token never enters build artifacts or logs.
+
+放行前再次核对 run／attempt，并确认 main ref 仍指向构建 SHA。缺失或未结束的 CI 等待到超时；失败、取消、跳过、证据不完整、API 错误或 main 已前进均阻止部署。先修复／重跑 CI，再从最新 main 手动运行 Website；不得自动切换 SHA 后复用旧产物。这一屏障不能替代 M3 分发验收。
+
+Before permitting deployment, the gate rechecks the run/attempt and confirms main still points to the build SHA. Missing or pending CI waits until timeout; failure, cancellation, skipped or incomplete evidence, API errors or main advancing blocks deployment. Fix/rerun CI, then dispatch Website from latest main. Never switch SHAs while reusing an old artifact. This gate does not replace M3 distribution acceptance.
+
+API 契约见 [workflow runs](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow)、[attempt jobs](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt) 和 [Git refs](https://docs.github.com/en/rest/git/refs#get-a-reference)。
+
+See the official API contracts for [workflow runs](https://docs.github.com/en/rest/actions/workflow-runs#list-workflow-runs-for-a-workflow), [attempt jobs](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run-attempt) and [Git refs](https://docs.github.com/en/rest/git/refs#get-a-reference).
 
 本地模拟项目路径时，使用以下构建；HTTP 服务需要把 dist 挂载到 `/Nexum/`，不能只在 `/` 打开页面。默认不设置变量仍支持根路径本地预览。
 
