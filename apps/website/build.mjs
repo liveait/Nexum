@@ -1,14 +1,13 @@
 import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { fetchRelease } from "./release.mjs";
+import { buildSettings } from "./site-config.mjs";
 
 const base = new URL("./", import.meta.url);
 const output = new URL("dist/", base);
-const preview = process.env.CF_PAGES_BRANCH && process.env.CF_PAGES_BRANCH !== "main";
-if (preview && process.argv.includes("--sync-release")) throw new Error("Preview builds cannot synchronize production downloads");
-const release = !preview && (process.env.CF_PAGES_BRANCH === "main" || process.argv.includes("--sync-release"))
-  ? await fetchRelease()
-  : { available: false };
+const settings = buildSettings(process.env, process.argv.slice(2));
+const sitePath = (path) => `${settings.basePath}${path}`;
+const release = settings.syncRelease ? await fetchRelease() : { available: false };
 
 const messages = {
   zh: {
@@ -42,12 +41,12 @@ function page(locale) {
   const t = messages[locale];
   const cards = t.items.map(([title, description], i) => `<article><span class="step">0${i + 1}</span><h3>${title}</h3><p>${description}</p></article>`).join("");
   const packages = release.available ? `<p>${t.releaseDetail}</p><div class="packages">${release.artifacts.map((asset) => `<article><h3>macOS · ${asset.arch === "aarch64" ? "Apple silicon" : "Intel"}</h3><p>${t.minimum} ${escape(asset.minimum_os)} · ${(asset.size / 1048576).toFixed(1)} MiB</p><a class="button" href="${escape(asset.url)}">${t.downloadLabel} ${escape(release.version)} ↗</a><p class="verified">${t.verified}</p><details><summary>SHA256</summary><code>${escape(asset.sha256)}</code></details></article>`).join("")}</div>` : `<p class="pending"><span class="dot"></span>${t.pending}</p><p>${t.pendingDetail}</p>`;
-  return `<!doctype html><html lang="${t.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nexum — ${t.title}</title><meta name="description" content="${t.intro}"><link rel="alternate" hreflang="zh-CN" href="/zh/"><link rel="alternate" hreflang="en" href="/en/"><link rel="stylesheet" href="/assets/style.css"></head>
-<body><a class="skip" href="#main">${t.features}</a><header><a class="brand" href="/${locale}/" aria-label="Nexum"><span class="mark" aria-hidden="true">↘</span>Nexum</a><nav aria-label="${t.project}"><a href="#features">${t.features}</a><a href="#download">${t.downloads}</a><a href="https://github.com/liveait/Nexum/blob/main/docs/DEVELOPMENT.md">${t.docs}</a><a href="/${t.other}/" lang="${t.other === "zh" ? "zh-CN" : "en"}">${t.language}</a></nav></header>
-<main id="main"><section class="hero"><div class="hero-copy"><p class="eyebrow"><span class="dot"></span>${t.eyebrow}</p><h1>${t.title}</h1><p class="intro">${t.intro}</p><div class="actions"><a class="button" href="#download">${t.download} <span aria-hidden="true">↓</span></a><a class="text-link" href="https://github.com/liveait/Nexum">${t.source} ↗</a></div><span class="hero-note">HTTP / HTTPS · macOS · Open source</span></div><figure><picture><source media="(prefers-color-scheme: dark)" srcset="/assets/downloads-dark.png"><img src="/assets/downloads-light.png" alt="Nexum ${locale === "zh" ? "原生下载任务列表与详情" : "native download list and inspector"}" width="2400" height="1602"></picture><figcaption>${t.caption}</figcaption></figure></section>
+  return `<!doctype html><html lang="${t.lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'"><title>Nexum — ${t.title}</title><meta name="description" content="${t.intro}"><link rel="alternate" hreflang="zh-CN" href="${sitePath("zh/")}"><link rel="alternate" hreflang="en" href="${sitePath("en/")}"><link rel="icon" type="image/png" href="${sitePath("assets/nexum.png")}"><link rel="apple-touch-icon" href="${sitePath("assets/nexum.png")}"><link rel="stylesheet" href="${sitePath("assets/style.css")}"></head>
+<body><a class="skip" href="#main">${t.features}</a><header><a class="brand" href="${sitePath(`${locale}/`)}" aria-label="Nexum"><img class="mark" src="${sitePath("assets/nexum.png")}" alt="" width="32" height="32">Nexum</a><nav aria-label="${t.project}"><a href="#features">${t.features}</a><a href="#download">${t.downloads}</a><a href="https://github.com/liveait/Nexum/blob/main/docs/DEVELOPMENT.md">${t.docs}</a><a href="${sitePath(`${t.other}/`)}" lang="${t.other === "zh" ? "zh-CN" : "en"}">${t.language}</a></nav></header>
+<main id="main"><section class="hero"><div class="hero-copy"><p class="eyebrow"><span class="dot"></span>${t.eyebrow}</p><h1>${t.title}</h1><p class="intro">${t.intro}</p><div class="actions"><a class="button" href="#download">${t.download} <span aria-hidden="true">↓</span></a><a class="text-link" href="https://github.com/liveait/Nexum">${t.source} ↗</a></div><span class="hero-note">HTTP / HTTPS · macOS · Open source</span></div><figure><picture><source media="(prefers-color-scheme: dark)" srcset="${sitePath("assets/downloads-dark.png")}"><img src="${sitePath("assets/downloads-light.png")}" alt="Nexum ${locale === "zh" ? "原生下载任务列表与详情" : "native download list and inspector"}" width="2400" height="1602"></picture><figcaption>${t.caption}</figcaption></figure></section>
 <section class="features" id="features"><p class="eyebrow">${t.number}</p><div class="section-heading"><h2>${t.heading}</h2><p>${t.detail}</p></div><div class="feature-grid">${cards}</div></section>
 <section class="release" id="download"><p class="eyebrow">02 / NEXUM FOR MAC</p><h2>${release.available ? t.readyTitle : t.releaseTitle}</h2>${packages}<p class="limits">${t.limits}</p></section>
-<section class="project"><div><p class="eyebrow">03 / BUILT IN THE OPEN</p><h2>${t.project}</h2><p>${t.projectDetail}</p></div><div class="project-links"><a href="https://github.com/liveait/Nexum/blob/main/docs/DEVELOPMENT_PLAN.md">${t.plan}<span>↗</span></a><a href="https://github.com/liveait/Nexum/releases">${t.releaseNotes}<span>↗</span></a><a href="https://github.com/liveait/Nexum/blob/main/CHANGELOG.md">${t.changelog}<span>↗</span></a><a href="https://github.com/liveait/Nexum/issues">${t.feedback}<span>↗</span></a></div></section></main><footer><span class="brand">Nexum</span><p>${t.footer}</p><a href="https://github.com/liveait/Nexum">GitHub ↗</a></footer></body></html>`;
+<section class="project"><div><p class="eyebrow">03 / BUILT IN THE OPEN</p><h2>${t.project}</h2><p>${t.projectDetail}</p></div><div class="project-links"><a href="https://github.com/liveait/Nexum/blob/main/docs/DEVELOPMENT_PLAN.md">${t.plan}<span>↗</span></a><a href="https://github.com/liveait/Nexum/releases">${t.releaseNotes}<span>↗</span></a><a href="https://github.com/liveait/Nexum/blob/main/CHANGELOG.md">${t.changelog}<span>↗</span></a><a href="https://github.com/liveait/Nexum/issues">${t.feedback}<span>↗</span></a></div></section></main><footer><span class="brand"><img class="mark" src="${sitePath("assets/nexum.png")}" alt="" width="32" height="32">Nexum</span><p>${t.footer}</p><a href="https://github.com/liveait/Nexum">GitHub ↗</a></footer></body></html>`;
 }
 
 await rm(output, { recursive: true, force: true });
@@ -56,9 +55,10 @@ for (const locale of Object.keys(messages)) {
   await mkdir(new URL(`${locale}/`, output), { recursive: true });
   await writeFile(new URL(`${locale}/index.html`, output), page(locale));
 }
-await writeFile(new URL("index.html", output), '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=/zh/"><title>Nexum</title><a href="/zh/">中文</a> · <a href="/en/">English</a></html>');
+await writeFile(new URL("index.html", output), `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${sitePath("zh/")}"><title>Nexum</title><a href="${sitePath("zh/")}">中文</a> · <a href="${sitePath("en/")}">English</a></html>`);
+await cp(new URL("../desktop/src-tauri/icons/icon.png", base), new URL("assets/nexum.png", output));
+await writeFile(new URL(".nojekyll", output), "");
 await writeFile(new URL("release.json", output), `${JSON.stringify(release, null, 2)}\n`);
 await cp(new URL("style.css", base), new URL("assets/style.css", output));
 for (const appearance of ["light", "dark"]) await cp(new URL(`../../docs/assets/native-macos/release-2026-10-10/downloads-${appearance}.png`, base), new URL(`assets/downloads-${appearance}.png`, output));
-await writeFile(new URL("_headers", output), "/*\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n  Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'\n");
-console.log(`Built ${fileURLToPath(output)} (${preview ? "preview; downloads withheld" : release.available ? "accepted release" : "release pending"})`);
+console.log(`Built ${fileURLToPath(output)} (${settings.basePath}; ${release.available ? "accepted release" : "release pending"})`);

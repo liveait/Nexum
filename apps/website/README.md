@@ -15,21 +15,39 @@ node --test apps/website/release.test.mjs
 node apps/website/build.mjs
 ```
 
-## Cloudflare Pages 配置 / Cloudflare Pages configuration
+## GitHub Pages 配置 / GitHub Pages configuration
 
-在 Cloudflare Pages 连接此 GitHub 仓库，仓库根目录为构建根目录，构建命令 `node apps/website/build.mjs`，输出目录 `apps/website/dist`，Node.js 版本 22，生产分支 `main`。其他分支使用独立预览地址；脚本在预览中强制关闭正式下载，且不写源码或生产元数据。配置自定义域名及 HTTPS 后分别验证中英文路径、切换、资源和链接。项目创建、域名和实际部署尚待完成。
+官网使用本仓库的 GitHub Pages 项目站点，默认地址为 `https://liveait.github.io/Nexum/`，中英文路径为 `/Nexum/zh/` 和 `/Nexum/en/`。在仓库 Settings → Pages 将 Source 设为 GitHub Actions。可后续配置独立域名；当前构建通过 `SITE_BASE_PATH` 支持项目子路径和域名根路径。
 
-Connect this GitHub repository in Cloudflare Pages. Use the repository root, build command `node apps/website/build.mjs`, output `apps/website/dist`, Node.js 22, and production branch `main`. Other branches use separate preview URLs; the script withholds official downloads in previews and never writes source or production metadata. Configure the domain/HTTPS, then verify both languages, switching, assets and links. Project creation, domain configuration and actual deployment remain open.
+The website uses this repository's GitHub Pages project site at `https://liveait.github.io/Nexum/`, with `/Nexum/zh/` and `/Nexum/en/`. Select GitHub Actions under Settings → Pages. A custom domain can follow later; `SITE_BASE_PATH` supports both project prefixes and domain roots.
 
-参考 [Cloudflare Pages GitHub 集成](https://developers.cloudflare.com/pages/configuration/git-integration/github-integration/)和[预览部署](https://developers.cloudflare.com/pages/configuration/preview-deployments/)。
+`.github/workflows/website.yml` 在 PR 中只构建并上传 `website-preview` 产物，不部署生产。只有 `main` 的 push 或手动 workflow_dispatch 经过构建后才上传 Pages 产物并进入 `github-pages` environment 部署。生产使用独立并发组，不被 PR 取消；deploy job 独占 `pages: write`／`id-token: write`。远端 environment 的分支规则需另行核实，源码不配置或绕过它。工作流进入 main 并首次部署通过前，不宣称官网已上线。
 
-See [Cloudflare Pages GitHub integration](https://developers.cloudflare.com/pages/configuration/git-integration/github-integration/) and [preview deployments](https://developers.cloudflare.com/pages/configuration/preview-deployments/).
+The website workflow only builds/uploads `website-preview` artifacts for PRs. Only main push or main workflow_dispatch can upload a Pages artifact and deploy through the github-pages environment. Its separate concurrency group prevents PRs from cancelling production; only deploy receives Pages/OIDC write permissions. Verify remote environment branch rules separately; source neither configures nor bypasses them. The website is not live until the workflow is on main and deployment succeeds.
+
+本地模拟项目路径时，使用以下构建；HTTP 服务需要把 dist 挂载到 `/Nexum/`，不能只在 `/` 打开页面。默认不设置变量仍支持根路径本地预览。
+
+Use this build to simulate the project prefix locally; the HTTP server must mount dist at `/Nexum/`. The default without the variable still supports root-path previews.
+
+```bash
+SITE_BASE_PATH=/Nexum/ node apps/website/build.mjs
+```
+
+参考 [GitHub Pages 快速入门](https://docs.github.com/zh/pages/quickstart)和[自定义 Actions 工作流](https://docs.github.com/zh/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)。
+
+See the [GitHub Pages quickstart](https://docs.github.com/en/pages/quickstart) and [custom Actions workflows](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
+
+## 现有品牌图标 / Existing brand icon
+
+页头、页尾、favicon 和 Apple touch icon 共用 `apps/desktop/src-tauri/icons/icon.png`，与原生 App 的既定蓝紫 N 图标一致。构建复制到产物，不新增平行图标源，也不使用临时箭头标记。
+
+Header, footer, favicon and Apple touch icon reuse the established blue/purple N at `apps/desktop/src-tauri/icons/icon.png`. The build copies it into output without introducing another source asset or a temporary arrow mark.
 
 ## 发布元数据 / Release metadata
 
-仅 `CF_PAGES_BRANCH=main` 或显式 `node apps/website/build.mjs --sync-release` 在构建时读取公开 GitHub latest release，浏览器不接收私有 token。无 release（404）显示待发布；网络／API 或元数据错误使构建失败，避免发布错误下载。发布后重建站点以同步；可在 Pages 手动重建或通过其独立部署 Hook 接入发布流程，不在 PR 中调用生产 Hook。
+仅 GitHub Actions 的 main push／dispatch 或显式 `node apps/website/build.mjs --sync-release` 在构建时读取公开 GitHub latest release，浏览器不接收私有 token。无 release（404）显示待发布；网络／API 或元数据错误使构建失败，避免发布错误下载。稳定 release 发布后，独立的 website-release 工作流只请求 website.yml 在 main 执行，不 checkout 或执行 tag 源码；保持 main 的 OIDC／environment 分支约束。也可手动在 main 运行 website.yml。非 main 的 Actions 即使传入同步参数也会失败，PR 不能解锁正式下载。
 
-Only `CF_PAGES_BRANCH=main` or explicit `node apps/website/build.mjs --sync-release` reads the public GitHub latest release at build time; browsers receive no private token. A missing release (404) shows pending status; network/API or metadata errors fail the build to avoid publishing incorrect downloads. Rebuild after a release to synchronize, manually in Pages or through a separate deployment hook in the release flow. Never call the production hook from a PR.
+Only main push/dispatch in GitHub Actions or explicit `node apps/website/build.mjs --sync-release` reads the public GitHub latest release at build time; browsers receive no private token. A missing release (404) shows pending status; network/API or metadata errors fail the build to avoid publishing incorrect downloads. After a stable release, the separate website-release workflow dispatches website.yml on main without checking out/executing tag source, retaining main OIDC/environment restrictions. Manual dispatch on main also works. Non-main Actions reject explicit sync arguments; PRs cannot unlock downloads.
 
 发布者在通过 M3 后随稳定 release 上传 `nexum-release.json`。它是发布者的验收声明，不能替代签名／公证检查。安装包大小和 SHA256 必须与 [GitHub Release assets](https://docs.github.com/en/rest/releases/assets) 的 `size`、`digest` 匹配；下载 URL 仅允许本仓库该版本的产物。未验收架构不填入数组。示例字段值是占位，不能直接发布。
 
