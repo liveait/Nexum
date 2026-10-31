@@ -2310,7 +2310,19 @@ fn second_server_cannot_recover_a_live_servers_tasks() {
     first.stop();
     fixture.finish();
     let mut restarted = ServerProcess::start(dir.path());
+    // Listening readiness precedes asynchronous recovery dispatch/retries. The
+    // fixture is closed, so wait for the terminal failure instead of racing a
+    // legitimate Queued/Downloading state on the first RPC after startup.
+    restarted.wait_for_state("running", "Failed");
     assert_eq!(restarted.task_state("running"), "Failed");
+    let repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+    let recovered = repository.get(&TaskId::from("running")).unwrap().unwrap();
+    assert_eq!(recovered.state, TaskState::Failed);
+    assert!(
+        recovered.last_error.is_some(),
+        "failed recovery must persist its transfer error"
+    );
+    drop(repository);
     restarted.stop();
 }
 
