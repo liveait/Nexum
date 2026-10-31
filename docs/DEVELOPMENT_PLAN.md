@@ -134,18 +134,18 @@ The order expresses dependencies and priority, not dates. M0–M3 form the first
 
 #### 官网部署 — M3 配套工作包（计划） / Website deployment — Supporting M3 work package (planned)
 
-- **范围与依赖**：使用 Cloudflare Pages 托管独立的中英文静态官网，首版包含产品功能与截图、下载、文档入口、更新日志，以及源码和反馈入口。官网准备可与 M3 签名工作并行；首发 App 的原生验收仍优先，正式下载上线须等待实际 App 通过 M3。
+- **范围与依赖**：使用本仓库 GitHub Pages 项目站点托管中英文静态官网，首版包含产品功能与截图、下载、文档入口、更新日志，以及源码和反馈入口。官网准备可与 M3 签名工作并行；首发 App 的原生验收仍优先，正式下载上线须等待实际 App 通过 M3。
 
-  **Scope and dependency:** Host an independent English/Chinese static website on Cloudflare Pages. The first version includes product features and screenshots, downloads, documentation links, a changelog, and source/feedback links. Website preparation may overlap with M3 signing work; native acceptance of the first App remains the priority, and official downloads go live only after the actual App passes M3.
+  **Scope and dependency:** Host the English/Chinese static website as this repository's GitHub Pages project site. The first version includes product features and screenshots, downloads, documentation links, a changelog, and source/feedback links. Website preparation may overlap with M3 signing work; native acceptance of the first App remains the priority, and official downloads go live only after the actual App passes M3.
 - **首版下载**：官方下载链接指向 GitHub Releases，自动同步公开发布元数据。下载页的版本、支持的 OS/CPU 架构、包大小、SHA256、签名与公证状态以实际发布产物为准；未完成验收的平台不得显示可下载安装。同步所需的私有 token 不得交给浏览器。
 
   **Initial downloads:** Link official downloads to GitHub Releases and automatically synchronize public release metadata. The download page's version, supported OS/CPU architectures, package size, SHA256, signing, and notarization status must reflect actual release artifacts. An unvalidated platform must not offer an installable download. Private tokens used for synchronization must not reach the browser.
-- **部署工作**：分别配置 PR 预览和 `main` 生产站，确定官网域名并配置 HTTPS；预览构建与生产发布使用各自的地址和发布流程。
+- **部署工作**：PR 构建只提供可下载的预览产物，`main` push／手动 dispatch 才通过 GitHub Pages environment 发布；适配 `/Nexum/` 中英文、资源和语言切换路径。默认使用 `https://liveait.github.io/Nexum/` 与 HTTPS，独立域名后续配置。稳定 release 通过单独工作流请求 main 重建，不让 tag ref 绕过 environment 约束。
 
-  **Deployment work:** Configure PR previews and the `main` production site separately, decide the website domain, and configure HTTPS. Preview builds and production releases use their own addresses and publication flows.
-- **验收**：中英文路径、语言切换及页面链接均可用；从官网链接下载真实安装包，检查 SHA256、签名和公证状态与发布记录一致，并完成安装启动检查。PR 预览不会更新生产站或生产下载元数据。
+  **Deployment work:** PR builds provide downloadable preview artifacts; only main push/manual dispatch deploys through the GitHub Pages environment. Support `/Nexum/` for languages, assets and navigation. Use the default HTTPS project URL, with a custom domain later. Stable releases dispatch a main rebuild separately rather than bypassing environment constraints with a tag ref.
+- **验收**：中英文路径、语言切换及页面链接均可用；从官网链接下载真实安装包，检查 SHA256、签名和公证状态与发布记录一致，并完成安装启动检查。PR 预览产物不会更新生产站或生产下载元数据；构建通过与实际 Pages 部署通过分别记录。
 
-  **Acceptance:** English/Chinese paths, language switching, and page links work. Download a real installer through the website link, verify its SHA256, signing, and notarization status against release records, and complete install/launch checks. PR previews do not update the production site or its download metadata.
+  **Acceptance:** English/Chinese paths, language switching, and page links work. Download a real installer through the website link, verify its SHA256, signing, and notarization status against release records, and complete install/launch checks. PR preview artifacts do not update production or download metadata; record build success separately from actual Pages deployment.
 - **后续选项**：按实际流量和费用限制决定是否增加 R2 版本化镜像、独立下载域名与 CDN，并保留 GitHub Releases 回退。启用前验证两处元数据和哈希一致、`Range` 支持、下载文件名及文件完整性。
 
   **Later option:** Decide whether to add versioned R2 mirrors, a separate download domain, and a CDN based on actual traffic and cost limits, while retaining GitHub Releases as a fallback. Before enabling the mirror, verify matching metadata and hashes, `Range` support, download filenames, and file integrity.
@@ -295,9 +295,9 @@ The order expresses dependencies and priority, not dates. M0–M3 form the first
 
 ## 3. 范围与下一步 / 3. Scope and immediate next step
 
-官网部署按上述 M3 工作包推进：先确定域名和发布元数据契约，再建设中英文官网与预览流程；正式下载随 M3 验收通过后上线，R2 镜像按实际流量需求后续安排。
+官网部署按上述 M3 工作包推进：沿用 GitHub Pages 默认项目地址，固定发布元数据契约并建设中英文官网与预览产物流程；正式下载随 M3 验收通过后上线，R2 镜像按实际流量需求后续安排。
 
-Website deployment follows the M3 work package above: decide the domain and release metadata contract, then build the English/Chinese website and preview flow. Official downloads go live after M3 acceptance passes; schedule an R2 mirror later according to actual traffic needs.
+Website deployment follows the M3 work package above: use the default GitHub Pages project address, fix the release metadata contract and build the bilingual website/preview-artifact flow. Official downloads go live after M3 acceptance passes; schedule an R2 mirror later according to actual traffic needs.
 
 Motrix 清单中的自动 Tracker 列表、UPnP/NAT-PMP、上传限速、登录时启动、统计 Dashboard 和远程/headless 控制仍需单独决定范围；本计划不把它们算作 M0–M7 的已承诺交付。Media/Automation、AI/MCP、远程设备、手动主题与强调色也不在首个 macOS 下载器发布门槛中。本地文件来源是否需要导入/传输路径另作产品决策。可靠事件回放、显式 CA/证书固定和更严格的协议兼容性检查按多客户端或远程连接的实际需求立项；当前事件断线后通过完整任务快照恢复，[ADR 0005](decisions/0005-tls-transport.md)记录已实现的 TLS 边界。以上项目不会借由已有数据模型或页面占位被标成可用功能。
 
