@@ -2,7 +2,6 @@
   <img src="apps/desktop/src-tauri/icons/icon.png" alt="Nexum" width="88" height="88">
 </p>
 
-<a id="nexum"></a>
 <h1 align="center">Nexum</h1>
 
 <p align="center">
