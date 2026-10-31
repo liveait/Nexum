@@ -10,6 +10,8 @@ import { verifyIcnsContainer, verifyIconContainer } from "./verify-icon-containe
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = "assets/brand/icon-graphite-v1.png";
 const source = join(root, sourcePath);
+const markSourcePath = "assets/brand/nexum-mark.png";
+const markSource = join(root, markSourcePath);
 const desktop = join(root, "apps/desktop");
 const icons = join(desktop, "src-tauri/icons");
 const packageJson = JSON.parse(readFileSync(join(desktop, "package.json"), "utf8"));
@@ -91,9 +93,15 @@ try {
   assert.equal(version, `tauri-cli ${packageJson.devDependencies["@tauri-apps/cli"]}`, "use the pinned local Tauri CLI");
   const standard = join(temporary, "standard");
   const png = join(temporary, "png");
+  const markPng = join(temporary, "mark-png");
   tauri(["icon", source, "--output", standard]);
   const sizes = [16, 32, 48, 128, 180, 1024];
   tauri(["icon", source, "--output", png, ...sizes.flatMap((size) => ["--png", String(size)])]);
+  const markBytes = readFileSync(markSource);
+  assert.ok(markBytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")), "mark source must be a PNG");
+  assert.equal(markBytes.readUInt32BE(16), markBytes.readUInt32BE(20), "mark source must be square");
+  assert.ok(markBytes.readUInt32BE(16) >= 128, "never upscale the transparent mark");
+  tauri(["icon", markSource, "--output", markPng, "--png", "128"]);
   const icns = join(temporary, "icon.icns");
   writeFileSync(icns, orderedIcns(readFileSync(join(standard, "icon.icns"))));
   mkdirSync(icons, { recursive: true });
@@ -101,6 +109,7 @@ try {
     ["apps/desktop/src-tauri/icons/icon.png", join(png, "128x128.png")],
     ["apps/desktop/src-tauri/icons/icon-1024.png", join(png, "1024x1024.png")],
     ["apps/desktop/src-tauri/icons/apple-touch-icon.png", join(png, "180x180.png")],
+    ["apps/desktop/src-tauri/icons/brand-mark.png", join(markPng, "128x128.png")],
     ["apps/desktop/src-tauri/icons/icon.icns", icns],
     ...[16, 32, 48, 128].map((size) => [`apps/extension/icons/nexum-${size}.png`, join(png, `${size}x${size}.png`)]),
   ]);
@@ -113,6 +122,9 @@ try {
     source: sourcePath,
     source_sha256: sha256(sourceBytes),
     source_dimensions: [sourceBytes.readUInt32BE(16), sourceBytes.readUInt32BE(20)],
+    mark_source: markSourcePath,
+    mark_source_sha256: sha256(markBytes),
+    mark_source_dimensions: [markBytes.readUInt32BE(16), markBytes.readUInt32BE(20)],
     tauri_cli: version,
     generation_command: "node scripts/generate-brand-icons.mjs",
     canonical_png_size: 128,
@@ -122,7 +134,7 @@ try {
     outputs: Object.fromEntries([...outputs.keys(), icoPath].sort().map((path) => [path, sha256(readFileSync(join(root, path)))])),
   };
   writeFileSync(join(root, "assets/brand/icon-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  console.log(`Generated Desktop, Apple touch and extension icons from ${sourcePath} (${manifest.source_sha256}).`);
+  console.log(`Generated Desktop, Apple touch and extension icons from ${sourcePath} (${manifest.source_sha256}), and the transparent brand mark from ${markSourcePath} (${manifest.mark_source_sha256}).`);
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }

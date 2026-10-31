@@ -6,10 +6,20 @@
 
 The graphite-backed N selected on 2026-10-31 is stored at [`assets/brand/icon-graphite-v1.png`](../assets/brand/icon-graphite-v1.png). It is a byte-for-byte copy of the original **1254 × 1254 RGBA PNG**, preserving transparency and the selected design without cropping, repainting or recoloring. Earlier artwork and derivatives remain in Git history.
 
+同日选定的透明 N 标记原图保存在 [`assets/brand/nexum-mark.png`](../assets/brand/nexum-mark.png)，也是 **1254 × 1254 RGBA PNG** 的逐字节副本。它供侧栏与网站页头使用；Dock／Finder、favicon、Apple touch 和扩展继续使用完整石墨底 App 图标。生成脚本只缩放这两份已选原稿，不再修改设计。
+
+The transparent N mark selected the same day is stored at [`assets/brand/nexum-mark.png`](../assets/brand/nexum-mark.png), also a byte-for-byte copy of a **1254 × 1254 RGBA PNG**. It serves the sidebar and website header; Dock/Finder, favicon, Apple touch and the extension retain the complete graphite-backed App icon. The generation script only resizes these two selected sources without further design edits.
+
 原稿 SHA-256 / Source SHA-256:
 
 ```text
 6dd6608d8b9bd67fbca249470e235dcee1b495344e69f8828508f12300f07e4f
+```
+
+透明标记原稿 SHA-256 / Transparent mark source SHA-256:
+
+```text
+9678c621f4a7a232db7875ccf5be87be0c48413e40e5ad6d9591582455e95c1e
 ```
 
 ## 生成命令与依赖 / Generation command and dependencies
@@ -24,13 +34,14 @@ node scripts/generate-brand-icons.mjs
 node scripts/verify-icon-container.mjs
 ```
 
-脚本调用安装包的 `tauri.js` 入口执行下面两类标准命令；`TEMP` 表示脚本私有临时目录。所有缩放都直接从 1254px 原稿进行，不从 128px 派生图放大。默认命令产生的移动平台和商店专用资源不进入仓库。
+脚本调用安装包的 `tauri.js` 入口执行下面的标准命令；`TEMP` 表示脚本私有临时目录。所有缩放都直接从各自的 1254px 原稿进行，不从 128px 派生图放大。默认命令产生的移动平台和商店专用资源不进入仓库。
 
-The script invokes the installed `tauri.js` entry for the two standard commands below; `TEMP` represents its private temporary directory. Every resize starts directly from the 1254px source, never an upscaled 128px derivative. Mobile/store-specific outputs from the default command are not added to the repository.
+The script invokes the installed `tauri.js` entry for the standard commands below; `TEMP` represents its private temporary directory. Every resize starts directly from its respective 1254px source, never an upscaled 128px derivative. Mobile/store-specific outputs from the default command are not added to the repository.
 
 ```bash
 node apps/desktop/node_modules/@tauri-apps/cli/tauri.js icon assets/brand/icon-graphite-v1.png --output TEMP/standard
 node apps/desktop/node_modules/@tauri-apps/cli/tauri.js icon assets/brand/icon-graphite-v1.png --output TEMP/png --png 16 --png 32 --png 48 --png 128 --png 180 --png 1024
+node apps/desktop/node_modules/@tauri-apps/cli/tauri.js icon assets/brand/nexum-mark.png --output TEMP/mark-png --png 128
 ```
 
 生成后更新 [`assets/brand/icon-manifest.json`](../assets/brand/icon-manifest.json)，记录原稿尺寸／哈希、CLI 版本、容器尺寸和每个交付资源的 SHA-256。同版本 CLI 在本机连续运行两次后，清单与全部交付资源逐字节一致。
@@ -44,6 +55,7 @@ Generation updates [`assets/brand/icon-manifest.json`](../assets/brand/icon-mani
 | `apps/desktop/src-tauri/icons/icon.png` | 128px 规范图；与 ICO 的 128px PNG payload 及 ICNS 的 `ic07` payload 精确相同。 / 128px canonical image, exactly matching the ICO 128px PNG payload and ICNS `ic07` payload. |
 | `apps/desktop/src-tauri/icons/icon-1024.png` | 从原稿直接下采样的 1024px 导出，便于高分辨率消费；它不是被放大的旧 128px 图。 / 1024px export downsampled directly from the source for high-resolution consumers, not an enlarged old 128px image. |
 | `apps/desktop/src-tauri/icons/apple-touch-icon.png` | 从原稿直接生成的 180px Apple touch 资源；网站接线由网站改动负责。 / 180px Apple touch image generated directly from the source; website wiring belongs to the website change. |
+| `apps/desktop/src-tauri/icons/brand-mark.png` | 从透明标记原稿直接生成的 128px RGBA；侧栏／网站页头接线由各自 UI 改动负责，不替换规范 App 图标。 / 128px RGBA generated directly from the transparent mark source; sidebar/website header wiring belongs to their UI changes and does not replace the canonical App icon. |
 | `apps/desktop/src-tauri/icons/icon.icns` | 标准 Tauri ICNS，含 16／32／64／128／256／512／1024px 及 Retina 表示。 / Standard Tauri ICNS with 16/32/64/128/256/512/1024px and Retina representations. |
 | `apps/desktop/src-tauri/icons/icon.ico` | 标准 Tauri 的 16／24／32／48／64／256px PNG 帧，加同源 128px 帧。 / Standard Tauri 16/24/32/48/64/256px PNG frames plus the same-source 128px frame. |
 | `apps/extension/icons/nexum-{16,32,48,128}.png` | 同一原稿直接生成的扩展尺寸；128px 与 Desktop 规范图字节相同。 / Extension sizes generated directly from the same source; 128px is byte-identical to the Desktop canonical image. |

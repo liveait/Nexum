@@ -5,6 +5,12 @@
     1254,
     1254
   ],
+  "mark_source": "assets/brand/nexum-mark.png",
+  "mark_source_sha256": "9678c621f4a7a232db7875ccf5be87be0c48413e40e5ad6d9591582455e95c1e",
+  "mark_source_dimensions": [
+    1254,
+    1254
+  ],
   "tauri_cli": "tauri-cli 2.11.5",
   "generation_command": "node scripts/generate-brand-icons.mjs",
   "canonical_png_size": 128,
@@ -29,6 +35,7 @@
   ],
   "outputs": {
     "apps/desktop/src-tauri/icons/apple-touch-icon.png": "5b33083cbadc10807f52ea1bfaabc124f8dd8d1fc8eaf06ffdce14a18ad64faa",
+    "apps/desktop/src-tauri/icons/brand-mark.png": "a252849a588feadbfb9803db5f224c163069f78158732d68addcf0fcc4c0a0a8",
     "apps/desktop/src-tauri/icons/icon-1024.png": "f0ff2ffa09fae7e834d7356f9ea1049b9b0a9b5d519ce1dfed9bdc7e811aff82",
     "apps/desktop/src-tauri/icons/icon.icns": "3bfcc0b57b729fa13935b3c1816c36e73c96de5a11097828f58950980f8eef08",
     "apps/desktop/src-tauri/icons/icon.ico": "4dfac00520fa9e57613af74f383832ab9445d7023f1527213a92739c3d6f022e",
