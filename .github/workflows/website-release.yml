@@ -1,0 +1,21 @@
+name: Refresh website after a stable release
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  refresh:
+    if: github.event.release.draft == false && github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      # Dispatch main so Pages OIDC/environment checks retain the main ref.
+      # Do not check out or execute code from the release tag.
+      - name: Request main website build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run website.yml --repo "$GITHUB_REPOSITORY" --ref main
