@@ -2,9 +2,15 @@ type Invoke = <T>(command: string, args: Record<string, unknown>) => Promise<T>;
 
 export type TaskCommand = "task_queue" | "task_pause" | "task_resume" | "task_remove";
 
-interface CreatedDownload {
+export interface CreatedDownload {
   id: string;
   destination?: string;
+}
+
+interface AddDownloadOptions {
+  created?: CreatedDownload | null;
+  isCurrent?: () => boolean;
+  onCreated?: (download: CreatedDownload) => void;
 }
 
 export type AddDownloadResult =
@@ -16,12 +22,19 @@ export function invokeTaskCommand(invoke: Invoke, command: TaskCommand, taskId: 
 }
 
 /** The backend chooses the connection, task ID and collision-safe destination. */
-export async function addDownload(invoke: Invoke, source: string, filename: string, directory: string): Promise<AddDownloadResult> {
-  const created = await invoke<CreatedDownload>("task_create", { source, filename, directory });
+export async function addDownload(invoke: Invoke, source: string, filename: string, directory: string, options: AddDownloadOptions = {}): Promise<AddDownloadResult> {
+  const ensureCurrent = () => {
+    if (options.isCurrent && !options.isCurrent()) throw new Error("The download connection changed. Reopen Add Download to continue.");
+  };
+  ensureCurrent();
+  const created = options.created ?? await invoke<CreatedDownload>("task_create", { source, filename, directory });
   if (!created || typeof created.id !== "string" || !created.id) throw new Error("The download could not be created. Try again.");
+  ensureCurrent();
+  options.onCreated?.(created);
   const { id, destination } = created;
   try {
-    await invokeTaskCommand(invoke, "task_queue", id);
+    ensureCurrent();
+    if (!await invokeTaskCommand(invoke, "task_queue", id)) throw new Error("Server did not queue the task. Try again.");
     return { id, destination, queued: true };
   } catch (error) {
     return { id, destination, queued: false, error };
