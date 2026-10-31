@@ -57,6 +57,10 @@ This changelog records notable changes, not acceptance of every milestone. PR #5
 
   This is cooperative control for the disabled segment prototype; synchronous filesystem calls, underlying OS DNS resolution and caller callbacks that never return cannot be forcibly terminated. Server multi-connection routing remains disabled; completion receipts, atomic filesystem ownership and cancellation/publication, safe fallback and segment recovery remain subsequent gates.
 
+- **恢复测试的终态同步**：第二个 Server 的数据锁保护测试在重启后等待异步恢复／重试进入 `Failed`，再同时核对 RPC 与 SQLite 终态和持久化错误。监听就绪不代表任务已完成重试；保留原有拒锁及活动任务状态保护。
+
+  **Terminal-state synchronization in recovery tests**: after restart, the second-Server lock test waits for asynchronous recovery/retries to reach `Failed`, then verifies RPC/SQLite terminal state and the persisted error together. Listening readiness does not imply completed retries. Existing lock-refusal and live-task state protections remain covered.
+
 - **HTTP 完成对账**：单连接 session 在发布前以私有凭证绑定完整字节和任务／文件身份。PR #58 恢复 session 的凭证接线、最终进度与 `Completed` 一次持久化，并在 Server 监听和网络派发前真正执行启动对账；可无网络校验已发布文件或重新发布完整暂存文件，包括无 validator 且未知长度的完整响应。清理和 ID 复用保留冲突文件，具体失败原因进入任务视图。<br>
   **HTTP completion reconciliation**: before publication, the single-connection session binds complete bytes to task/file identity using private receipts. PR #58 restores session receipt wiring, atomic final progress/`Completed` persistence, and startup reconciliation before the Server listens or dispatches network work. Published files can verify or complete staging bytes can republish without network access, including complete unknown-length responses without validators. Cleanup and ID reuse preserve conflicting files, and task views retain specific failure causes.
 
