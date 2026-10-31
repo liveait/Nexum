@@ -821,15 +821,20 @@ fn complete_http_transfer(
                                 "task {id} failure state could not be saved: {finish_error:?}"
                             );
                         }
-                    } else if let Err(error) = cleanup_completion_partial(
-                        completion_context,
-                        source,
-                        destination,
-                        partial_path,
-                    )
-                    .and_then(|()| clear_completion(completion_context))
-                    {
-                        eprintln!("task {id} completion cleanup failed: {error}");
+                    } else {
+                        match cleanup_completion_partial(
+                            completion_context,
+                            source,
+                            destination,
+                            partial_path,
+                        )
+                        .and_then(|()| clear_completion(completion_context))
+                        {
+                            Ok(()) => {
+                                state.pending_completions.remove(id);
+                            }
+                            Err(error) => eprintln!("task {id} completion cleanup failed: {error}"),
+                        }
                     }
                 }
                 Err(error) => {
@@ -913,7 +918,11 @@ fn reply_error(request: &RpcRequest, error: RpcErrorObject) -> Option<RpcRespons
 fn transfer_destination(
     task: &nexum_core::nexum_task::DownloadTask,
     data_dir: &Path,
+    pending_completion: bool,
 ) -> io::Result<PathBuf> {
+    if pending_completion {
+        return normalized_destination(task.destination.as_str(), data_dir);
+    }
     let context = CompletionContext::new(task.id.clone(), data_dir);
     match std::fs::symlink_metadata(completion_receipt_path(&context)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -934,8 +943,12 @@ fn claim_next_http_transfer(
                 matches!(
                     state.core.resolve_source(task.source.as_str()),
                     Ok(result) if matches!(result.kind, ResolveKind::Http | ResolveKind::Https)
-                ) && transfer_destination(task, &state.data_dir)
-                    .is_ok_and(|path| !state.active_destinations.contains(&path))
+                ) && transfer_destination(
+                    task,
+                    &state.data_dir,
+                    state.pending_completions.contains(&task.id),
+                )
+                .is_ok_and(|path| !state.active_destinations.contains(&path))
             })
         })
         .cloned()
@@ -949,8 +962,12 @@ fn claim_next_http_transfer(
         .expect("queued task exists")
         .clone();
     let source = task.source.as_str().to_owned();
-    let destination_path = transfer_destination(&task, &state.data_dir)
-        .expect("matching queued task has a permitted destination");
+    let destination_path = transfer_destination(
+        &task,
+        &state.data_dir,
+        state.pending_completions.contains(&task.id),
+    )
+    .expect("matching queued task has a permitted destination");
     let destination = destination_path
         .to_str()
         .expect("RPC destination path is valid UTF-8")
@@ -976,6 +993,9 @@ fn claim_next_http_transfer(
         Ok(false) => return Ok(None),
         Err(error) => return Err(RpcErrorObject::internal_error(format!("{error:?}"))),
     };
+    if recovery_only {
+        state.pending_completions.insert(id.clone());
+    }
     if let Some(progress) = resume_progress.clone()
         && let Err(error) = state.core.update_progress(&id, progress)
     {
@@ -2289,7 +2309,8 @@ fn record_http_failure(
     error: String,
 ) -> io::Result<()> {
     if recovery_only {
-        mark_recovery_failed(core, id, error)
+        core.fail_task_without_retry(id, error)
+            .map_err(|error| io::Error::other(format!("{error:?}")))
     } else {
         core.finish_task_with_error(id, TaskState::Failed, error)
             .map_err(|error| io::Error::other(format!("{error:?}")))

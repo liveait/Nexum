@@ -45,6 +45,10 @@ Engine 新增兼容入口 `reconcile_pending_completion`：沿用既有凭证格
 
 The Engine adds the compatible `reconcile_pending_completion` entry: it reuses receipt format and validation, requires an existing receipt and returns exact final progress, and finishes its control on success, failure or cancellation so pause waiters wake. Existing `reconcile_completion` keeps its optional `None` result, allowing callers without receipts to continue a download. RPC, task schema and v1 receipts remain unchanged. Direct Engine tests, a test-only managed subprocess with a controllably blocked verifier, and production Server managed/persistence consumer tests separately cover controls, readiness/RPC responsiveness and offline recovery. The production binary has no fault-injection environment switch.
 
+Core 的 `fail_task_without_retry` 为已领取的恢复任务原子保存失败状态与错误，释放槽位并产生状态变化事件，不通过删除／恢复任务来变更状态。成功持久化完成且清理凭证后结束本次恢复登记，允许用户显式重新排队下载；保存或清理失败仍保留恢复约束。
+
+Core's `fail_task_without_retry` atomically persists a claimed recovery task's failure and error, releases its slot and emits a state-change event without removing/restoring the task. Successful durable completion and receipt cleanup end the recovery registration, allowing an explicit new download; persistence or cleanup failures retain recovery restrictions.
+
 此切片的最终交付仍要求当前 SHA 的完整门槛、独立审查及合并前后 CI；大文件原生 App 恢复和 Windows 行为仍需分别验收。后端进程测试不代表 M0/M1 原生验收完成，验证记录见[开发指南](../DEVELOPMENT.md#development-workflow-entry)。
 
 Final delivery of this slice still requires complete gates, independent review and pre/post-merge CI at the current SHA. Native-App large-file recovery and Windows behavior need their own acceptance. Backend process tests do not complete native M0/M1 acceptance; see the [Development Guide](../DEVELOPMENT.md#development-workflow-entry) for records.

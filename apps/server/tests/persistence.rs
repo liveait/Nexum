@@ -1694,6 +1694,68 @@ fn completion_recovery_save_failure_keeps_proof_and_does_not_retry_network() {
 }
 
 #[test]
+fn a_recovered_completion_can_be_explicitly_queued_for_another_download() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let body = large_http_body();
+    let origin = RangeAdvertisingHttpFixture::new(body.clone());
+    let id = "download-again-after-recovery";
+    let destination = fs::canonicalize(dir.output_path(id).parent().unwrap())
+        .unwrap()
+        .join(id);
+    let partial = destination.with_file_name(format!(".{id}.nexum.part"));
+    let context = CompletionContext::new(id, dir.path());
+    let progress = HttpEngine::new()
+        .download_to_resumable_with_completion(
+            &origin.source,
+            destination.to_str().unwrap(),
+            &partial,
+            &context,
+            &HttpTransferControl::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let mut task = DownloadTask::new(
+        id,
+        DownloadSource::new(&origin.source),
+        Destination::new(destination.to_string_lossy()),
+    );
+    task.state = TaskState::Downloading;
+    task.progress = progress.clone();
+    SqliteRepository::open(dir.path().join("nexum.sqlite"))
+        .unwrap()
+        .insert(task.into())
+        .unwrap();
+    let mut server = ServerProcess::start(dir.path());
+    server.wait_for_state(id, "Completed");
+    assert!(!completion_receipt_path(&context).exists());
+    fs::remove_file(&destination).unwrap();
+    server.call("task.queue", Some(json!({"id": id})));
+    server.wait_for_state(id, "Completed");
+    assert_eq!(fs::read(&destination).unwrap(), body);
+    server.stop();
+    let requests = origin.finish();
+    assert_eq!(
+        requests.len(),
+        2,
+        "recovery must use no GET; explicit restart must use one GET"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.to_ascii_lowercase().contains("range:"))
+    );
+    let stored = SqliteRepository::open(dir.path().join("nexum.sqlite"))
+        .unwrap()
+        .get(&TaskId::from(id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, TaskState::Completed);
+    assert_eq!(stored.progress.downloaded_bytes, progress.downloaded_bytes);
+    assert_eq!(stored.progress.total_bytes, progress.total_bytes);
+}
+
+#[test]
 fn completion_startup_cleans_durable_completed_hardlink_residue() {
     let _test_guard = server_test_guard();
     let dir = TestDir::new();

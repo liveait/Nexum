@@ -447,7 +447,7 @@ fn deferred_digest_failure_keeps_evidence_and_does_not_requeue() {
     let control = transfer.control.clone();
     let state = Arc::new(Mutex::new(state));
     run_http_transfer(Arc::clone(&state), transfer);
-    let state = state.lock().unwrap();
+    let mut state = state.lock().unwrap();
     let task = state.core.tasks.get(&TaskId::from("recover")).unwrap();
     assert_eq!(task.state, TaskState::Failed);
     assert!(
@@ -470,4 +470,53 @@ fn deferred_digest_failure_keeps_evidence_and_does_not_requeue() {
         .unwrap();
     assert_eq!(stored.state, TaskState::Failed);
     assert_eq!(stored.last_error, task.last_error);
+    let events = state.core.drain_task_events();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        nexum_core::nexum_task::TaskEvent::StateChanged {
+            to: TaskState::Failed,
+            ..
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, nexum_core::nexum_task::TaskEvent::Removed { .. })),
+        "a failed recovery must remain visible to event consumers"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn queued_recovery_with_a_missing_receipt_and_symlink_fails_visibly() {
+    let fixture = RecoveryFixture::new();
+    let opened = open_core(&fixture.data, BandwidthPolicyKind::Unlimited).unwrap();
+    std::fs::remove_file(completion_receipt_path(&fixture.context)).unwrap();
+    let original = fixture.root.join("original");
+    std::fs::rename(&fixture.destination, &original).unwrap();
+    std::os::unix::fs::symlink(&original, &fixture.destination).unwrap();
+    let mut state = state_for(&fixture, opened);
+    let transfer = claim_next_http_transfer(&mut state)
+        .unwrap()
+        .expect("known recovery must reach its verifier despite a replaced destination");
+    assert!(transfer.recovery_only);
+    let state = Arc::new(Mutex::new(state));
+    run_http_transfer(Arc::clone(&state), transfer);
+    let state = state.lock().unwrap();
+    assert_eq!(
+        state
+            .core
+            .tasks
+            .get(&TaskId::from("recover"))
+            .unwrap()
+            .state,
+        TaskState::Failed
+    );
+    assert!(
+        std::fs::symlink_metadata(&fixture.destination)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(original).unwrap(), b"complete bytes");
 }
