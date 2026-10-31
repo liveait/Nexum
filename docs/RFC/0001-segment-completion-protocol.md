@@ -1,7 +1,7 @@
 # RFC 0001：分段下载完成协议 / Segment completion protocol
 
-- 状态：已实现；验证记录见开发计划，最终交付以对应 PR 的独立审查及合并前后 CI 为准。日期：2026-10-31；基线：`f518b43`。
-  Status: implemented; see the Development Plan for verification, and the corresponding PR for independent review and pre/post-merge CI before final delivery. Date: 2026-10-31; baseline: `f518b43`.
+- 状态：已交付（PR #66，合并 SHA `cf884557140a252f20b87dea71794b23bf07b6f4`）；[main push CI](https://github.com/liveait/Nexum/actions/runs/41191978580) 的 Rust 与 Desktop macOS 均通过，范围及本地验证见开发计划。日期：2026-10-31；实现基线：`f518b43`。
+  Status: delivered (PR #66, merge SHA `cf884557140a252f20b87dea71794b23bf07b6f4`); Rust and Desktop macOS passed in [main push CI](https://github.com/liveait/Nexum/actions/runs/41191978580). See the Development Plan for scope and local verification. Date: 2026-10-31; implementation baseline: `f518b43`.
 
 ## 摘要与动机 / Summary and motivation
 
