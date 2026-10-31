@@ -54,7 +54,7 @@ struct FileProof {
     sha256: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CompletionReceipt {
     version: u32,
@@ -256,6 +256,14 @@ fn hash_file(
     control: &HttpTransferControl,
     maximum: Option<u64>,
 ) -> Result<FileProof, EngineError> {
+    hash_file_with_checkpoint(file, maximum, || control.wait_if_paused())
+}
+
+fn hash_file_with_checkpoint(
+    file: &mut File,
+    maximum: Option<u64>,
+    mut checkpoint: impl FnMut() -> Result<(), EngineError>,
+) -> Result<FileProof, EngineError> {
     let before = snapshot(file)?;
     if maximum.is_some_and(|maximum| before.length > maximum) {
         return Err(failure("metadata file exceeds the size limit"));
@@ -264,7 +272,7 @@ fn hash_file(
     let mut length = 0u64;
     let mut buffer = [0u8; 128 * 1024];
     loop {
-        control.wait_if_paused()?;
+        checkpoint()?;
         let read = file
             .read(&mut buffer)
             .map_err(|error| failure(error.to_string()))?;
@@ -279,7 +287,7 @@ fn hash_file(
         }
         digest.update(&buffer[..read]);
     }
-    control.wait_if_paused()?;
+    checkpoint()?;
     if length != before.length || snapshot(file)? != before {
         return Err(failure("file changed while computing its completion proof"));
     }
@@ -315,46 +323,67 @@ fn verified_file(
     Ok(Some(file))
 }
 
+/// Tracks publication separately from directory durability: a successful
+/// no-clobber commit followed by a failed directory sync still owns a receipt.
+struct ReceiptWriteError {
+    error: EngineError,
+    published: bool,
+}
+
 fn write_receipt(
     context: &CompletionContext,
     receipt: &CompletionReceipt,
 ) -> Result<(), EngineError> {
-    ensure_directory(context, true)?;
-    let bytes = serde_json::to_vec(receipt).map_err(|error| failure(error.to_string()))?;
-    if bytes.len() as u64 > MAX_RECEIPT_BYTES {
-        return Err(failure("completion receipt exceeds the size limit"));
-    }
-    let path = context.directory.join(format!(
-        ".receipt-{}-{}.tmp",
-        std::process::id(),
-        NEXT_RECEIPT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let mut file = options
-        .open(&path)
-        .map_err(|error| failure(error.to_string()))?;
-    let result = (|| {
-        file.write_all(&bytes)
-            .map_err(|error| failure(error.to_string()))?;
-        file.sync_all()
-            .map_err(|error| failure(error.to_string()))?;
-        drop(file);
-        commit_download(&path, &completion_receipt_path(context))?;
-        sync_directory(&context.directory)
-    })();
-    let _ = std::fs::remove_file(&path);
-    result
+    write_receipt_with_sync(context, receipt, sync_directory).map_err(|error| error.error)
 }
 
-pub(super) fn prepare_completion(
+fn write_receipt_with_sync(
+    context: &CompletionContext,
+    receipt: &CompletionReceipt,
+    sync: impl FnOnce(&Path) -> Result<(), EngineError>,
+) -> Result<(), ReceiptWriteError> {
+    let mut published = false;
+    let result = (|| {
+        ensure_directory(context, true)?;
+        let bytes = serde_json::to_vec(receipt).map_err(|error| failure(error.to_string()))?;
+        if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+            return Err(failure("completion receipt exceeds the size limit"));
+        }
+        let path = context.directory.join(format!(
+            ".receipt-{}-{}.tmp",
+            std::process::id(),
+            NEXT_RECEIPT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|error| failure(error.to_string()))?;
+        let result = (|| {
+            file.write_all(&bytes)
+                .map_err(|error| failure(error.to_string()))?;
+            file.sync_all()
+                .map_err(|error| failure(error.to_string()))?;
+            drop(file);
+            commit_download(&path, &completion_receipt_path(context))?;
+            published = true;
+            sync(&context.directory)
+        })();
+        let _ = std::fs::remove_file(&path);
+        result
+    })();
+    result.map_err(|error| ReceiptWriteError { error, published })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_receipt(
     context: &CompletionContext,
     source: &str,
     destination: &str,
@@ -362,6 +391,7 @@ pub(super) fn prepare_completion(
     writer: &File,
     progress: &Progress,
     control: &HttpTransferControl,
+    owns_resume_metadata: bool,
 ) -> Result<CompletionReceipt, EngineError> {
     control.wait_if_paused()?;
     if read_receipt(context)?.is_some() {
@@ -380,13 +410,17 @@ pub(super) fn prepare_completion(
     if file.snapshot != writer_snapshot || file.snapshot.length != progress.downloaded_bytes {
         return Err(failure("partial response changed before publication"));
     }
-    let metadata_path = super::resumable_metadata_path(partial);
-    let resume_metadata = if let Some(mut metadata) = open_regular(&metadata_path)? {
-        Some(hash_file(&mut metadata, control, Some(MAX_RECEIPT_BYTES))?)
+    let resume_metadata = if owns_resume_metadata {
+        let metadata_path = super::resumable_metadata_path(partial);
+        if let Some(mut metadata) = open_regular(&metadata_path)? {
+            Some(hash_file(&mut metadata, control, Some(MAX_RECEIPT_BYTES))?)
+        } else {
+            None
+        }
     } else {
         None
     };
-    let receipt = CompletionReceipt {
+    Ok(CompletionReceipt {
         version: RECEIPT_VERSION,
         task_id: context.task_id.to_string(),
         source: source.to_owned(),
@@ -396,10 +430,121 @@ pub(super) fn prepare_completion(
         total_bytes: progress.total_bytes,
         file,
         resume_metadata,
-    };
+    })
+}
+
+pub(super) fn prepare_completion(
+    context: &CompletionContext,
+    source: &str,
+    destination: &str,
+    partial: &Path,
+    writer: &File,
+    progress: &Progress,
+    control: &HttpTransferControl,
+) -> Result<CompletionReceipt, EngineError> {
+    let receipt = prepare_receipt(
+        context,
+        source,
+        destination,
+        partial,
+        writer,
+        progress,
+        control,
+        true,
+    )?;
     control.wait_if_paused()?;
     write_receipt(context, &receipt)?;
     Ok(receipt)
+}
+
+pub(super) struct SegmentPreparationError {
+    pub(super) error: EngineError,
+    /// Present only when this attempt actually published its receipt, including
+    /// directory-sync failure after that publication.
+    pub(super) receipt: Option<Box<CompletionReceipt>>,
+}
+
+pub(super) fn prepare_segment_completion(
+    context: &CompletionContext,
+    source: &str,
+    destination: &str,
+    partial: &Path,
+    writer: &File,
+    progress: &Progress,
+    control: &HttpTransferControl,
+) -> Result<CompletionReceipt, SegmentPreparationError> {
+    prepare_segment_completion_with_sync(
+        context,
+        source,
+        destination,
+        partial,
+        writer,
+        progress,
+        control,
+        sync_directory,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_segment_completion_with_sync(
+    context: &CompletionContext,
+    source: &str,
+    destination: &str,
+    partial: &Path,
+    writer: &File,
+    progress: &Progress,
+    control: &HttpTransferControl,
+    sync: impl FnOnce(&Path) -> Result<(), EngineError>,
+) -> Result<CompletionReceipt, SegmentPreparationError> {
+    let receipt = prepare_receipt(
+        context,
+        source,
+        destination,
+        partial,
+        writer,
+        progress,
+        control,
+        false,
+    )
+    .map_err(|error| SegmentPreparationError {
+        error,
+        receipt: None,
+    })?;
+    control
+        .wait_if_paused()
+        .map_err(|error| SegmentPreparationError {
+            error,
+            receipt: None,
+        })?;
+    match write_receipt_with_sync(context, &receipt, sync) {
+        Ok(()) => Ok(receipt),
+        Err(error) => Err(SegmentPreparationError {
+            error: error.error,
+            receipt: error.published.then(|| Box::new(receipt)),
+        }),
+    }
+}
+
+/// Cancellation may remove only the proof this attempt actually wrote. This
+/// check does not make path-based unlink atomic against concurrent renames.
+pub(super) fn validate_segment_completion(
+    context: &CompletionContext,
+    expected: &CompletionReceipt,
+) -> Result<(), EngineError> {
+    match read_receipt(context)? {
+        Some(receipt) if receipt != *expected => Err(failure(
+            "completion receipt was replaced before cancellation cleanup",
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub(super) fn clear_segment_completion(
+    context: &CompletionContext,
+    expected: &CompletionReceipt,
+) -> Result<(), EngineError> {
+    validate_segment_completion(context, expected)?;
+    clear_completion(context)
 }
 
 fn validate_published(receipt: &CompletionReceipt) -> Result<(), EngineError> {
@@ -420,38 +565,44 @@ pub(super) fn publish_completion(
     receipt: &CompletionReceipt,
     control: &HttpTransferControl,
 ) -> Result<(), EngineError> {
-    control.wait_if_paused()?;
-    let Some(file) = open_regular(&receipt.partial)? else {
-        return Err(failure(
-            "complete partial response disappeared before publication",
-        ));
-    };
-    if snapshot(&file)? != receipt.file.snapshot {
-        return Err(failure(
-            "complete partial response was replaced before publication",
-        ));
-    }
-    let (lock, wake) = &*control.inner;
-    let mut state = lock.lock().expect("HTTP transfer control mutex poisoned");
-    if state.cancelled {
-        return Err(EngineError::Cancelled);
-    }
-    commit_download(&receipt.partial, Path::new(&receipt.destination))?;
-    state.committed = true;
-    state.finished = true;
-    state.pause_requested = false;
-    state.paused = false;
-    wake.notify_all();
-    validate_published(receipt)?;
-    if let Some(parent) = Path::new(&receipt.destination).parent() {
-        sync_directory(parent)?;
-    }
-    if receipt.partial.parent() != Path::new(&receipt.destination).parent()
-        && let Some(parent) = receipt.partial.parent()
-    {
-        sync_directory(parent)?;
-    }
-    Ok(())
+    publish_completion_with(receipt, control, || {}, sync_directory)
+}
+
+// This private boundary permits deterministic pause-race tests; the public
+// consumers use the same publisher with no injected behavior.
+fn publish_completion_with(
+    receipt: &CompletionReceipt,
+    control: &HttpTransferControl,
+    before_decision: impl FnOnce(),
+    mut sync: impl FnMut(&Path) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    before_decision();
+    control.finish_publication(|committed| {
+        // Validate after the latest pause/cancel decision, not before a
+        // potentially long pause inside the publication boundary.
+        let Some(file) = open_regular(&receipt.partial)? else {
+            return Err(failure(
+                "complete partial response disappeared before publication",
+            ));
+        };
+        if snapshot(&file)? != receipt.file.snapshot {
+            return Err(failure(
+                "complete partial response was replaced before publication",
+            ));
+        }
+        commit_download(&receipt.partial, Path::new(&receipt.destination))?;
+        *committed = true;
+        validate_published(receipt)?;
+        if let Some(parent) = Path::new(&receipt.destination).parent() {
+            sync(parent)?;
+        }
+        if receipt.partial.parent() != Path::new(&receipt.destination).parent()
+            && let Some(parent) = receipt.partial.parent()
+        {
+            sync(parent)?;
+        }
+        Ok(())
+    })
 }
 
 /// Reconcile only a response proved complete before publication. File size or
@@ -1053,5 +1204,138 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result, Progress::new(14, None));
+    }
+    #[test]
+    fn publication_revalidates_identity_after_a_pause_before_commit() {
+        let fixture = Fixture::new();
+        let receipt = fixture.prepare(b"complete bytes", Some(14));
+        let control = HttpTransferControl::new();
+        let rescue = control.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let watchdog = thread::spawn(move || {
+            if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                rescue.cancel();
+            }
+        });
+        let worker_control = control.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = publish_completion_with(
+                &receipt,
+                &worker_control,
+                || {
+                    let (lock, _) = &*worker_control.inner;
+                    lock.lock().unwrap().pause_requested = true;
+                    entered_tx.send(()).unwrap();
+                },
+                sync_directory,
+            );
+            result_tx.send(result).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        control.request_pause().unwrap();
+        let displaced = fixture.root.join("actual-complete-file");
+        std::fs::rename(&fixture.partial, &displaced).unwrap();
+        std::fs::write(&fixture.partial, b"replaced bytes").unwrap();
+        control.resume().unwrap();
+        let result = result_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("replaced before publication")
+        );
+        assert!(!control.is_committed());
+        assert!(!Path::new(&fixture.destination).exists());
+        assert_eq!(std::fs::read(&fixture.partial).unwrap(), b"replaced bytes");
+        assert_eq!(std::fs::read(displaced).unwrap(), b"complete bytes");
+        assert!(completion_receipt_path(&fixture.context).exists());
+        done_tx.send(()).unwrap();
+        watchdog.join().unwrap();
+    }
+
+    #[test]
+    fn hashing_observes_pause_and_cancel_after_a_chunk_without_mutating_evidence() {
+        let fixture = Fixture::new();
+        std::fs::write(&fixture.partial, vec![b'h'; 512 * 1024]).unwrap();
+        let control = HttpTransferControl::new();
+        let rescue = control.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let watchdog = thread::spawn(move || {
+            if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                rescue.cancel();
+            }
+        });
+        let worker_control = control.clone();
+        let partial = fixture.partial.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut reader = File::open(partial).unwrap();
+            let mut checkpoints = 0;
+            let result = hash_file_with_checkpoint(&mut reader, None, || {
+                checkpoints += 1;
+                if checkpoints == 2 {
+                    let (lock, _) = &*worker_control.inner;
+                    lock.lock().unwrap().pause_requested = true;
+                    entered_tx.send(()).unwrap();
+                }
+                worker_control.wait_if_paused()
+            });
+            result_tx.send(result).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        control.request_pause().unwrap();
+        assert!(control.is_paused());
+        assert!(result_rx.try_recv().is_err());
+        control.cancel();
+        assert_eq!(
+            result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err(),
+            EngineError::Cancelled
+        );
+        worker.join().unwrap();
+        assert_eq!(
+            std::fs::read(&fixture.partial).unwrap(),
+            vec![b'h'; 512 * 1024]
+        );
+        assert!(!completion_receipt_path(&fixture.context).exists());
+        assert!(!Path::new(&fixture.destination).exists());
+        done_tx.send(()).unwrap();
+        watchdog.join().unwrap();
+    }
+    #[test]
+    fn post_publication_directory_sync_failure_keeps_target_receipt_and_commit_state() {
+        let fixture = Fixture::new();
+        let receipt = fixture.prepare(b"complete bytes", Some(14));
+        let control = HttpTransferControl::new();
+        let result = publish_completion_with(
+            &receipt,
+            &control,
+            || {},
+            |_| Err(failure("injected destination directory sync failure")),
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected destination directory sync failure")
+        );
+        control.cancel();
+        assert!(control.is_committed() && control.is_finished());
+        assert!(!control.is_cancelled());
+        assert_eq!(
+            std::fs::read(&fixture.destination).unwrap(),
+            b"complete bytes"
+        );
+        assert!(completion_receipt_path(&fixture.context).exists());
+        assert_eq!(
+            fixture.reconcile(&HttpTransferControl::new()).unwrap(),
+            Some(Progress::new(14, Some(14)))
+        );
     }
 }

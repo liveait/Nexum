@@ -41,6 +41,12 @@
 
 As of 2026-10-15, `open_core` at `f1817f4` performs complete receipt reconciliation synchronously before listening, including SHA-256 validation of files awaiting recovery. This restores completion state but deviates from decision 4, which requires hashing in workers after readiness; reading large files can exceed the managed Server's six-second readiness budget. This change confining downloads to one connection leaves that startup path unchanged. The budget still needs a fix and native large-file recovery acceptance; existing small fixtures and CI do not establish compliance. Decision 4 remains a design requirement. See the [Development Guide](../DEVELOPMENT.md#development-workflow-entry) for verification records.
 
+### 分段入口应用（实施方案） / Applying the protocol to segments (implementation design)
+
+[RFC 0001](../RFC/0001-segment-completion-protocol.md) 记录将本 ADR 接到未启用分段原型的兼容入口。它保留 v1 凭证格式：所有 Worker 退出后准备整文件证明，先对账后发请求，发布与取消共享控制锁。分段没有创建续传 sidecar，故凭证不得包含其所有权；最终进度与 `Completed` 的数据库提交仍由未来调用者负责。本轮实际实现及验收结果见开发计划和对应 PR，方案不代表 Server 多连接已启用。
+
+[RFC 0001](../RFC/0001-segment-completion-protocol.md) records a compatible entry applying this ADR to the disabled segment prototype. Preserve v1 receipts: prepare a whole-file proof after worker exit, reconcile before requests, and serialize publication/cancellation through the control lock. Segments do not create resume sidecars, so their receipts must not claim sidecar ownership. Future callers remain responsible for atomically persisting final progress and `Completed`. The development plan and corresponding PR record implementation/acceptance; the design does not enable Server segmentation.
+
 <a id="verification-plan"></a>
 <a id="验证计划"></a>
 

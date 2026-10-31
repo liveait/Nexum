@@ -132,7 +132,12 @@ impl SegmentStaging {
         Ok(())
     }
 
-    pub(super) fn publish(&self, destination: &Path, expected: u64) -> Result<(), EngineError> {
+    pub(super) fn publish(
+        &self,
+        destination: &Path,
+        expected: u64,
+        committed: &mut bool,
+    ) -> Result<(), EngineError> {
         self.ensure_owned()?;
         let actual = self.held_metadata()?.len();
         if actual != expected {
@@ -145,6 +150,7 @@ impl SegmentStaging {
         // an explicitly unclosed check/use window, not handle publication.
         self.ensure_owned()?;
         commit_download(&self.path, destination)?;
+        *committed = true;
         if !self.path_is_owned(destination)? {
             return Err(failure(
                 "published destination does not refer to the owned file",
@@ -154,6 +160,10 @@ impl SegmentStaging {
         Ok(())
     }
 
+    pub(super) fn writer(&self) -> &File {
+        &self.file
+    }
+
     /// A missing/replaced name is not ours to remove. In particular this
     /// prototype never created or owned the resumable HTTP JSON sidecar.
     fn cleanup(&self) -> Result<(), EngineError> {
@@ -161,6 +171,18 @@ impl SegmentStaging {
             std::fs::remove_file(&self.path).map_err(failure)?;
         }
         Ok(())
+    }
+
+    pub(super) fn cleanup_cancelled(&self) -> Result<(), EngineError> {
+        match std::fs::symlink_metadata(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(failure(error)),
+            Ok(_) => {}
+        }
+        if !self.path_is_owned(&self.path)? {
+            return Err(failure("staging path changed before cancellation cleanup"));
+        }
+        self.cleanup()
     }
 
     pub(super) fn cleanup_after_error(&self, error: EngineError) -> EngineError {
