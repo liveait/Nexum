@@ -39,11 +39,7 @@ test("builds both languages and all local resources under the project prefix", a
     for (const name of ["build.mjs", "release.mjs", "site-config.mjs", "style.css"]) {
       await cp(new URL(name, import.meta.url), join(site, name));
     }
-    const screenshotDir = join(root, "docs/assets/native-macos/release-2026-10-10");
-    await mkdir(screenshotDir, { recursive: true });
-    for (const appearance of ["light", "dark"]) {
-      await cp(new URL(`../../docs/assets/native-macos/release-2026-10-10/downloads-${appearance}.png`, import.meta.url), join(screenshotDir, `downloads-${appearance}.png`));
-    }
+    await cp(new URL("assets/", import.meta.url), join(site, "assets"), { recursive: true });
     await mkdir(join(root, "apps/desktop/src-tauri/icons"), { recursive: true });
     const canonical = new URL("../desktop/src-tauri/icons/icon.png", import.meta.url);
     await cp(canonical, join(root, "apps/desktop/src-tauri/icons/icon.png"));
