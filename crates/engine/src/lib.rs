@@ -25,7 +25,7 @@ mod segment_control;
 mod segment_staging;
 pub use completion::{
     CompletionContext, cleanup_completion_partial, clear_completion, completion_receipt_path,
-    has_pending_completion, reconcile_completion,
+    has_pending_completion, reconcile_completion, reconcile_pending_completion,
 };
 
 static NEXT_TEMP_DOWNLOAD: AtomicU64 = AtomicU64::new(0);

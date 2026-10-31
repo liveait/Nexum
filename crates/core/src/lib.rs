@@ -408,6 +408,23 @@ impl<R: TaskRepository> Core<R> {
         })
     }
 
+    /// Fails an already claimed task without ordinary scheduler retries.
+    /// The error, state, released slot and StateChanged event commit together;
+    /// storage rejection retains the previous task and scheduler snapshot.
+    pub fn fail_task_without_retry(
+        &mut self,
+        id: &TaskId,
+        error: impl Into<String>,
+    ) -> Result<(), CoreError> {
+        let error = error.into();
+        self.commit_task_change(id, |tasks, scheduler| {
+            tasks.set_error(id, Some(error))?;
+            tasks.transition(id, TaskState::Failed)?;
+            scheduler.forget_task(id, TaskState::Downloading);
+            Ok(())
+        })
+    }
+
     pub fn update_progress(
         &mut self,
         id: &TaskId,
@@ -887,6 +904,47 @@ mod tests {
         assert!(core.complete_task(&id, Progress::new(42, None)).is_err());
         assert_eq!(core.tasks.get(&id).unwrap().state, TaskState::Created);
         assert_eq!(core.tasks.get(&id).unwrap().progress.downloaded_bytes, 0);
+    }
+
+    #[test]
+    fn nonretryable_failure_commits_state_error_events_and_slot_atomically() {
+        let mut core = Core::with_repository(config(), WriteFailureRepository::default()).unwrap();
+        let (source, destination) = task_source();
+        let id = TaskId::from("nonretryable-failure");
+        core.create_task(id.clone(), source, destination).unwrap();
+        core.queue_task(&id, Priority::NORMAL).unwrap();
+        core.claim_queued(&id).unwrap();
+        core.drain_task_events();
+        core.drain_scheduler_events();
+        core.repository.fail_updates = true;
+        assert!(matches!(
+            core.fail_task_without_retry(&id, "invalid completion proof"),
+            Err(CoreError::Storage(_))
+        ));
+        assert_eq!(core.tasks.get(&id).unwrap().state, TaskState::Downloading);
+        assert_eq!(core.tasks.get(&id).unwrap().last_error, None);
+        assert_eq!(core.scheduler.active_len(), 1);
+        assert!(core.drain_task_events().is_empty());
+        assert!(core.drain_scheduler_events().is_empty());
+        core.repository.fail_updates = false;
+        core.fail_task_without_retry(&id, "invalid completion proof")
+            .unwrap();
+        let stored = core.repository.get(&id).unwrap().unwrap();
+        assert_eq!(stored.state, TaskState::Failed);
+        assert_eq!(
+            stored.last_error.as_deref(),
+            Some("invalid completion proof")
+        );
+        assert_eq!(core.scheduler.active_len(), 0);
+        assert_eq!(core.scheduler.queued_len(), 0);
+        assert_eq!(
+            core.drain_task_events(),
+            vec![nexum_task::TaskEvent::StateChanged {
+                task_id: id,
+                from: TaskState::Downloading,
+                to: TaskState::Failed,
+            }]
+        );
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! Nexum TCP server with configuration support.
 
 mod managed;
+#[cfg(test)]
+mod recovery_readiness_tests;
 
 use nexum_core::{
     Core,
@@ -100,6 +102,8 @@ impl Write for SharedStream {
 }
 
 type ServerCore = Core<SqliteRepository>;
+type CompletionReconciler =
+    fn(&HttpTransfer) -> Result<nexum_core::nexum_domain::Progress, EngineError>;
 const DATABASE_FILE: &str = "nexum.sqlite";
 const LOCK_FILE: &str = "nexum.lock";
 
@@ -109,6 +113,8 @@ struct ServerState {
     _data_dir_lock: File,
     data_dir: PathBuf,
     active_http: HashMap<TaskId, HttpTransfer>,
+    reconcile_completion: CompletionReconciler,
+    pending_completions: HashSet<TaskId>,
     active_destinations: HashSet<PathBuf>,
     events: EventHub,
     authentication: AuthenticationConfig,
@@ -300,6 +306,7 @@ struct HttpTransfer {
     completion: Arc<HttpWorkerCompletion>,
     latest_progress: Arc<Mutex<nexum_core::nexum_domain::Progress>>,
     remove_requested: Arc<AtomicBool>,
+    recovery_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -594,12 +601,45 @@ fn run_http_transfer(state: Arc<Mutex<ServerState>>, transfer: HttpTransfer) {
     // Every source uses the session's validated resume and completion-receipt
     // path. Segment execution must satisfy the same safety and control
     // invariants before the server can enable it (see M4 in the plan).
-    let (outcome, dispatch_next) = run_session_download(&state, &transfer);
+    let (outcome, dispatch_next) = if transfer.recovery_only {
+        // Copy the dependency while holding the lock, then release it before
+        // any file reads, hashing or cooperative pause/cancellation waits.
+        let reconcile = state
+            .lock()
+            .expect("server state mutex poisoned")
+            .reconcile_completion;
+        let result = reconcile(&transfer);
+        complete_http_transfer(
+            &state,
+            &transfer.id,
+            &transfer.destination_path,
+            &transfer.source,
+            &transfer.destination,
+            &transfer.partial_path,
+            &transfer.completion_context,
+            true,
+            result,
+        )
+    } else {
+        run_session_download(&state, &transfer)
+    };
 
     completion.finish(outcome);
     if dispatch_next {
         dispatch_available_http_tasks(&state);
     }
+}
+
+fn reconcile_http_transfer(
+    transfer: &HttpTransfer,
+) -> Result<nexum_core::nexum_domain::Progress, EngineError> {
+    nexum_core::nexum_engine::reconcile_pending_completion(
+        &transfer.completion_context,
+        &transfer.source,
+        &transfer.destination,
+        &transfer.partial_path,
+        &transfer.control,
+    )
 }
 
 /// Runs the session-based single-connection download.
@@ -647,6 +687,7 @@ fn run_session_download(
                 &destination,
                 &partial_path,
                 &completion_context,
+                false,
                 Err(error),
             );
         }
@@ -720,6 +761,7 @@ fn run_session_download(
         &destination,
         &partial_path,
         &completion_context,
+        false,
         if cancelled {
             Err(EngineError::Cancelled)
         } else if completed {
@@ -745,6 +787,7 @@ fn complete_http_transfer(
     destination: &str,
     partial_path: &Path,
     completion_context: &CompletionContext,
+    recovery_only: bool,
     result: Result<nexum_core::nexum_domain::Progress, EngineError>,
 ) -> (HttpWorkerOutcome, bool) {
     let cancelled = matches!(result, Err(EngineError::Cancelled));
@@ -764,37 +807,43 @@ fn complete_http_transfer(
         if !cancelled {
             match result {
                 Ok(progress) => {
+                    state.pending_completions.insert(id.clone());
                     let finish_result = state.core.complete_task(id, progress);
                     if let Err(error) = finish_result {
                         outcome = HttpWorkerOutcome::Failed;
                         eprintln!("task {id} completion failed: {error:?}");
-                        if let Err(finish_error) = state.core.finish_task_with_error(
+                        // Bytes and their receipt are already complete. A
+                        // database failure must not enqueue another network
+                        // attempt, including on the initial fresh download.
+                        if let Err(finish_error) = state.core.fail_task_without_retry(
                             id,
-                            TaskState::Failed,
                             format!("could not finalize HTTP transfer: {error:?}"),
                         ) {
                             eprintln!(
                                 "task {id} failure state could not be saved: {finish_error:?}"
                             );
                         }
-                    } else if let Err(error) = cleanup_completion_partial(
-                        completion_context,
-                        source,
-                        destination,
-                        partial_path,
-                    )
-                    .and_then(|()| clear_completion(completion_context))
-                    {
-                        eprintln!("task {id} completion cleanup failed: {error}");
+                    } else {
+                        match cleanup_completion_partial(
+                            completion_context,
+                            source,
+                            destination,
+                            partial_path,
+                        )
+                        .and_then(|()| clear_completion(completion_context))
+                        {
+                            Ok(()) => {
+                                state.pending_completions.remove(id);
+                            }
+                            Err(error) => eprintln!("task {id} completion cleanup failed: {error}"),
+                        }
                     }
                 }
                 Err(error) => {
                     outcome = HttpWorkerOutcome::Failed;
                     eprintln!("task {id} HTTP transfer failed: {error}");
                     if let Err(finish_error) =
-                        state
-                            .core
-                            .finish_task_with_error(id, TaskState::Failed, error.to_string())
+                        record_http_failure(&mut state.core, id, recovery_only, error.to_string())
                     {
                         eprintln!("task {id} failure state could not be saved: {finish_error:?}");
                     }
@@ -871,7 +920,11 @@ fn reply_error(request: &RpcRequest, error: RpcErrorObject) -> Option<RpcRespons
 fn transfer_destination(
     task: &nexum_core::nexum_task::DownloadTask,
     data_dir: &Path,
+    pending_completion: bool,
 ) -> io::Result<PathBuf> {
+    if pending_completion {
+        return normalized_destination(task.destination.as_str(), data_dir);
+    }
     let context = CompletionContext::new(task.id.clone(), data_dir);
     match std::fs::symlink_metadata(completion_receipt_path(&context)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -892,8 +945,12 @@ fn claim_next_http_transfer(
                 matches!(
                     state.core.resolve_source(task.source.as_str()),
                     Ok(result) if matches!(result.kind, ResolveKind::Http | ResolveKind::Https)
-                ) && transfer_destination(task, &state.data_dir)
-                    .is_ok_and(|path| !state.active_destinations.contains(&path))
+                ) && transfer_destination(
+                    task,
+                    &state.data_dir,
+                    state.pending_completions.contains(&task.id),
+                )
+                .is_ok_and(|path| !state.active_destinations.contains(&path))
             })
         })
         .cloned()
@@ -907,21 +964,40 @@ fn claim_next_http_transfer(
         .expect("queued task exists")
         .clone();
     let source = task.source.as_str().to_owned();
-    let destination_path = transfer_destination(&task, &state.data_dir)
-        .expect("matching queued task has a permitted destination");
+    let destination_path = transfer_destination(
+        &task,
+        &state.data_dir,
+        state.pending_completions.contains(&task.id),
+    )
+    .expect("matching queued task has a permitted destination");
     let destination = destination_path
         .to_str()
         .expect("RPC destination path is valid UTF-8")
         .to_owned();
     let partial_path = resumable_partial_path(&destination_path);
-    let resume_progress = resumable_partial_progress(&source, &destination, &partial_path)
-        .ok()
-        .flatten();
+    // A pending receipt owns this attempt even if it disappears before the
+    // worker starts. Never turn a failed reconciliation into a network retry.
+    let completion_context = CompletionContext::new(next_id.clone(), &state.data_dir);
+    let recovery_only = state.pending_completions.contains(&next_id)
+        || !matches!(
+            std::fs::symlink_metadata(completion_receipt_path(&completion_context)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        );
+    let resume_progress = if recovery_only {
+        None
+    } else {
+        resumable_partial_progress(&source, &destination, &partial_path)
+            .ok()
+            .flatten()
+    };
     let id = match state.core.claim_queued(&next_id) {
         Ok(true) => next_id,
         Ok(false) => return Ok(None),
         Err(error) => return Err(RpcErrorObject::internal_error(format!("{error:?}"))),
     };
+    if recovery_only {
+        state.pending_completions.insert(id.clone());
+    }
     if let Some(progress) = resume_progress.clone()
         && let Err(error) = state.core.update_progress(&id, progress)
     {
@@ -939,11 +1015,12 @@ fn claim_next_http_transfer(
         destination,
         destination_path,
         partial_path,
-        completion_context: CompletionContext::new(id.clone(), &state.data_dir),
+        completion_context,
         control: HttpTransferControl::new(),
         completion: Arc::new(HttpWorkerCompletion::default()),
         latest_progress: Arc::new(Mutex::new(latest_progress)),
         remove_requested: Arc::new(AtomicBool::new(false)),
+        recovery_only,
     };
     state.active_http.insert(id, transfer.clone());
     state.active_destinations.insert(active_destination);
@@ -990,11 +1067,12 @@ fn handle_http_spawn_failure(
     locked
         .active_destinations
         .remove(&transfer.destination_path);
-    if let Err(finish_error) =
-        locked
-            .core
-            .finish_task_with_error(&transfer.id, TaskState::Failed, error.to_string())
-    {
+    if let Err(finish_error) = record_http_failure(
+        &mut locked.core,
+        &transfer.id,
+        transfer.recovery_only,
+        error.to_string(),
+    ) {
         eprintln!(
             "task {} failure state could not be saved: {finish_error:?}",
             transfer.id
@@ -1238,6 +1316,7 @@ fn remove_active_http_task(
         } else {
             match locked.core.remove_task(id) {
                 Ok(task) => {
+                    locked.pending_completions.remove(id);
                     if destination_path.is_none() {
                         destination_path =
                             normalized_destination(task.destination.as_str(), &locked.data_dir)
@@ -2097,7 +2176,14 @@ fn lock_data_dir(data_dir: &Path) -> io::Result<File> {
     Ok(lock_file)
 }
 
-fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Result<ServerCore> {
+struct OpenedCore {
+    core: ServerCore,
+    // Remember observed receipts until task removal, including while a task
+    // waits for a scheduler slot. Disappearance must never permit a fresh GET.
+    pending_completions: HashSet<TaskId>,
+}
+
+fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Result<OpenedCore> {
     let database_path = data_dir.join(DATABASE_FILE);
     let repository = SqliteRepository::open(&database_path)
         .map_err(|error| io::Error::other(format!("{}: {error}", database_path.display())))?;
@@ -2135,17 +2221,15 @@ fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Resu
     })
     .map_err(|error| io::Error::other(format!("task recovery failed: {error:?}")))?;
 
-    // A worker publishes the response and its receipt before it persists the
-    // terminal task state.  A process crash can therefore leave a task in an
-    // interrupted state even though the response is already complete.  Do this
-    // reconciliation before returning the core so no queued task can issue a
-    // second HTTP request for bytes we already have.
+    // Only bounded receipt metadata is inspected before readiness. Large-file
+    // identity/digest validation belongs to the claimed HTTP worker; a bad
+    // receipt still becomes a visible failure without ordinary network retries.
     let recovered_tasks: Vec<_> = core.tasks.list().cloned().collect();
+    let mut pending_completions = HashSet::new();
     for task in recovered_tasks {
         if task.state == TaskState::Completed {
             continue;
         }
-
         let context = CompletionContext::new(task.id.clone(), data_dir);
         match std::fs::symlink_metadata(completion_receipt_path(&context)) {
             Ok(_) => {}
@@ -2159,78 +2243,25 @@ fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Resu
                 continue;
             }
         }
-        let destination = match normalized_destination(task.destination.as_str(), data_dir) {
-            Ok(destination) => destination,
-            Err(error) => {
-                // A destination that cannot be normalized cannot be safely
-                // reconciled.  Leave a durable failure instead of allowing a
-                // queued recovery to spin on the same invalid path.
-                mark_recovery_failed(
-                    &mut core,
-                    &task.id,
-                    format!("HTTP completion reconciliation: {error}"),
-                )?;
-                continue;
-            }
-        };
-        let destination = destination
-            .to_str()
-            .expect("normalized destination is UTF-8")
-            .to_owned();
-        let partial = resumable_partial_path(Path::new(&destination));
-        let control = HttpTransferControl::new();
-
-        match nexum_core::nexum_engine::reconcile_completion(
-            &context,
-            task.source.as_str(),
-            &destination,
-            &partial,
-            &control,
-        ) {
-            Ok(Some(progress)) => {
-                // Recovery normalizes interrupted tasks to Queued.  Claim the
-                // queue entry briefly so the regular completion transition
-                // (Queued -> Downloading -> Completed) remains valid without
-                // dispatching a network worker.
-                let claimed = core.claim_queued(&task.id).map_err(|error| {
-                    io::Error::other(format!("task recovery failed: {error:?}"))
-                })?;
-                if !claimed {
-                    mark_recovery_failed(
-                        &mut core,
-                        &task.id,
-                        "HTTP completion reconciliation: task was not queued".to_owned(),
-                    )?;
-                    continue;
-                }
-                if let Err(error) = core.complete_task(&task.id, progress) {
-                    mark_recovery_failed(
-                        &mut core,
-                        &task.id,
-                        format!(
-                            "HTTP completion reconciliation could not persist Completed: {error:?}"
-                        ),
-                    )?;
-                    continue;
-                }
-                if let Err(error) = cleanup_completion_partial(
+        pending_completions.insert(task.id.clone());
+        let pending = normalized_destination(task.destination.as_str(), data_dir)
+            .map_err(|error| EngineError::Failed(error.to_string()))
+            .and_then(|destination| {
+                has_pending_completion(
                     &context,
                     task.source.as_str(),
-                    &destination,
-                    &partial,
+                    destination
+                        .to_str()
+                        .expect("normalized destination is UTF-8"),
+                    resumable_partial_path(&destination),
                 )
-                .and_then(|()| clear_completion(&context))
-                {
-                    // Completed is already durable.  Retain the receipt when
-                    // cleanup cannot prove the staging inode, allowing a later
-                    // startup to retry cleanup without redownloading.
-                    eprintln!("task {} completed receipt cleanup failed: {error}", task.id);
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                mark_recovery_failed(&mut core, &task.id, error.to_string())?;
-            }
+            });
+        if let Err(error) = pending {
+            mark_recovery_failed(
+                &mut core,
+                &task.id,
+                format!("HTTP completion reconciliation: {error}"),
+            )?;
         }
     }
 
@@ -2267,13 +2298,29 @@ fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Resu
             eprintln!("task {} completed receipt cleanup failed: {error}", task.id);
         }
     }
-    Ok(core)
+    Ok(OpenedCore {
+        core,
+        pending_completions,
+    })
 }
 
-/// Persist a startup reconciliation failure without entering the normal
-/// retry loop.  Recovery tasks are queued in memory so they can be reconciled
-/// synchronously; `Scheduler::mark_finished(Failed)` would retry them and may
-/// issue a network request for a malformed or replaced completion receipt.
+fn record_http_failure(
+    core: &mut ServerCore,
+    id: &TaskId,
+    recovery_only: bool,
+    error: String,
+) -> io::Result<()> {
+    if recovery_only {
+        core.fail_task_without_retry(id, error)
+            .map_err(|error| io::Error::other(format!("{error:?}")))
+    } else {
+        core.finish_task_with_error(id, TaskState::Failed, error)
+            .map_err(|error| io::Error::other(format!("{error:?}")))
+    }
+}
+
+/// Persist a reconciliation failure without entering the normal retry loop.
+/// Retain the receipt as evidence instead of requesting the origin again.
 fn mark_recovery_failed(core: &mut ServerCore, id: &TaskId, error: String) -> io::Result<()> {
     let mut task = core
         .tasks
@@ -2349,11 +2396,14 @@ fn main() -> io::Result<()> {
     let tls_server = load_tls_server_config(&config)?;
 
     let data_dir_lock = lock_data_dir(&config.data_dir)?;
+    let opened = open_core(&config.data_dir, config.bandwidth_policy)?;
     let state = Arc::new(Mutex::new(ServerState {
-        core: open_core(&config.data_dir, config.bandwidth_policy)?,
+        core: opened.core,
+        pending_completions: opened.pending_completions,
         _data_dir_lock: data_dir_lock,
         data_dir: std::fs::canonicalize(&config.data_dir)?,
         active_http: HashMap::new(),
+        reconcile_completion: reconcile_http_transfer,
         active_destinations: HashSet::new(),
         events: EventHub::default(),
         authentication,
@@ -2367,31 +2417,13 @@ fn main() -> io::Result<()> {
     let connection_limiter = ConnectionLimiter::new(config.max_connections);
 
     spawn_event_pump(Arc::clone(&state));
-    dispatch_available_http_tasks(&state);
-    // Let immediately failing workers (for example a recovered connection
-    // whose peer has gone away) publish their terminal state before accepting
-    // the first RPC.  The bounded wait does not hold the server mutex and
-    // never delays startup for a healthy long-running transfer.
-    let startup_deadline = Instant::now() + Duration::from_millis(200);
-    while Instant::now() < startup_deadline {
-        let has_active = state
-            .lock()
-            .expect("server state mutex poisoned")
-            .active_http
-            .values()
-            .next()
-            .is_some();
-        if !has_active {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-
     eprintln!("Nexum server listening on {address}");
     eprintln!(
         "max_connections: {}, data_dir: {:?}, rate_limit: {:?}",
         config.max_connections, config.data_dir, config.rate_limit
     );
+
+    dispatch_available_http_tasks(&state);
 
     for connection in listener.incoming() {
         match connection {
