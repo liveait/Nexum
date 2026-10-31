@@ -43,9 +43,9 @@ See the [GitHub Pages quickstart](https://docs.github.com/en/pages/quickstart) a
 
 Header/footer use the transparent `brand-mark.png`; favicon uses the selected graphite App tile `icon.png`, while Apple touch uses its separately generated 180px derivative. Both variants retain the N identity. See [Branding](../../docs/BRANDING.md) for sources, generation and hashes.
 
-官网界面图 `assets/downloads-native.png` 是隔离的 Nexum Brand QA 原生 release 候选截图，源码为 `9965cd25c94fde23d3dfb775b67c4be6f63130a0`（Desktop 源码与 PR #69 的 `df2042d` 相同）。截图原字节保留，展示 24px 透明 N 侧栏和唯一的顶部新增入口；不代表最终签名分发产物。
+官网界面图 `assets/downloads-native.jpg` 是隔离的 Nexum Brand QA 原生 release 候选截图，源码为 `9965cd25c94fde23d3dfb775b67c4be6f63130a0`（Desktop 源码与 PR #69 的 `df2042d` 相同）。截图原字节保留，展示 24px 透明 N 侧栏和唯一的顶部新增入口；不代表最终签名分发产物。
 
-The website image `assets/downloads-native.png` is an unaltered capture of the isolated Nexum Brand QA native release candidate at `9965cd25c94fde23d3dfb775b67c4be6f63130a0` (the same Desktop source as PR #69 at `df2042d`). It shows the 24px transparent N sidebar and single toolbar Add entry. It is not the final signed distribution artifact.
+The website image `assets/downloads-native.jpg` is an unaltered capture of the isolated Nexum Brand QA native release candidate at `9965cd25c94fde23d3dfb775b67c4be6f63130a0` (the same Desktop source as PR #69 at `df2042d`). It shows the 24px transparent N sidebar and single toolbar Add entry. It is not the final signed distribution artifact.
 
 ## 发布元数据 / Release metadata
 
