@@ -646,6 +646,25 @@ pub fn reconcile_completion(
     )))
 }
 
+/// Reconcile a previously observed pending receipt without permitting a
+/// network fallback. This owns the control until its terminal result and wakes
+/// pause waiters on every outcome, including a receipt removed before the
+/// worker starts. The ordinary optional reconciliation entry stays compatible.
+pub fn reconcile_pending_completion(
+    context: &CompletionContext,
+    source: &str,
+    destination: &str,
+    partial_path: impl AsRef<Path>,
+    control: &HttpTransferControl,
+) -> Result<Progress, EngineError> {
+    let result = reconcile_completion(context, source, destination, partial_path, control)
+        .and_then(|progress| {
+            progress.ok_or_else(|| failure("pending completion receipt disappeared"))
+        });
+    control.mark_finished();
+    result
+}
+
 /// Remove a partial only if its identity and stable metadata still match, and
 /// a small validator sidecar only if its contents match as well. No download
 /// bytes are read. This is separate from journal deletion so callers can
@@ -782,6 +801,71 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn required_reconciliation_finishes_controls_on_missing_and_invalid_receipts() {
+        let fixture = Fixture::new();
+        for invalid in [false, true] {
+            if invalid {
+                ensure_directory(&fixture.context, true).unwrap();
+                std::fs::write(
+                    completion_receipt_path(&fixture.context),
+                    b"invalid receipt",
+                )
+                .unwrap();
+            }
+            let control = HttpTransferControl::new();
+            assert!(
+                reconcile_pending_completion(
+                    &fixture.context,
+                    SOURCE,
+                    &fixture.destination,
+                    &fixture.partial,
+                    &control,
+                )
+                .is_err()
+            );
+            assert!(control.is_finished());
+            assert!(!control.is_committed());
+            assert!(!fixture.partial.exists());
+        }
+    }
+
+    #[test]
+    fn required_reconciliation_pauses_and_cancels_without_publishing() {
+        let fixture = Fixture::new();
+        fixture.prepare(b"complete unpublished bytes", Some(26));
+        let control = HttpTransferControl::new();
+        let pause_control = control.clone();
+        let pausing = thread::spawn(move || pause_control.request_pause());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !control.is_pause_requested() {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                reconcile_pending_completion(
+                    &fixture.context,
+                    SOURCE,
+                    &fixture.destination,
+                    &fixture.partial,
+                    &control,
+                )
+            });
+            pausing.join().unwrap().unwrap();
+            assert!(control.is_paused());
+            assert!(fixture.partial.exists());
+            assert!(!Path::new(&fixture.destination).exists());
+            control.cancel();
+            assert_eq!(worker.join().unwrap(), Err(EngineError::Cancelled));
+        });
+        assert!(control.is_finished());
+        assert!(control.is_cancelled());
+        assert!(!control.is_committed());
+        assert!(completion_receipt_path(&fixture.context).exists());
+        assert!(fixture.partial.exists());
     }
 
     impl Drop for Fixture {

@@ -38,9 +38,9 @@ The desktop app should make the common local workflow understandable at a glance
 
    Inspect the destination and the latest error when a task needs attention.
 
-Desktop 默认托管随包 Server，通用设置保留显式的外部模式；尚未支持的 Magnet 和本地文件来源不展示成可用功能。
+Desktop 默认使用“本地（推荐）”连接方式，自动托管随包下载服务；通用设置的“远程”也支持连接本机独立运行的服务。尚未支持的 Magnet 和本地文件来源不展示成可用功能。
 
-Desktop defaults to an App-managed bundled Server, with an explicit External option under General settings. Unsupported Magnet and local-file sources remain unavailable.
+Desktop defaults to the “Local (recommended)” connection mode and manages its bundled download service automatically. “Remote” under General settings also supports a service running separately on this Mac. Unsupported Magnet and local-file sources remain unavailable.
 
 <a id="2-design-decisions"></a>
 <a id="2-设计决定"></a>
@@ -130,9 +130,9 @@ Downloads 页头提供过滤器和紧凑控制：
 
 The Downloads header has a filter selector and compact controls:
 
-- **添加**：从侧边栏或悬浮按钮打开 Add Download Sheet。
+- **添加**：下载页右上工具栏固定为“添加（＋）→ 详情 → 搜索”，`⌘N` 提供键盘入口。侧边栏、悬浮按钮和概览不再重复提供添加按钮；空列表引导使用工具栏／快捷键，首次欢迎只跳转到下载页，筛选无结果只提示调整筛选。
 
-  **Add**: opens the Add Download sheet from the sidebar or floating action button.
+  **Add**: the Downloads upper-right toolbar uses “Add (+) → Details → Search”, with `⌘N` as the keyboard entry. Sidebar, floating and Overview buttons do not duplicate Add; empty lists point to the toolbar/shortcut, welcome only navigates to Downloads, and empty filtered results suggest adjusting filters.
 - **过滤**：选择全部、活动、排队、已完成或失败任务。
 
   **Filter**: selects All, Active, Queued, Completed, or Failed downloads.
@@ -232,9 +232,9 @@ The Inspector is read-only for task metadata. Row actions currently provide the 
 - **未连接：** 保留任务页面，在底部状态栏/错误条显示不可用状态，托管模式显示本机服务启动／恢复或重试提示，外部模式引导修改地址和凭据。
 
   **No connection:** keep the task surface available, show the unavailable state in the footer/banner, and show local service startup/recovery or Retry guidance in Managed mode; External directs the user to its address and credential settings.
-- **已连接但没有任务：** 将“添加下载”作为主操作。
+- **已连接但没有任务：** 引导使用工具栏“＋”或 `⌘N`，不再增加重复按钮。
 
-  **Connected with no tasks:** show Add Download as the primary action.
+  **Connected with no tasks:** point to the toolbar plus or `⌘N` without another duplicate button.
 - **加载中：** 同一 Server 与凭据上下文内刷新时保留现有列表。切换 Server 或凭据时，立即隐藏旧任务列表、选中项、上次更新时间和正在执行的行操作；只有新上下文的快照成功后才显示任务。旧请求即使迟到，也不能恢复旧任务行或对新 Server 执行行操作。
 
   **Loading:** keep the existing list visible for refreshes of the same Server and credential context. When either changes, hide the old task list, selection, last-update time, and in-flight row actions immediately; show tasks only after the new context's snapshot succeeds. A late response from the previous context cannot restore its rows or trigger a row action against the new Server.
@@ -289,9 +289,9 @@ The Server RPC requires an ID and destination; the Desktop Rust backend generate
 
 Settings is a dedicated page with grouped sections. It is not a second task workflow:
 
-- **连接：** 托管（默认）自动启动随包服务，显示启动中、就绪、恢复中或失败状态和重试。外部模式显示保存的地址（默认 `127.0.0.1:39100`）及 Keychain 操作。托管端点和凭据不展示。默认下载目录选择和重置为 Downloads 随设置保存。
+- **连接：** “连接方式”提供“本地（推荐）”和“远程”。本地自动启动随包下载服务，显示启动中、就绪、恢复中或失败状态和重试。远程连接指定下载服务，也支持本机独立运行的服务，显示保存的服务地址（默认 `127.0.0.1:39100`）及 Keychain 操作。托管端点和凭据不展示。界面名称分别对应既有 `managed` 和 `external` 模式，不改变连接或凭据行为。默认下载目录选择和重置为 Downloads 随设置保存。
 
-  **Connection:** Managed (default) starts the bundled service automatically and shows starting, running, recovering or failed status with Retry. External exposes the saved address (default `127.0.0.1:39100`) and Keychain controls. The managed endpoint and credential are not shown. Default download folder selection and Reset to Downloads are saved with the settings.
+  **Connection:** “Connection mode” offers “Local (recommended)” and “Remote”. Local starts the bundled download service automatically and shows starting, running, recovering or failed status with Retry. Remote connects to a specified download service, including one running separately on this Mac, and exposes the saved service address (default `127.0.0.1:39100`) and Keychain controls. The managed endpoint and credential are not shown. These UI names map to the existing `managed` and `external` modes without changing connection or credential behavior. Default download folder selection and Reset to Downloads are saved with the settings.
 - **认证：** 在通用设置中针对当前已保存的 Server 显示 `Bearer`/`ApiKey` scheme 选择器、只写 secret 输入框、已配置 scheme 状态，以及保存/清除操作。将 scheme 和 secret 一起按 Server 地址保存在 macOS Keychain，不能把 secret 回读到 React。保存、清除或切换当前 Server 后重启事件订阅并刷新 Task 快照。允许为回环明文地址和显式 `tls://` 地址保存凭据。明文凭据仍只允许回环地址；TLS 客户端会先校验 Server 名称和系统根证书链，再发送凭据。
 
   **Authentication:** in General settings for the active saved Server, show a `Bearer`/`ApiKey` scheme selector, write-only secret field, configured-scheme status, and Save/Clear actions. Save the scheme and secret together in macOS Keychain under that Server address; never read the secret back into React. Saving, clearing, or changing the active Server restarts the event subscription and refreshes the task snapshot. Enable credential storage for loopback plaintext addresses and explicit `tls://` addresses. Plaintext credentials remain loopback-only; the TLS client validates the server name and system root chain before sending a credential.
@@ -422,9 +422,9 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 
 ### Slice B — Add Sheet 与原生设置（部分实现） / Slice B — Add sheet and native settings (partially implemented)
 
-- 增加 URL 校验。[ ]
+- 增加 URL 校验。[x]
 
-  Add URL validation. [ ]
+  Add URL validation. [x]
 - 内部生成任务 ID，并改用文件名展示任务标题。[x]
 
   Generate task IDs internally and show filename-based task titles instead. [x]
@@ -440,9 +440,9 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 - Add 流程在创建任务后自动排队。[x]
 
   Queue a newly created task as part of the Add flow. [x]
-- 在 Add 流程部分失败后重试排队，不重复创建任务。[ ]
+- 在 Add 流程部分失败后保留已创建 ID 和实际目标，原位重试排队而不重复创建任务；关闭 Sheet 或切换 Server、凭据、托管进程代次后废弃该重试上下文。[x]
 
-  Retry queueing after a partial Add failure without creating a duplicate task. [ ]
+  Retain the created ID and allocated destination after a partial Add failure, retrying queueing in the sheet without creating another task. Closing the sheet or changing the Server, credential or managed-child generation discards that retry context. [x]
 
 <a id="slice-c--live-task-surface-partially-implemented"></a>
 <a id="slice-c--实时任务界面部分实现"></a>
@@ -458,9 +458,9 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 - 增加独立 Server 事件订阅、Tauri 事件桥接和去抖任务刷新。[x]
 
   Add the dedicated Server event subscription, Tauri event bridge, and debounced task refresh. [x]
-- 为请求错误后保留的快照增加明确的过期数据标记。[ ]
+- 为请求错误后保留的快照增加明确的过期数据标记；重试期间保留，成功取得同一上下文的新快照后清除。[x]
 
-  Add explicit stale-data indicators for retained snapshots after request errors. [ ]
+  Mark retained snapshots stale after request errors, keeping that indicator during retries and clearing it after a fresh snapshot succeeds in the same context. [x]
 - 增加键盘导航、快捷键、焦点管理和可访问性标签。[x]
 
   Add keyboard navigation, shortcuts, focus management, and accessibility labels. [x]

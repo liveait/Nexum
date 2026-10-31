@@ -3,9 +3,20 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { verifyIcnsContainer, verifyIconContainer } from "./verify-icon-container.mjs";
+
+// Validate the Windows container alongside every Desktop packaging gate. A
+// macOS-only build does not otherwise decode the ICO resource directory.
+verifyIconContainer(
+  new URL("../apps/desktop/src-tauri/icons/icon.ico", import.meta.url),
+  new URL("../apps/desktop/src-tauri/icons/icon.png", import.meta.url),
+);
+const sourceIcns = new URL("../apps/desktop/src-tauri/icons/icon.icns", import.meta.url);
+verifyIcnsContainer(sourceIcns, new URL("../apps/desktop/src-tauri/icons/icon.png", import.meta.url));
 
 const app = resolve(process.argv[2] || "target/release/bundle/macos/Nexum.app");
 const resources = join(app, "Contents", "Resources");
+assert.ok(readFileSync(join(resources, "icon.icns")).equals(readFileSync(sourceIcns)), "packaging changed the App icon");
 const executable = join(resources, "nexum-server");
 const metadata = JSON.parse(readFileSync(join(resources, "nexum-server-build.json"), "utf8"));
 assert.notEqual(statSync(executable).mode & 0o111, 0, "bundled Server must be executable");

@@ -1,8 +1,9 @@
 //! Private desktop process bootstrap. Stdout contains one framed readiness message.
 
 use super::{
-    AuthenticationConfig, ConnectionLimiter, EventHub, ServerConfig, ServerState, SharedStream,
-    dispatch_available_http_tasks, handle_connection, lock_data_dir, open_core, spawn_event_pump,
+    AuthenticationConfig, CompletionReconciler, ConnectionLimiter, EventHub, ServerConfig,
+    ServerState, SharedStream, dispatch_available_http_tasks, handle_connection, lock_data_dir,
+    open_core, reconcile_http_transfer, spawn_event_pump,
 };
 use nexum_protocol::RpcDispatcher;
 use nexum_protocol::managed::{
@@ -145,6 +146,14 @@ fn should_stop(receiver: &Receiver<ControlEvent>) -> io::Result<bool> {
 }
 
 pub(super) fn run(args: &[String]) -> io::Result<()> {
+    run_with(args, reconcile_http_transfer, &mut io::stdout().lock())
+}
+
+pub(super) fn run_with(
+    args: &[String],
+    reconcile_completion: CompletionReconciler,
+    ready_output: &mut impl io::Write,
+) -> io::Result<()> {
     let mut config =
         parse_args(args).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let controls = start_control_reader()?;
@@ -157,11 +166,14 @@ pub(super) fn run(args: &[String]) -> io::Result<()> {
     }
 
     let data_dir_lock = lock_data_dir(&config.data_dir)?;
+    let opened = open_core(&config.data_dir, config.bandwidth_policy)?;
     let state = Arc::new(Mutex::new(ServerState {
-        core: open_core(&config.data_dir, config.bandwidth_policy)?,
+        core: opened.core,
+        pending_completions: opened.pending_completions,
         _data_dir_lock: data_dir_lock,
         data_dir: std::fs::canonicalize(&config.data_dir)?,
         active_http: HashMap::new(),
+        reconcile_completion,
         active_destinations: HashSet::new(),
         events: EventHub::default(),
         authentication,
@@ -173,7 +185,6 @@ pub(super) fn run(args: &[String]) -> io::Result<()> {
     let connection_limiter = ConnectionLimiter::new(config.max_connections);
 
     spawn_event_pump(Arc::clone(&state));
-    dispatch_available_http_tasks(&state);
     if should_stop(&controls)? {
         return Ok(());
     }
@@ -184,8 +195,9 @@ pub(super) fn run(args: &[String]) -> io::Result<()> {
         process_id: std::process::id(),
         endpoint,
     };
-    write_managed_frame(&mut io::stdout().lock(), &ready)?;
+    write_managed_frame(ready_output, &ready)?;
     eprintln!("Nexum managed server is ready");
+    dispatch_available_http_tasks(&state);
 
     loop {
         if should_stop(&controls)? {
