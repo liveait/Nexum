@@ -1,0 +1,28 @@
+name: Website
+
+on:
+  push:
+    branches: [main]
+    paths: [apps/website/**, docs/assets/native-macos/**, .github/workflows/website.yml]
+  pull_request:
+    paths: [apps/website/**, docs/assets/native-macos/**, .github/workflows/website.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  website:
+    name: Website build and release validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test apps/website/release.test.mjs
+      - run: node apps/website/build.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: website-preview
+          path: apps/website/dist
