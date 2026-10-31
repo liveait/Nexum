@@ -1136,7 +1136,7 @@ export default function App() {
       <section className="workspace" inert={showAdd}>
         {snapshotStale && <div className="message-banner error" role="status"><span>{t("These downloads may be out of date. The last refresh failed; retry to get their current status.")}</span><button type="button" onClick={() => void refreshTasks()} disabled={loading || !canConnect}>{t("Retry")}</button></div>}
         {isFreshInstall && connection === "connected" && (
-          <WelcomeFlow onContinue={() => { setIsFreshInstall(false); selectSection("downloads"); }} />
+          <WelcomeFlow onContinue={() => { setIsFreshInstall(false); selectSection("downloads"); window.requestAnimationFrame(() => addButtonRef.current?.focus()); }} />
         )}
         {upgradeInfo && (
           <div className="upgrade-notice" role="status">
