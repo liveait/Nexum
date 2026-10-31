@@ -43,6 +43,10 @@ See the [GitHub Pages quickstart](https://docs.github.com/en/pages/quickstart) a
 
 Header, footer, favicon and Apple touch icon reuse the established blue/purple N at `apps/desktop/src-tauri/icons/icon.png`. The build copies it into output without introducing another source asset or a temporary arrow mark.
 
+官网界面图 `assets/downloads-native.png` 是隔离的 Nexum Preview 原生 release 候选截图，源码为 `cf54b8c1417b8810dd9bff6d15fed979860d14fa`（与 Desktop PR #69 的 `772a302` 源码树相同）。截图原字节保留，展示当前 N 侧栏和唯一的顶部新增入口；不沿用旧版重复入口的界面，也不代表最终签名分发产物。
+
+The website image `assets/downloads-native.png` is an unaltered capture of the isolated Nexum Preview native release candidate at `cf54b8c1417b8810dd9bff6d15fed979860d14fa` (the same source tree as Desktop PR #69 at `772a302`). It shows the current N sidebar and single toolbar Add entry. It is not the final signed distribution artifact.
+
 ## 发布元数据 / Release metadata
 
 仅 GitHub Actions 的 main push／dispatch 或显式 `node apps/website/build.mjs --sync-release` 在构建时读取公开 GitHub latest release，浏览器不接收私有 token。无 release（404）显示待发布；网络／API 或元数据错误使构建失败，避免发布错误下载。稳定 release 发布后，独立的 website-release 工作流只请求 website.yml 在 main 执行，不 checkout 或执行 tag 源码；保持 main 的 OIDC／environment 分支约束。也可手动在 main 运行 website.yml。非 main 的 Actions 即使传入同步参数也会失败，PR 不能解锁正式下载。
