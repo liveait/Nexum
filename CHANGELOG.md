@@ -45,9 +45,17 @@ This changelog records notable changes, not acceptance of every milestone. PR #5
 
   **Held staging files and identity checks for the segment prototype**: `create_new` rejects and preserves pre-existing regular files, symlinks, FIFOs and directories. Every segment writes at explicit offsets through one held regular-file handle. Requests, writes, publication and cleanup check file identity, and the final length comes from the held handle. An observed path replacement rejects further writes/publication or cleanup of the replacement. The segment prototype does not delete JSON sidecars it did not create.
 
-  身份检查与基于路径的 rename／hard-link／unlink 之间仍存在 TOCTOU，尚不能抵抗同权限进程持续并发改名；本项不代表原子文件所有权或取消／发布协议完成。所有 Worker 控制屏障、完成凭证、安全回退及段级恢复仍待实现和验收，Server 多连接保持禁用。
+  身份检查与基于路径的 rename／hard-link／unlink 之间仍存在 TOCTOU，尚不能抵抗同权限进程持续并发改名；本项不代表原子文件所有权或取消／发布协议完成。完成凭证、安全回退及段级恢复仍待实现和验收，Server 多连接保持禁用。
 
-  A TOCTOU window remains between identity checks and path-based rename/hard-link/unlink; continuous concurrent renames by a same-privilege process are not covered. This does not complete an atomic file-ownership or cancellation/publication protocol. All-worker control barriers, completion receipts, safe fallback and segment recovery still need implementation and acceptance; Server multi-connection routing remains disabled.
+  A TOCTOU window remains between identity checks and path-based rename/hard-link/unlink; continuous concurrent renames by a same-privilege process are not covered. This does not complete an atomic file-ownership or cancellation/publication protocol. Completion receipts, safe fallback and segment recovery still need implementation and acceptance; Server multi-connection routing remains disabled.
+
+- **分段 Worker 的暂停／退出屏障**：分段 Worker 和进度协调者共同参与暂停确认；全部停稳后才报告暂停，恢复时继续原请求。响应头与响应体等待保留同一个 Future 分段检查控制，不因控制轮询重发 GET；限速与暂停等待也观察组内失败或取消。任一 Worker、进度回调或线程启动失败时唤醒其他参与者，收拢全部已启动 Worker 后才清理和标记完成，保留具体错误及取消类型。
+
+  **Segment-worker pause/termination barriers**: segment workers and the progress coordinator jointly acknowledge pause only when all are parked, then resume their existing requests. Header/body waits retain one future while polling controls without repeating GETs; bandwidth and pause waits also observe group failure/cancellation. Worker, progress-callback and thread-start failures wake other participants. Join every started worker before cleanup/completion, preserving concrete failures and cancellation types.
+
+  这是未启用分段原型的协作控制；同步文件系统调用、底层系统 DNS 解析与不返回的用户回调无法被强制终止。Server 多连接仍禁用，完成凭证、原子文件所有权与取消／发布、安全回退及段级恢复仍为后续门槛。
+
+  This is cooperative control for the disabled segment prototype; synchronous filesystem calls, underlying OS DNS resolution and caller callbacks that never return cannot be forcibly terminated. Server multi-connection routing remains disabled; completion receipts, atomic filesystem ownership and cancellation/publication, safe fallback and segment recovery remain subsequent gates.
 
 - **HTTP 完成对账**：单连接 session 在发布前以私有凭证绑定完整字节和任务／文件身份。PR #58 恢复 session 的凭证接线、最终进度与 `Completed` 一次持久化，并在 Server 监听和网络派发前真正执行启动对账；可无网络校验已发布文件或重新发布完整暂存文件，包括无 validator 且未知长度的完整响应。清理和 ID 复用保留冲突文件，具体失败原因进入任务视图。<br>
   **HTTP completion reconciliation**: before publication, the single-connection session binds complete bytes to task/file identity using private receipts. PR #58 restores session receipt wiring, atomic final progress/`Completed` persistence, and startup reconciliation before the Server listens or dispatches network work. Published files can verify or complete staging bytes can republish without network access, including complete unknown-length responses without validators. Cleanup and ID reuse preserve conflicting files, and task views retain specific failure causes.

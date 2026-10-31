@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 mod completion;
 mod file_identity;
+mod segment_control;
 mod segment_staging;
 pub use completion::{
     CompletionContext, cleanup_completion_partial, clear_completion, completion_receipt_path,
@@ -963,9 +964,10 @@ pub struct HttpEngine {
 ///
 /// A control can be cloned and sent to the thread running
 /// [`HttpEngine::download_to_with_control`]. Pause requests are acknowledged at
-/// a response chunk boundary, so [`Self::request_pause`] does not return until
-/// the worker is no longer reading the response. Cancellation wakes a paused
-/// worker and makes the download return [`EngineError::Cancelled`].
+/// a cooperative boundary. The segment prototype registers every network worker
+/// and its progress coordinator, so [`Self::request_pause`] acknowledges only
+/// after all live participants have stopped. Cancellation wakes paused workers
+/// and makes the download return [`EngineError::Cancelled`].
 #[derive(Clone, Default)]
 pub struct HttpTransferControl {
     inner: Arc<(Mutex<HttpTransferControlState>, Condvar)>,
@@ -978,6 +980,7 @@ struct HttpTransferControlState {
     cancelled: bool,
     committed: bool,
     finished: bool,
+    segments: Option<segment_control::SegmentState>,
     /// Per-connection bandwidth cap in bytes/second, set by the server from the
     /// scheduler. `None` means unlimited; a small value (including `0`, treated as
     /// `1`) effectively pauses the transfer.
@@ -992,7 +995,8 @@ impl HttpTransferControl {
         Self::default()
     }
 
-    /// Requests a pause and waits until the worker reaches a chunk boundary.
+    /// Requests a pause and waits until every registered participant reaches a
+    /// cooperative boundary (one worker on the single-connection path).
     ///
     /// A transfer which has already finished has no work left to pause and is
     /// treated as successfully paused. If cancellation wins the race, the
@@ -1007,6 +1011,11 @@ impl HttpTransferControl {
             return Ok(());
         }
 
+        if !state.pause_requested
+            && let Some(group) = &mut state.segments
+        {
+            group.start_pause();
+        }
         state.pause_requested = true;
         wake.notify_all();
         while !state.paused && !state.cancelled && !state.finished {
@@ -1848,10 +1857,10 @@ async fn pump_segment(
     staging: &segment_staging::SegmentStaging,
     total: u64,
     validator: Option<&HttpResumeValidator>,
-    control: &HttpTransferControl,
+    participant: &mut segment_control::Participant,
     shared: &Arc<AtomicU64>,
-    abort: &Arc<AtomicBool>,
 ) -> Result<u64, EngineError> {
+    participant.checkpoint()?;
     staging.ensure_owned()?;
     let mut request = client
         .get(source)
@@ -1860,9 +1869,10 @@ async fn pump_segment(
     if let Some(validator) = validator {
         request = request.header(IF_RANGE, validator.value());
     }
-    let mut response = request
-        .send()
-        .await
+    let mut response = participant
+        .wait(request.send(), None)
+        .await?
+        .expect("header wait has no local inactivity bound")
         .map_err(|error| EngineError::Failed(error.to_string()))?;
     let status = response.status();
     // A range request must be honoured with a 206. A 200 means the server
@@ -1898,32 +1908,19 @@ async fn pump_segment(
     let mut downloaded = 0u64;
     let mut consecutive_stalls = 0u32;
     loop {
-        control.wait_if_paused()?;
-        control.check_cancelled()?;
-        if abort.load(Ordering::Acquire) {
-            return Err(EngineError::Failed(
-                "another segment failed; aborting this segment".to_owned(),
-            ));
-        }
-        let chunk = match tokio::time::timeout(READ_STALL_TIMEOUT, response.chunk()).await {
-            Ok(Ok(Some(chunk))) => chunk,
-            Ok(Ok(None)) => break,
-            Ok(Err(error)) => return Err(EngineError::Failed(error.to_string())),
-            Err(_) => {
-                // A stalled read yields a zero-data inactivity timeout. Pause and
-                // cancel are only observable between reads, so re-check them and
-                // retry; fail only after a sustained zero-data gap.
-                control.wait_if_paused()?;
-                control.check_cancelled()?;
-                if abort.load(Ordering::Acquire) {
-                    return Err(EngineError::Failed(
-                        "another segment failed; aborting this segment".to_owned(),
-                    ));
-                }
+        participant.checkpoint()?;
+        let chunk = match participant
+            .wait(response.chunk(), Some(READ_STALL_TIMEOUT))
+            .await?
+        {
+            Some(Ok(Some(chunk))) => chunk,
+            Some(Ok(None)) => break,
+            Some(Err(error)) => return Err(EngineError::Failed(error.to_string())),
+            None => {
                 consecutive_stalls = consecutive_stalls.saturating_add(1);
                 if consecutive_stalls >= MAX_CONSECUTIVE_STALLS {
                     return Err(EngineError::Failed(
-                        "stalled HTTP segment: no data on the connection".to_owned(),
+                        "stalled HTTP segment: no data on the connection".into(),
                     ));
                 }
                 continue;
@@ -1935,8 +1932,8 @@ async fn pump_segment(
                 "abnormal segment length: the server sent more than the {expected}-byte range"
             )));
         }
-        control.wait_for_budget(chunk.len() as u64)?;
-        control.check_cancelled()?;
+        participant.wait_for_budget(chunk.len() as u64)?;
+        participant.checkpoint()?;
         staging.write_all_at(&chunk, segment.start + downloaded)?;
         downloaded += chunk.len() as u64;
         shared.fetch_add(chunk.len() as u64, Ordering::SeqCst);
@@ -2276,9 +2273,12 @@ impl HttpEngine {
     ///
     /// Failure/cancellation attempts cleanup only while the partial path still
     /// matches the owned file identity; unrelated files and sidecars are kept.
-    /// Identity checks and path-based publish/unlink are not atomic. All-worker
-    /// pause/termination barriers and atomic cancellation/publication remain
-    /// unfinished; this prototype is not routed from the Server.
+    /// Network workers and the progress coordinator all participate in pause;
+    /// cooperative header/body/pacing waits observe cancellation or the first
+    /// failure, and every worker is joined before cleanup/completion. Blocking
+    /// filesystem calls and user callbacks must return themselves. Identity
+    /// checks and path-based publish/unlink, and cancellation/publication, are
+    /// not atomic; this prototype is not routed from the Server.
     #[allow(clippy::too_many_arguments)]
     pub fn download_to_segments<F>(
         &self,
@@ -2313,116 +2313,110 @@ impl HttpEngine {
 
         let staging = Arc::new(segment_staging::SegmentStaging::create(partial, total)?);
 
+        let (group, mut participants) =
+            match segment_control::SegmentGroup::begin(control, segments.len() + 1) {
+                Ok(group) => group,
+                Err(error) => return Err(staging.cleanup_after_error(error)),
+            };
+        let mut coordinator = participants.remove(0);
         let shared = Arc::new(AtomicU64::new(0));
-        let abort = Arc::new(AtomicBool::new(false));
         let (result_tx, result_rx) = mpsc::channel::<Result<u64, EngineError>>();
-        let handles: Vec<_> = segments
-            .iter()
-            .enumerate()
-            .map(|(index, segment)| {
-                let client = self.client.clone();
-                let source = source.to_owned();
-                let segment = *segment;
-                let staging = Arc::clone(&staging);
-                let validator = validator.cloned();
-                let control = control.clone();
-                let shared = Arc::clone(&shared);
-                let abort = Arc::clone(&abort);
-                let result_tx = result_tx.clone();
-                thread::spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_io()
-                        .enable_time()
-                        .build()
-                        .map_err(|error| {
-                            EngineError::Failed(format!(
-                                "could not start segment-{index} runtime: {error}"
-                            ))
-                        });
-                    let result = match runtime {
-                        Ok(runtime) => runtime.block_on(pump_segment(
-                            &client,
-                            &source,
-                            segment,
-                            &staging,
-                            total,
-                            validator.as_ref(),
-                            &control,
-                            &shared,
-                            &abort,
-                        )),
-                        Err(error) => Err(error),
-                    };
-                    let _ = result_tx.send(result);
+        let mut handles = Vec::with_capacity(segments.len());
+        for (index, (segment, participant)) in
+            segments.iter().copied().zip(participants).enumerate()
+        {
+            let client = self.client.clone();
+            let source = source.to_owned();
+            let staging = Arc::clone(&staging);
+            let validator = validator.cloned();
+            let shared = Arc::clone(&shared);
+            let result_tx = result_tx.clone();
+            match segment_control::spawn_worker(index, participant, result_tx, move |participant| {
+                segment_control::run_runtime(index, |runtime| {
+                    runtime.block_on(pump_segment(
+                        &client,
+                        &source,
+                        segment,
+                        &staging,
+                        total,
+                        validator.as_ref(),
+                        participant,
+                        &shared,
+                    ))
                 })
-            })
-            .collect();
-        // Drop the sender so disconnected() fires when all workers finish.
+            }) {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    group.fail(EngineError::Failed(format!(
+                        "could not spawn segment worker {index}: {error}"
+                    )));
+                    break;
+                }
+            }
+        }
+        // Unspawned participants and closed senders are dropped before joining.
         drop(result_tx);
 
         let mut received = 0usize;
-        let mut first_error = None::<EngineError>;
         let mut reported = 0u64;
         let rate = std::cell::RefCell::new(RateGauge::new());
         let cadence = Duration::from_millis(200);
         let mut last_report = Instant::now();
 
-        while received < segments.len() {
+        while received < handles.len() {
+            if let Err(error) = coordinator.checkpoint() {
+                group.fail(error);
+                break;
+            }
             match result_rx.recv_timeout(cadence) {
-                Ok(Ok(_)) => {
-                    received += 1;
-                }
+                Ok(Ok(_)) => received += 1,
                 Ok(Err(error)) => {
-                    received += 1;
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                        abort.store(true, Ordering::Release);
-                    }
+                    group.fail(error);
+                    break;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
+            if group.error().is_some() {
+                break;
+            }
+            if let Err(error) = coordinator.checkpoint() {
+                group.fail(error);
+                break;
+            }
             let done = shared.load(Ordering::SeqCst);
             if done != reported || last_report.elapsed() >= cadence {
-                let speed = {
-                    let mut guard = rate.borrow_mut();
-                    guard.observe(done)
-                };
-                let eta = (done < total)
-                    .then(|| {
-                        let speed = {
-                            let guard = rate.borrow();
-                            guard.last
-                        };
-                        (speed > 0).then(|| (total.saturating_sub(done)) / speed.max(1))
-                    })
-                    .flatten();
-                if let Err(error) = on_progress(Progress::with_rate(done, Some(total), speed, eta))
-                {
-                    abort.store(true, Ordering::Release);
-                    first_error = Some(error);
+                let speed = rate.borrow_mut().observe(done);
+                let eta = (done < total && speed > 0).then(|| (total - done) / speed.max(1));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    on_progress(Progress::with_rate(done, Some(total), speed, eta))
+                }))
+                .unwrap_or_else(|_| {
+                    Err(EngineError::Failed(
+                        "segment progress callback panicked".into(),
+                    ))
+                });
+                if let Err(error) = result {
+                    group.fail(error);
                     break;
                 }
                 reported = done;
                 last_report = Instant::now();
             }
         }
-
-        // Join workers (in case some are still running when the channel closes).
         for handle in handles {
-            if handle.join().is_err() && first_error.is_none() {
-                first_error = Some(EngineError::Failed("segment worker panicked".into()));
+            if handle.join().is_err() {
+                group.fail(EngineError::Failed("segment worker panicked".into()));
             }
         }
-        if first_error.is_none()
+        if group.error().is_none()
             && (received != segments.len() || shared.load(Ordering::SeqCst) != total)
         {
-            first_error = Some(EngineError::Failed(
+            group.fail(EngineError::Failed(
                 "incomplete segment workers: received byte count does not match total".into(),
             ));
         }
-
-        if let Some(error) = first_error {
+        if let Some(error) = group.error() {
             let error = staging.cleanup_after_error(error);
             control.mark_finished();
             return Err(error);
@@ -2431,7 +2425,7 @@ impl HttpEngine {
         // Cancellation before publication is checked after all workers join.
         // Atomic coordination of cancellation and publication remains a later
         // prototype gate; file ownership does not provide that state barrier.
-        if let Err(error) = control.check_cancelled() {
+        if let Err(error) = coordinator.checkpoint() {
             let error = staging.cleanup_after_error(error);
             control.mark_finished();
             return Err(error);
@@ -2443,7 +2437,10 @@ impl HttpEngine {
         }
         // The existing cancellation/publication race is not widened into a
         // destination removal: a published destination is never cleanup input.
-        control.check_cancelled()?;
+        if let Err(error) = control.check_cancelled() {
+            control.mark_finished();
+            return Err(error);
+        }
         control.finish_committed();
 
         Ok(Progress::new(total, Some(total)))
