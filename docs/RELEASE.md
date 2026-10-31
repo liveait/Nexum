@@ -163,6 +163,12 @@ The October 11 follow-up under [ADR 0007](decisions/0007-http-completion-reconci
 
   **Scope:** These are backend process tests, not final native clean-user/upgrade acceptance or VoiceOver speech evidence. The previously recorded native App predates this follow-up. Windows file identity is implemented but has not been executed locally; current CI validates Linux Rust and macOS Desktop. Power-loss durability depends on platform/filesystem synchronization.
 
+#### 10 月 31 日恢复就绪：后端验证 / October 31 recovery readiness: backend verification
+
+以 `cf88455` 为基线的恢复就绪切片已实现有界启动检查及 Ready 后可控对账。完整本地 Rust 门槛通过（408 项，0 失败／忽略，含 Server unit、managed、persistence）；验证器等待期间真实 managed 循环仍响应 RPC，生产 Server fixture 可离线恢复，并保留 SQLite 拒绝完成保存后的证明。Ready 不表示所有任务已到终态，客户端与验收脚本必须等待目标终态。完整覆盖见[开发计划 M1](DEVELOPMENT_PLAN.md#m1)和 [ADR 0007](decisions/0007-http-completion-reconciliation.md)。这不更新 10 月 10／11 日原生产物的验收身份；最终候选仍需大文件恢复、VoiceOver、干净用户和升级验收。PR 审查／CI、正式签名公证及发布另行核对。
+
+The recovery-readiness slice from `cf88455` implements bounded startup checks and controllable reconciliation after Ready. Complete local Rust gates pass (408 tests, zero failures/ignored, including Server unit, managed and persistence). The real managed loop responds to RPC while verification waits; production Server fixtures recover offline and retain proofs after SQLite rejects completion. Ready does not mean every task is terminal; clients/acceptance scripts must wait for the desired terminal state. See [M1](DEVELOPMENT_PLAN.md#m1) and [ADR 0007](decisions/0007-http-completion-reconciliation.md) for coverage. This does not change the identity/acceptance of October 10/11 native artifacts. The final candidate still needs large-file recovery, VoiceOver, clean-user and upgrade checks. Verify PR review/CI, distribution signing/notarization and publishing separately.
+
 <a id="native-macos-visual-evidence"></a>
 <a id="macos-原生界面截图留证"></a>
 
