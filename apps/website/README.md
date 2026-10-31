@@ -11,7 +11,7 @@ A bilingual static site without third-party dependencies. Official downloads are
 Run from the repository root; output is `apps/website/dist`. There are no package dependencies to install or lock. Preview with `python3 -m http.server 4175 --directory apps/website/dist`.
 
 ```bash
-node --test apps/website/release.test.mjs
+node --test apps/website/*.test.mjs
 node apps/website/build.mjs
 ```
 
