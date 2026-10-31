@@ -35,6 +35,83 @@ test("queue failure keeps the backend ID available without creating a second tas
   assert.equal(calls[1].args.taskId, "created-id");
 });
 
+test("retrying a created download only queues its original ID and preserves its allocated path", async () => {
+  const calls = [];
+  const result = await addDownload(async (command, args) => {
+    calls.push({ command, args });
+    if (command === "task_create") return { id: "duplicate-id", destination: "/tmp/a (2).zip" };
+    return true;
+  }, "https://example.com/a.zip", "a.zip", "/tmp", {
+    created: { id: "created-id", destination: "/tmp/a (1).zip" },
+  });
+  assert.deepEqual(result, { id: "created-id", destination: "/tmp/a (1).zip", queued: true });
+  assert.deepEqual(calls, [{ command: "task_queue", args: { taskId: "created-id" } }]);
+});
+
+test("a context invalidated while creation is pending cannot queue on the next connection", async () => {
+  const calls = [];
+  let current = true;
+  await assert.rejects(addDownload(async (command, args) => {
+    calls.push({ command, args });
+    current = false;
+    return { id: "old-context-id" };
+  }, "https://example.com/a.zip", "a.zip", "/tmp", { isCurrent: () => current }), /connection changed/i);
+  assert.deepEqual(calls.map(({ command }) => command), ["task_create"]);
+});
+
+test("queue refusal remains retryable instead of reporting a queued download", async () => {
+  const result = await addDownload(async (command) => command === "task_create" ? { id: "created-id" } : false,
+    "https://example.com/a.zip", "a.zip", "/tmp");
+  assert.equal(result.queued, false);
+  assert.equal(result.id, "created-id");
+});
+
+test("creation is retained before the first queue attempt and survives repeated queue failures", async () => {
+  let created = null;
+  const calls = [];
+  let queueAttempts = 0;
+  const invoke = async (command, args) => {
+    calls.push({ command, args });
+    if (command === "task_create") return { id: "created-once", destination: "/tmp/a (1).zip" };
+    assert.equal(created?.id, "created-once");
+    if (++queueAttempts < 3) throw new Error("temporarily unavailable");
+    return true;
+  };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const result = await addDownload(invoke, "https://example.com/a.zip", "a.zip", "/tmp", {
+      created,
+      onCreated: (value) => { created = value; },
+    });
+    assert.equal(result.queued, attempt === 2);
+    assert.equal(result.id, "created-once");
+  }
+  assert.deepEqual(calls.map(({ command }) => command), ["task_create", "task_queue", "task_queue", "task_queue"]);
+  assert.ok(calls.slice(1).every(({ args }) => args.taskId === "created-once"));
+});
+
+test("a closed or replaced Add attempt cannot retry its old ID", async () => {
+  let calls = 0;
+  await assert.rejects(addDownload(async () => { calls += 1; return true; }, "https://example.com/a.zip", "a.zip", "/tmp", {
+    created: { id: "old-id" }, isCurrent: () => false,
+  }), /connection changed/i);
+  assert.equal(calls, 0);
+});
+
+test("invalidating an attempt when its created ID is retained still prevents queueing", async () => {
+  const calls = [];
+  let current = true;
+  const result = await addDownload(async (command) => {
+    calls.push(command);
+    return { id: "old-id" };
+  }, "https://example.com/a.zip", "a.zip", "/tmp", {
+    isCurrent: () => current,
+    onCreated: () => { current = false; },
+  });
+  assert.equal(result.queued, false);
+  assert.match(result.error.message, /connection changed/i);
+  assert.deepEqual(calls, ["task_create"]);
+});
+
 test("an invalid create response never queues an unspecified task", async () => {
   const calls = [];
   await assert.rejects(addDownload(async (command, args) => {
