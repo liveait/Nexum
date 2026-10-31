@@ -1,7 +1,7 @@
 # RFC 0001：分段下载完成协议 / Segment completion protocol
 
-- 状态：本轮实施方案；实现和验收分开记录。日期：2026-10-31；基线：`f518b43`。
-  Status: implementation design for this slice; implementation and acceptance are recorded separately. Date: 2026-10-31; baseline: `f518b43`.
+- 状态：已实现；验证记录见开发计划，最终交付以对应 PR 的独立审查及合并前后 CI 为准。日期：2026-10-31；基线：`f518b43`。
+  Status: implemented; see the Development Plan for verification, and the corresponding PR for independent review and pre/post-merge CI before final delivery. Date: 2026-10-31; baseline: `f518b43`.
 
 ## 摘要与动机 / Summary and motivation
 

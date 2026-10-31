@@ -456,3 +456,60 @@ fn invalid_fresh_plan_without_a_receipt_never_requests_or_creates_staging() {
     assert!(!directory.destination.exists());
     assert!(!directory.receipt().exists());
 }
+
+#[test]
+fn fresh_errors_finish_control_for_both_segment_entries() {
+    let mut finished = Vec::new();
+    for with_receipt in [false, true] {
+        for failure in ["plan", "destination", "staging"] {
+            let directory = Directory::new();
+            let control = HttpTransferControl::new();
+            let segments = if failure == "plan" {
+                Vec::new()
+            } else {
+                HttpEngine::split_segments(BODY.len() as u64, 3)
+            };
+            let protected = match failure {
+                "destination" => Some(&directory.destination),
+                "staging" => Some(&directory.partial),
+                _ => None,
+            };
+            if let Some(path) = protected {
+                std::fs::write(path, b"existing file").unwrap();
+            }
+            let validator = HttpResumeValidator::Etag(ETAG.into());
+            let engine = HttpEngine::new();
+            let result = if with_receipt {
+                engine.download_to_segments_with_completion(
+                    "http://127.0.0.1:1/no-request",
+                    &segments,
+                    directory.destination.to_str().unwrap(),
+                    &directory.partial,
+                    BODY.len() as u64,
+                    Some(&validator),
+                    &directory.context,
+                    &control,
+                    |_| panic!("early failure must not transfer"),
+                )
+            } else {
+                engine.download_to_segments(
+                    "http://127.0.0.1:1/no-request",
+                    &segments,
+                    directory.destination.to_str().unwrap(),
+                    &directory.partial,
+                    BODY.len() as u64,
+                    Some(&validator),
+                    &control,
+                    |_| panic!("early failure must not transfer"),
+                )
+            };
+            assert!(result.is_err());
+            finished.push(control.is_finished());
+            assert!(!control.is_committed() && !control.is_cancelled());
+            if let Some(path) = protected {
+                assert_eq!(std::fs::read(path).unwrap(), b"existing file");
+            }
+        }
+    }
+    assert_eq!(finished, vec![true; 6]);
+}

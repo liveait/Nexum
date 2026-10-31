@@ -2360,6 +2360,7 @@ impl HttpEngine {
     /// filesystem calls and user callbacks must return themselves. Identity
     /// checks and path-based publish/unlink are not atomic. Cancellation and
     /// publication are serialized by the control lock; Server routing is disabled.
+    /// Use one control per attempt; never reuse it for concurrent/later attempts.
     #[allow(clippy::too_many_arguments)]
     pub fn download_to_segments<F>(
         &self,
@@ -2375,7 +2376,7 @@ impl HttpEngine {
     where
         F: FnMut(Progress) -> Result<(), EngineError>,
     {
-        self.download_segments_inner(
+        let result = self.download_segments_inner(
             source,
             segments,
             destination,
@@ -2385,7 +2386,9 @@ impl HttpEngine {
             None,
             control,
             on_progress,
-        )
+        );
+        control.mark_finished();
+        result
     }
 
     /// The disabled segment prototype with ADR 0007 completion receipts.
@@ -2398,6 +2401,7 @@ impl HttpEngine {
     /// Callers serialize attempts for each CompletionContext. A cancellation
     /// cleanup failure returns Failed with "cancellation cleanup incomplete",
     /// retaining evidence for explicit cleanup; the control stays cancelled.
+    /// Use one control per attempt; never reuse it for concurrent/later attempts.
     #[allow(clippy::too_many_arguments)]
     pub fn download_to_segments_with_completion<F>(
         &self,
@@ -2414,7 +2418,7 @@ impl HttpEngine {
     where
         F: FnMut(Progress) -> Result<(), EngineError>,
     {
-        self.download_segments_inner(
+        let result = self.download_segments_inner(
             source,
             segments,
             destination,
@@ -2424,7 +2428,9 @@ impl HttpEngine {
             Some(completion),
             control,
             on_progress,
-        )
+        );
+        control.mark_finished();
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
