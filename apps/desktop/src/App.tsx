@@ -9,7 +9,7 @@ import { isConnectionReady, type ConnectionMode, type ManagedConnectionStatus } 
 import { addDownload, invokeTaskCommand, savePartialMetadata, readPartialMetadata, clearPartialMetadata, type CreatedDownload, type TaskCommand, type PartialMetadata } from "./taskCommands";
 import { valueForContext, type ContextValue, type TaskContext } from "./taskContext";
 import { taskDisplayName } from "./taskPresentation";
-import brandIcon from "../src-tauri/icons/icon.png";
+import brandIcon from "../src-tauri/icons/brand-mark.png";
 import "./App.css";
 
 type TaskState =
@@ -1113,7 +1113,7 @@ export default function App() {
     <main className="app-shell">
       <aside className="sidebar" aria-label={t("Nexum navigation")} inert={showAdd}>
         <div className="sidebar-topbar">
-          <span className="sidebar-brand"><img src={brandIcon} alt="" width={32} height={32} />NEXUM</span>
+          <span className="sidebar-brand"><img src={brandIcon} alt="" width={24} height={24} />NEXUM</span>
           <div className="sidebar-top-actions">
             <button className="sidebar-icon-button" onClick={() => setShowInspector((current) => !current)} title={t("Toggle inspector")} aria-label={showInspector ? t("Hide task details") : t("Show task details")} aria-pressed={showInspector}><Icon name="list" size={18} /></button>
           </div>
