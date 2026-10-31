@@ -77,10 +77,6 @@ Post-merge gate restoration (2026-10-31): at PR #64's actual merged commit `b34f
 
 Recovery-readiness status (2026-10-31): [PR #71](https://github.com/liveait/Nexum/pull/71) repairs the historical pre-listening full-digest work in open_core. Under [ADR 0007](decisions/0007-http-completion-reconciliation.md#implementation-status), startup inspects only bounded receipt metadata, while pause/cancel-aware workers reconcile after Ready outside the global Server lock. Recovery reserves scheduler/destination slots; recovery errors and failed Completed persistence for complete bytes never enter ordinary network retry. Complete post-merge CI passed at `a3b48cc`. [M1](DEVELOPMENT_PLAN.md#m1) and PR #71 record the isolated native 64GiB recovery, full-file hash, pause/resume, final progress and quit/relaunch evidence at source `85715c3`, including the missing pre-cleanup database-backup gap. Ready means control/listening availability rather than terminal recovery, and does not accept a clean OS user, upgrades, VoiceOver, Windows or final distribution.
 
-启动恢复就绪实现（2026-10-31，基线 `cf88455`）：按 [ADR 0007](decisions/0007-http-completion-reconciliation.md) 只在启动检查有界凭证元数据，Ready 后由可暂停／取消的 Worker 完整对账；Ready 表示控制与监听可用，不承诺恢复已经终态。恢复失败不自动发起普通 GET。完整本地 Rust 门槛通过，410 项测试、0 失败／忽略；具体覆盖与原生／Windows 缺口见[开发计划 M1](DEVELOPMENT_PLAN.md#m1)。PR CI 和最终原生产物验收仍是独立条件。
-
-Recovery-readiness implementation (2026-10-31, baseline `cf88455`): under [ADR 0007](decisions/0007-http-completion-reconciliation.md), startup inspects bounded receipt metadata and pause/cancel-aware workers reconcile after Ready. Ready means control/listening are available, not that recovery is terminal. Recovery failures never initiate an ordinary GET automatically. Complete local Rust gates pass with 410 tests and zero failures/ignored; see [M1](DEVELOPMENT_PLAN.md#m1) for coverage and native/Windows gaps. PR CI and final native-artifact acceptance remain separate conditions.
-
 <a id="rust-checks"></a>
 <a id="rust-检查"></a>
 
