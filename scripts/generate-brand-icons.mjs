@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { verifyIconContainer } from "./verify-icon-container.mjs";
+import { verifyIcnsContainer, verifyIconContainer } from "./verify-icon-container.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourcePath = "assets/brand/icon-graphite-v1.png";
@@ -13,9 +13,14 @@ const source = join(root, sourcePath);
 const desktop = join(root, "apps/desktop");
 const icons = join(desktop, "src-tauri/icons");
 const packageJson = JSON.parse(readFileSync(join(desktop, "package.json"), "utf8"));
+const cliDirectory = join(desktop, "node_modules/@tauri-apps/cli");
+const cliPackage = JSON.parse(readFileSync(join(cliDirectory, "package.json"), "utf8"));
+const cli = join(cliDirectory, cliPackage.bin.tauri);
 const temporary = mkdtempSync(join(tmpdir(), "nexum-brand-icons-"));
 function tauri(args, capture = false) {
-  const result = spawnSync("pnpm", ["--dir", desktop, "exec", "tauri", ...args], {
+  // Execute the installed official CLI directly, without a package-manager
+  // wrapper that can install packages or prepend policy output to --version.
+  const result = spawnSync(process.execPath, [cli, ...args], {
     cwd: root, encoding: "utf8", stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
   });
   if (result.error) throw result.error;
@@ -103,6 +108,7 @@ try {
   const icoPath = "apps/desktop/src-tauri/icons/icon.ico";
   writeFileSync(join(root, icoPath), withCanonical128(readFileSync(join(standard, "icon.ico")), readFileSync(join(icons, "icon.png"))));
   const frames = verifyIconContainer(join(root, icoPath), join(icons, "icon.png"));
+  const icnsFrames = verifyIcnsContainer(join(icons, "icon.icns"), join(icons, "icon.png"));
   const manifest = {
     source: sourcePath,
     source_sha256: sha256(sourceBytes),
@@ -112,6 +118,7 @@ try {
     canonical_png_size: 128,
     icns_record_order: "type identifiers sorted; generated record payloads unchanged",
     ico_sizes: frames.map(({ width }) => width),
+    icns_sizes: [...new Set(icnsFrames.map(({ width }) => width))].sort((left, right) => left - right),
     outputs: Object.fromEntries([...outputs.keys(), icoPath].sort().map((path) => [path, sha256(readFileSync(join(root, path)))])),
   };
   writeFileSync(join(root, "assets/brand/icon-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);

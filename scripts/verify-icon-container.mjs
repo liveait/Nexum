@@ -75,6 +75,74 @@ function decodePng(bytes, width, height) {
   return pixels;
 }
 
+function decodeIcnsRgb(bytes, alpha, size) {
+  const planeLength = size * size;
+  assert.equal(alpha.length, planeLength, "incomplete ICNS alpha mask");
+  const pixels = Buffer.alloc(planeLength * 4);
+  let position = 0;
+  for (let channel = 0; channel < 3; channel++) {
+    let output = 0;
+    while (output < planeLength) {
+      assert.ok(position < bytes.length, "truncated ICNS RGB run");
+      const control = bytes[position++];
+      const length = control < 128 ? control + 1 : control - 125;
+      assert.ok(output + length <= planeLength, "ICNS RGB run crosses its plane");
+      if (control < 128) {
+        assert.ok(position + length <= bytes.length, "truncated ICNS RGB literal");
+        for (let index = 0; index < length; index++) pixels[(output + index) * 4 + channel] = bytes[position++];
+      } else {
+        assert.ok(position < bytes.length, "missing ICNS RGB run value");
+        const value = bytes[position++];
+        for (let index = 0; index < length; index++) pixels[(output + index) * 4 + channel] = value;
+      }
+      output += length;
+    }
+  }
+  assert.equal(position, bytes.length, "data after ICNS RGB planes");
+  for (let index = 0; index < planeLength; index++) pixels[index * 4 + 3] = alpha[index];
+  return pixels;
+}
+
+export function verifyIcnsContainer(icnsPath, canonicalPngPath) {
+  const bytes = readFileSync(icnsPath);
+  assert.ok(bytes.length >= 8, "truncated ICNS header");
+  assert.equal(bytes.toString("ascii", 0, 4), "icns", "expected an ICNS container");
+  assert.equal(bytes.readUInt32BE(4), bytes.length, "ICNS length mismatch");
+  const records = new Map();
+  for (let position = 8; position < bytes.length;) {
+    assert.ok(position + 8 <= bytes.length, "truncated ICNS record");
+    const type = bytes.toString("ascii", position, position + 4);
+    const length = bytes.readUInt32BE(position + 4);
+    assert.ok(length >= 8 && position + length <= bytes.length, "ICNS record outside container");
+    assert.ok(!records.has(type), `duplicate ICNS ${type}`);
+    records.set(type, bytes.subarray(position + 8, position + length));
+    position += length;
+  }
+  const pngSizes = new Map([["ic07", 128], ["ic08", 256], ["ic09", 512], ["ic10", 1024], ["ic11", 32], ["ic12", 64], ["ic13", 256], ["ic14", 512]]);
+  const rgbSizes = new Map([["is32", [16, "s8mk"]], ["il32", [32, "l8mk"]]]);
+  const frames = [];
+  for (const [type, payload] of records) {
+    let pixels;
+    let size;
+    if (pngSizes.has(type)) {
+      size = pngSizes.get(type);
+      pixels = decodePng(payload, size, size);
+    } else if (rgbSizes.has(type)) {
+      const [dimension, mask] = rgbSizes.get(type);
+      size = dimension;
+      assert.ok(records.has(mask), `missing ICNS ${mask}`);
+      pixels = decodeIcnsRgb(payload, records.get(mask), size);
+    } else {
+      assert.ok(type === "s8mk" || type === "l8mk", `unsupported ICNS representation ${type}`);
+      continue;
+    }
+    frames.push({ type, width: size, height: size, pixelSha256: createHash("sha256").update(pixels).digest("hex") });
+  }
+  for (const size of [16, 32, 64, 128, 256, 512, 1024]) assert.ok(frames.some((frame) => frame.width === size), `missing ${size}px ICNS representation`);
+  assert.ok(records.get("ic07")?.equals(readFileSync(canonicalPngPath)), "128px ICNS frame differs from approved canonical PNG");
+  return frames;
+}
+
 export function verifyIconContainer(iconPath, canonicalPngPath) {
   const bytes = readFileSync(iconPath);
   const canonical = readFileSync(canonicalPngPath);
@@ -108,4 +176,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const directory = process.argv[2] ? resolve(process.argv[2]) : join(dirname(fileURLToPath(import.meta.url)), "../apps/desktop/src-tauri/icons");
   const frames = verifyIconContainer(join(directory, "icon.ico"), join(directory, "icon.png"));
   console.log(`Verified Nexum ICO frames: ${frames.map(({ width, height }) => `${width}x${height}`).join(", ")}; 128px matches canonical PNG.`);
+  const icnsFrames = verifyIcnsContainer(join(directory, "icon.icns"), join(directory, "icon.png"));
+  console.log(`Verified Nexum ICNS representations: ${icnsFrames.map(({ type, width }) => `${type} ${width}px`).join(", ")}; 128px matches canonical PNG.`);
 }

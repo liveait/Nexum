@@ -18,6 +18,15 @@
     256,
     128
   ],
+  "icns_sizes": [
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024
+  ],
   "outputs": {
     "apps/desktop/src-tauri/icons/apple-touch-icon.png": "5b33083cbadc10807f52ea1bfaabc124f8dd8d1fc8eaf06ffdce14a18ad64faa",
     "apps/desktop/src-tauri/icons/icon-1024.png": "f0ff2ffa09fae7e834d7356f9ea1049b9b0a9b5d519ce1dfed9bdc7e811aff82",
