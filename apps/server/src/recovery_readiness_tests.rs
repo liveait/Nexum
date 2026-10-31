@@ -520,3 +520,111 @@ fn queued_recovery_with_a_missing_receipt_and_symlink_fails_visibly() {
     );
     assert_eq!(std::fs::read(original).unwrap(), b"complete bytes");
 }
+
+fn assert_fresh_completed_response_is_not_retried(reject_failure_save: bool) {
+    use nexum_core::nexum_domain::Progress;
+    use nexum_core::nexum_task::TaskEvent;
+
+    let fixture = RecoveryFixture::new();
+    let opened = open_core(&fixture.data, BandwidthPolicyKind::Unlimited).unwrap();
+    let mut state = state_for(&fixture, opened);
+    let transfer = claim_next_http_transfer(&mut state).unwrap().unwrap();
+    let id = TaskId::from("recover");
+    // A fresh transfer has not yet registered pending recovery when its
+    // Engine returns the first completed response and receipt.
+    state.pending_completions.remove(&id);
+    let previous_progress = Progress::new(5, Some(14));
+    state
+        .core
+        .update_progress(&id, previous_progress.clone())
+        .unwrap();
+    state.core.drain_task_events();
+    state.core.drain_scheduler_events();
+    let database = rusqlite::Connection::open(fixture.data.join(DATABASE_FILE)).unwrap();
+    let rejected_states = if reject_failure_save {
+        "('completed', 'failed')"
+    } else {
+        "('completed')"
+    };
+    database
+        .execute_batch(&format!(
+            "CREATE TRIGGER reject_fresh_completion BEFORE UPDATE ON tasks
+         WHEN NEW.state IN {rejected_states}
+         BEGIN SELECT RAISE(FAIL, 'fresh completion save refused'); END;"
+        ))
+        .unwrap();
+    let state = Arc::new(Mutex::new(state));
+    // The real Engine already supplied complete bytes and a durable receipt.
+    // Exercise the fresh-download branch synchronously, stopping precisely
+    // after finalization and before run_http_transfer could dispatch anything.
+    let (outcome, dispatch_next) = complete_http_transfer(
+        &state,
+        &id,
+        &transfer.destination_path,
+        &transfer.source,
+        &transfer.destination,
+        &transfer.partial_path,
+        &transfer.completion_context,
+        false,
+        Ok(Progress::new(14, Some(14))),
+    );
+    assert_eq!(outcome, HttpWorkerOutcome::Failed);
+    assert!(dispatch_next);
+    let mut state = state.lock().unwrap();
+    let task = state.core.tasks.get(&id).unwrap().clone();
+    let stored = state.core.repository.get(&id).unwrap().unwrap();
+    assert_eq!(task.progress, previous_progress);
+    assert_eq!(stored.progress, previous_progress);
+    assert!(
+        state.core.scheduler.next_queued_task().is_none(),
+        "completed response bytes must never enter the network retry queue"
+    );
+    let events = state.core.drain_task_events();
+    if reject_failure_save {
+        assert_eq!(task.state, TaskState::Downloading);
+        assert_eq!(stored.state, TaskState::Downloading);
+        assert_eq!(task.last_error, None);
+        assert_eq!(stored.last_error, None);
+        assert_eq!(state.core.scheduler.active_len(), 1);
+        assert!(
+            events.is_empty(),
+            "a rejected terminal write must not expose transient states"
+        );
+    } else {
+        assert_eq!(task.state, TaskState::Failed);
+        assert_eq!(stored.state, TaskState::Failed);
+        assert!(
+            task.last_error
+                .as_deref()
+                .unwrap()
+                .contains("could not finalize HTTP transfer")
+        );
+        assert_eq!(stored.last_error, task.last_error);
+        assert_eq!(state.core.scheduler.active_len(), 0);
+        assert_eq!(
+            events,
+            vec![TaskEvent::StateChanged {
+                task_id: id,
+                from: TaskState::Downloading,
+                to: TaskState::Failed,
+            }]
+        );
+    }
+    assert!(state.core.drain_scheduler_events().is_empty());
+    assert!(state.pending_completions.contains(&TaskId::from("recover")));
+    assert!(completion_receipt_path(&fixture.context).exists());
+    assert_eq!(
+        std::fs::read(&fixture.destination).unwrap(),
+        b"complete bytes"
+    );
+}
+
+#[test]
+fn fresh_completed_bytes_do_not_retry_when_completion_persistence_fails() {
+    assert_fresh_completed_response_is_not_retried(false);
+}
+
+#[test]
+fn fresh_completed_bytes_keep_claim_snapshot_when_all_terminal_writes_fail() {
+    assert_fresh_completed_response_is_not_retried(true);
+}

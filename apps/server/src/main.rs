@@ -807,14 +807,16 @@ fn complete_http_transfer(
         if !cancelled {
             match result {
                 Ok(progress) => {
+                    state.pending_completions.insert(id.clone());
                     let finish_result = state.core.complete_task(id, progress);
                     if let Err(error) = finish_result {
                         outcome = HttpWorkerOutcome::Failed;
                         eprintln!("task {id} completion failed: {error:?}");
-                        if let Err(finish_error) = record_http_failure(
-                            &mut state.core,
+                        // Bytes and their receipt are already complete. A
+                        // database failure must not enqueue another network
+                        // attempt, including on the initial fresh download.
+                        if let Err(finish_error) = state.core.fail_task_without_retry(
                             id,
-                            recovery_only,
                             format!("could not finalize HTTP transfer: {error:?}"),
                         ) {
                             eprintln!(
