@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in debug mode.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about_links;
 mod download_metadata;
 mod download_target;
 
@@ -11,6 +12,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
+use tauri_plugin_opener::OpenerExt;
 
 const SETTINGS_FILE: &str = "settings.json";
 
@@ -519,10 +521,20 @@ fn clear_partial_metadata(app: tauri::AppHandle, task_id: String) -> Result<(), 
     download_metadata::clear_partial_metadata(&server_data_dir, &task_id)
 }
 
+#[tauri::command]
+fn open_project_link(app: AppHandle, link: about_links::ProjectLink) -> Result<(), String> {
+    about_links::open_project_link(link, |url| app.opener().open_url(url, None::<&str>))
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .manage(desktop_lib::EventSubscriptionManager::default())
         .setup(|app| {
             let settings = read_settings(app.handle())?;
@@ -579,6 +591,7 @@ fn main() {
             clear_partial_metadata,
             check_fresh_install,
             get_upgrade_info,
+            open_project_link,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Nexum desktop");

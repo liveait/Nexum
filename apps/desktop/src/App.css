@@ -1259,6 +1259,10 @@ input::placeholder {
   margin-bottom: 21px;
 }
 
+.about-brand { display: flex; align-items: center; gap: 12px; }
+.about-brand img { flex: none; object-fit: contain; }
+.about-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+
 .settings-card label,
 .modal label {
   display: grid;
