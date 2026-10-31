@@ -1454,10 +1454,10 @@ function SettingsView({ category, mode, modeDraft, server, serverDraft, settings
     if (category === "general") return <SettingsDetail title={t(card?.label ?? "General")} icon="general" onBack={goBack}>
       <div className="settings-card">
         <div className="settings-card-heading"><div><span className="eyebrow">{t("Connection")}</span><h2>{t("Download service")}</h2></div><span className={`status-pill ${connection}`}>{t(connection)}</span></div>
-        <label>{t("Download location")}<select value={modeDraft} onChange={(event) => onModeChange(event.target.value as ConnectionMode)} disabled={settingsBusy || !settingsReady}><option value="managed">{t("This Mac (recommended)")}</option><option value="external">{t("External Server")}</option></select></label>
+        <label>{t("Connection mode")}<select value={modeDraft} onChange={(event) => onModeChange(event.target.value as ConnectionMode)} disabled={settingsBusy || !settingsReady}><option value="managed">{t("Local (recommended)")}</option><option value="external">{t("Remote")}</option></select></label>
         {modeDraft === "managed" ? <p className="field-help">{t("Nexum starts its local download service automatically. Downloads continue when you close the window and stop when you quit Nexum.")}</p> : <>
           <label>{t("Server address")}<input value={serverDraft} onChange={(event) => onServerChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") onApply(); }} placeholder={DEFAULT_SERVER} disabled={settingsBusy} /></label>
-          <p className="field-help">{t("Connect to a Server you run separately. Switching modes keeps each service's downloads.")}</p>
+          <p className="field-help">{t("Connect to a specified download service, including one running separately on this Mac. Switching modes keeps each service's downloads.")}</p>
         </>}
         <button className="button primary" onClick={onApply} disabled={settingsBusy || !settingsReady}>{t("Save settings")}</button>
       </div>

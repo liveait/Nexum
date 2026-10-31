@@ -38,9 +38,9 @@ The desktop app should make the common local workflow understandable at a glance
 
    Inspect the destination and the latest error when a task needs attention.
 
-Desktop 默认托管随包 Server，通用设置保留显式的外部模式；尚未支持的 Magnet 和本地文件来源不展示成可用功能。
+Desktop 默认使用“本地（推荐）”连接方式，自动托管随包下载服务；通用设置的“远程”也支持连接本机独立运行的服务。尚未支持的 Magnet 和本地文件来源不展示成可用功能。
 
-Desktop defaults to an App-managed bundled Server, with an explicit External option under General settings. Unsupported Magnet and local-file sources remain unavailable.
+Desktop defaults to the “Local (recommended)” connection mode and manages its bundled download service automatically. “Remote” under General settings also supports a service running separately on this Mac. Unsupported Magnet and local-file sources remain unavailable.
 
 <a id="2-design-decisions"></a>
 <a id="2-设计决定"></a>
@@ -289,9 +289,9 @@ The Server RPC requires an ID and destination; the Desktop Rust backend generate
 
 Settings is a dedicated page with grouped sections. It is not a second task workflow:
 
-- **连接：** 托管（默认）自动启动随包服务，显示启动中、就绪、恢复中或失败状态和重试。外部模式显示保存的地址（默认 `127.0.0.1:39100`）及 Keychain 操作。托管端点和凭据不展示。默认下载目录选择和重置为 Downloads 随设置保存。
+- **连接：** “连接方式”提供“本地（推荐）”和“远程”。本地自动启动随包下载服务，显示启动中、就绪、恢复中或失败状态和重试。远程连接指定下载服务，也支持本机独立运行的服务，显示保存的服务地址（默认 `127.0.0.1:39100`）及 Keychain 操作。托管端点和凭据不展示。界面名称分别对应既有 `managed` 和 `external` 模式，不改变连接或凭据行为。默认下载目录选择和重置为 Downloads 随设置保存。
 
-  **Connection:** Managed (default) starts the bundled service automatically and shows starting, running, recovering or failed status with Retry. External exposes the saved address (default `127.0.0.1:39100`) and Keychain controls. The managed endpoint and credential are not shown. Default download folder selection and Reset to Downloads are saved with the settings.
+  **Connection:** “Connection mode” offers “Local (recommended)” and “Remote”. Local starts the bundled download service automatically and shows starting, running, recovering or failed status with Retry. Remote connects to a specified download service, including one running separately on this Mac, and exposes the saved service address (default `127.0.0.1:39100`) and Keychain controls. The managed endpoint and credential are not shown. These UI names map to the existing `managed` and `external` modes without changing connection or credential behavior. Default download folder selection and Reset to Downloads are saved with the settings.
 - **认证：** 在通用设置中针对当前已保存的 Server 显示 `Bearer`/`ApiKey` scheme 选择器、只写 secret 输入框、已配置 scheme 状态，以及保存/清除操作。将 scheme 和 secret 一起按 Server 地址保存在 macOS Keychain，不能把 secret 回读到 React。保存、清除或切换当前 Server 后重启事件订阅并刷新 Task 快照。允许为回环明文地址和显式 `tls://` 地址保存凭据。明文凭据仍只允许回环地址；TLS 客户端会先校验 Server 名称和系统根证书链，再发送凭据。
 
   **Authentication:** in General settings for the active saved Server, show a `Bearer`/`ApiKey` scheme selector, write-only secret field, configured-scheme status, and Save/Clear actions. Save the scheme and secret together in macOS Keychain under that Server address; never read the secret back into React. Saving, clearing, or changing the active Server restarts the event subscription and refreshes the task snapshot. Enable credential storage for loopback plaintext addresses and explicit `tls://` addresses. Plaintext credentials remain loopback-only; the TLS client validates the server name and system root chain before sending a credential.
