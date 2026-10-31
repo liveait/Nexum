@@ -6,7 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { hasHardLineBreak, isHttpSource, isValidFileName, suggestedFileName } from "./downloadDraft";
 import { isMessageKey, resolveLocale, translate, TranslationProvider, useTranslation, type LanguagePreference, type Locale, type MessageKey, type Translate } from "./i18n";
 import { isConnectionReady, type ConnectionMode, type ManagedConnectionStatus } from "./connectionState";
-import { addDownload, invokeTaskCommand, savePartialMetadata, readPartialMetadata, clearPartialMetadata, type TaskCommand, type PartialMetadata } from "./taskCommands";
+import { addDownload, invokeTaskCommand, savePartialMetadata, readPartialMetadata, clearPartialMetadata, type CreatedDownload, type TaskCommand, type PartialMetadata } from "./taskCommands";
 import { valueForContext, type ContextValue, type TaskContext } from "./taskContext";
 import { taskDisplayName } from "./taskPresentation";
 import "./App.css";
@@ -326,7 +326,7 @@ export default function App() {
   tRef.current = t;
   const [settingsReady, setSettingsReady] = useState(false);
   const [credentialRevision, setCredentialRevision] = useState(0);
-  const [taskSnapshot, setTaskSnapshot] = useState<ContextValue<{ items: TaskItem[]; updatedAt: number }> | null>(null);
+  const [taskSnapshot, setTaskSnapshot] = useState<ContextValue<{ items: TaskItem[]; updatedAt: number; stale: boolean }> | null>(null);
   const [taskSelection, setTaskSelection] = useState<ContextValue<string | null> | null>(null);
   const [notificationTargetId, setNotificationTargetId] = useState<string | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
@@ -349,15 +349,16 @@ export default function App() {
   const nameProbeVersion = useRef(0);
   const [finalPath, setFinalPath] = useState("");
   const [addLoading, setAddLoading] = useState(false);
+  const addAttempt = useRef<{ context: TaskContext; created: CreatedDownload | null; inFlight: boolean } | null>(null);
+  const [createdDownload, setCreatedDownload] = useState<CreatedDownload | null>(null);
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
   const [isFreshInstall, setIsFreshInstall] = useState(false);
   const [upgradeInfo, setUpgradeInfo] = useState<{ old_version: string; new_version: string } | null>(null);
   const [partialDownloads, setPartialDownloads] = useState<PartialMetadata[]>([]);
-  const [welcomeOpen, setWelcomeOpen] = useState(false);
   const localServer = mode === "managed" || isLocalServerAddress(externalServer);
   const remoteFinalPath = localServer ? null : serverDestination(newDirectory, newFileName);
-  const destinationPreview = localServer ? finalPath : remoteFinalPath;
+  const destinationPreview = createdDownload?.destination ?? (localServer ? finalPath : remoteFinalPath);
   const addDialogRef = useRef<HTMLElement>(null);
   const addSourceRef = useRef<HTMLTextAreaElement>(null);
   const destinationButtonRef = useRef<HTMLButtonElement>(null);
@@ -378,6 +379,7 @@ export default function App() {
   const lastUpdatedAt = currentSnapshot?.updatedAt ?? null;
   const selectedId = valueForContext(taskSelection, renderedContext);
   const actionByTask = valueForContext(taskActions, renderedContext) ?? EMPTY_TASK_ACTIONS;
+  const snapshotStale = currentSnapshot?.stale ?? false;
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
 
@@ -437,7 +439,7 @@ export default function App() {
       const result = await invoke<TaskItem[]>("task_list", {});
       if (!isCurrent()) return;
       if (!silent) setError("");
-      setTaskSnapshot({ context, value: { items: result, updatedAt: Date.now() } });
+      setTaskSnapshot({ context, value: { items: result, updatedAt: Date.now(), stale: false } });
       setTaskSelection((current) => {
         const previousId = valueForContext(current, context);
         return {
@@ -448,6 +450,7 @@ export default function App() {
       setConnection("connected");
     } catch (caught) {
       if (isCurrent()) {
+        setTaskSnapshot((current) => current?.context === context ? { ...current, value: { ...current.value, stale: true } } : current);
         setConnection("error");
         setNotice(null);
         setError(errorMessage(caught, tRef.current));
@@ -662,6 +665,19 @@ export default function App() {
   }, [server, settingsReady, credentialRevision, connectionGeneration, canConnect]);
 
   useEffect(() => {
+    // An Add sheet belongs to one connection context, including its child generation.
+    if (addAttempt.current && addAttempt.current.context !== renderedContext) {
+      addAttempt.current = null;
+      nameProbeVersion.current += 1;
+      setCreatedDownload(null);
+      setAddLoading(false);
+      setDestinationPicking(false);
+      setNameProbePending(false);
+      setShowAdd(false);
+    }
+  }, [renderedContext]);
+
+  useEffect(() => {
     if (settingsReady && canConnect) void refreshTasks();
     // Refresh the full snapshot when the active server or its credential changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -762,6 +778,8 @@ export default function App() {
   };
 
   const openAdd = (trigger?: HTMLElement) => {
+    addAttempt.current = { context: snapshotContext.current, created: null, inFlight: false };
+    setCreatedDownload(null);
     nameProbeVersion.current += 1;
     const active = document.activeElement;
     addReturnFocus.current = trigger ?? (active instanceof HTMLElement && active.tabIndex >= 0 ? active : sidebarAddRef.current);
@@ -776,7 +794,9 @@ export default function App() {
   };
 
   const closeAdd = () => {
-    if (!addLoading && !destinationPicking) {
+    if (!addAttempt.current?.inFlight && !addLoading && !destinationPicking) {
+      addAttempt.current = null;
+      setCreatedDownload(null);
       nameProbeVersion.current += 1;
       setNameProbePending(false);
       setShowAdd(false);
@@ -968,6 +988,9 @@ export default function App() {
 
   const chooseDestination = async (): Promise<void> => {
     if (!localServer) return;
+    const attempt = addAttempt.current;
+    if (!attempt || attempt.created || attempt.inFlight) return;
+    const isCurrent = () => addAttempt.current === attempt && snapshotContext.current === attempt.context;
     setDestinationPicking(true);
     setAddError("");
     try {
@@ -977,12 +1000,14 @@ export default function App() {
         multiple: false,
         defaultPath: newDirectory || undefined,
       });
-      if (typeof directory === "string") setNewDirectory(directory);
+      if (isCurrent() && typeof directory === "string") setNewDirectory(directory);
     } catch (caught) {
-      setAddError(errorMessage(caught, t));
+      if (isCurrent()) setAddError(errorMessage(caught, t));
     } finally {
-      setDestinationPicking(false);
-      window.requestAnimationFrame(() => destinationButtonRef.current?.focus());
+      if (isCurrent()) {
+        setDestinationPicking(false);
+        window.requestAnimationFrame(() => { if (isCurrent()) destinationButtonRef.current?.focus(); });
+      }
     }
   };
 
@@ -998,7 +1023,9 @@ export default function App() {
 
   const createAndQueue = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (nameProbePending || !canConnect) return;
+    const attempt = addAttempt.current;
+    if (!attempt || attempt.inFlight || attempt.context !== snapshotContext.current || nameProbePending || !canConnect) return;
+    const isCurrent = () => addAttempt.current === attempt && snapshotContext.current === attempt.context;
     if (hasHardLineBreak(newSource)) {
       setAddError(t("Enter one URL without line breaks."));
       return;
@@ -1019,12 +1046,16 @@ export default function App() {
       setAddError(t("Enter an absolute folder path on the Server host."));
       return;
     }
+    attempt.inFlight = true;
     setAddLoading(true);
     setAddError("");
     try {
-      const context = renderedContext;
-      const result = await addDownload(invoke, newSource.trim(), newFileName, newDirectory.trim());
-      if (snapshotContext.current !== context) return;
+      const result = await addDownload(invoke, newSource.trim(), newFileName, newDirectory.trim(), {
+        created: attempt.created,
+        isCurrent,
+        onCreated: (created) => { attempt.created = created; setCreatedDownload(created); },
+      });
+      if (!isCurrent()) return;
       if (!result.queued) {
         setAddError(t("Task created, but queueing failed: {error}", { error: errorMessage(result.error, t) }));
         await refreshTasks();
@@ -1035,14 +1066,17 @@ export default function App() {
         .then(() => {})
         .catch(() => {});
       nameProbeVersion.current += 1;
+      addAttempt.current = null;
+      setCreatedDownload(null);
       setNewSource(""); setNewFileName(""); setFileNameEdited(false); setNameProbePending(false); setShowAdd(false);
       selectSection("downloads");
       pushNotification(localMessage("{name} added and queued", { name: result.destination ? taskDisplayName({ destination: result.destination, source: newSource }) ?? newFileName : newFileName }), "success", result.id);
       await refreshTasks();
     } catch (caught) {
-      setAddError(errorMessage(caught, t));
+      if (isCurrent()) setAddError(errorMessage(caught, t));
     } finally {
-      setAddLoading(false);
+      attempt.inFlight = false;
+      if (addAttempt.current === attempt || addAttempt.current === null) setAddLoading(false);
     }
   };
 
@@ -1099,21 +1133,22 @@ export default function App() {
         <button className={`nav-item ${section === "settings" ? "selected" : ""}`} onClick={() => selectSection("settings")} aria-current={section === "settings" ? "page" : undefined}><Icon name="settings" size={20} /><span>{t("Settings")}</span></button>
       </aside>
 
-      <section className="workspace" inert={showAdd || welcomeOpen}>
+      <section className="workspace" inert={showAdd}>
+        {snapshotStale && <div className="message-banner error" role="status"><span>{t("These downloads may be out of date. The last refresh failed; retry to get their current status.")}</span><button type="button" onClick={() => void refreshTasks()} disabled={loading || !canConnect}>{t("Retry")}</button></div>}
         {isFreshInstall && connection === "connected" && (
-          <WelcomeFlow onDismiss={() => setWelcomeOpen(false)} onFirstDownload={() => openAdd()} />
+          <WelcomeFlow onDismiss={() => setIsFreshInstall(false)} onFirstDownload={() => { setIsFreshInstall(false); openAdd(); }} />
         )}
         {upgradeInfo && (
           <div className="upgrade-notice" role="status">
-            <span>Upgraded from {upgradeInfo.old_version} to {upgradeInfo.new_version}. Tasks are being restored.</span>
-            <button className="text-button" onClick={() => setUpgradeInfo(null)}>Dismiss</button>
+            <span>{t("Upgraded from {oldVersion} to {newVersion}. Tasks are being restored.", { oldVersion: upgradeInfo.old_version, newVersion: upgradeInfo.new_version })}</span>
+            <button className="text-button" onClick={() => setUpgradeInfo(null)}>{t("Dismiss")}</button>
           </div>
         )}
         {partialDownloads.length > 0 && (
           <div className="partial-notice" role="status">
-            <span>Found {partialDownloads.length} incomplete download{partialDownloads.length > 1 ? "s" : ""} from previous sessions.</span>
-            <button className="text-button" onClick={() => { setPartialDownloads([]); refreshTasks(); }}>Resume & refresh</button>
-            <button className="text-button" onClick={() => setPartialDownloads([])}>Dismiss</button>
+            <span>{t(partialDownloads.length === 1 ? "Found {count} incomplete download from a previous session." : "Found {count} incomplete downloads from previous sessions.", { count: partialDownloads.length })}</span>
+            <button className="text-button" onClick={() => { setPartialDownloads([]); void refreshTasks(); }}>{t("Refresh downloads")}</button>
+            <button className="text-button" onClick={() => setPartialDownloads([])}>{t("Dismiss")}</button>
           </div>
         )}
         {mode === "managed" && !canConnect && <ManagedServerStatus status={connectionStatus} busy={retryingServer} onRetry={() => void retryManagedServer()} /> }
@@ -1171,22 +1206,23 @@ export default function App() {
             {mode === "managed" && !canConnect && <ManagedServerStatus status={connectionStatus} busy={retryingServer} onRetry={() => void retryManagedServer()} />}
             <form onSubmit={createAndQueue}>
               <label htmlFor="add-source">{t("Source URL")}</label>
-              <textarea id="add-source" ref={addSourceRef} className="source-url-input" value={newSource} onChange={(event) => changeSource(event.target.value)} placeholder="https://example.com/file.zip" rows={3} wrap="soft" aria-describedby="add-source-help" required />
+              <textarea id="add-source" ref={addSourceRef} className="source-url-input" value={newSource} onChange={(event) => changeSource(event.target.value)} placeholder="https://example.com/file.zip" rows={3} wrap="soft" aria-describedby="add-source-help" disabled={addLoading || Boolean(createdDownload)} required />
               <p id="add-source-help" className="add-field-help">{t("Long URLs wrap automatically. Enter one URL per download.")}</p>
               <label htmlFor="add-file-name">{t("File name")}</label>
-              <input id="add-file-name" value={newFileName} onChange={(event) => { nameProbeVersion.current += 1; setNewFileName(event.target.value); setFileNameEdited(true); setNameProbePending(false); }} aria-describedby="add-name-help" aria-invalid={newFileName.length > 0 && !isValidFileName(newFileName)} placeholder={t("Enter a file name")} required />
+              <input id="add-file-name" value={newFileName} onChange={(event) => { nameProbeVersion.current += 1; setNewFileName(event.target.value); setFileNameEdited(true); setNameProbePending(false); }} aria-describedby="add-name-help" aria-invalid={newFileName.length > 0 && !isValidFileName(newFileName)} placeholder={t("Enter a file name")} disabled={addLoading || Boolean(createdDownload)} required />
               <p id="add-name-help" className="add-field-help" aria-live="polite">{t(nameProbePending ? "Checking file name from the response… You can edit it now." : "Suggested from the URL or response; you can edit it before adding the download.")}</p>
               <label htmlFor="add-directory">{t(localServer ? "Save folder" : "Save folder on Server")}</label>
               {localServer ? (
-                <div className="input-with-action"><input id="add-directory" value={newDirectory} readOnly title={newDirectory} placeholder={t("Choose a download folder")} aria-describedby="add-directory-help add-final-path" /><button ref={destinationButtonRef} type="button" className="button chooser-button" onClick={() => void chooseDestination()} disabled={addLoading || destinationPicking}>{destinationPicking ? t("Choosing…") : t("Choose…")}</button></div>
+                <div className="input-with-action"><input id="add-directory" value={newDirectory} readOnly title={newDirectory} placeholder={t("Choose a download folder")} aria-describedby="add-directory-help add-final-path" /><button ref={destinationButtonRef} type="button" className="button chooser-button" onClick={() => void chooseDestination()} disabled={addLoading || destinationPicking || Boolean(createdDownload)}>{destinationPicking ? t("Choosing…") : t("Choose…")}</button></div>
               ) : (
-                <input id="add-directory" className="server-directory-input" value={newDirectory} onChange={(event) => setNewDirectory(event.target.value)} placeholder={t("Enter an absolute folder path on the Server host.")} aria-describedby="add-directory-help add-final-path" aria-invalid={Boolean(newDirectory.trim()) && !isAbsoluteServerFolder(newDirectory)} autoComplete="off" spellCheck={false} required />
+                <input id="add-directory" className="server-directory-input" value={newDirectory} onChange={(event) => setNewDirectory(event.target.value)} placeholder={t("Enter an absolute folder path on the Server host.")} aria-describedby="add-directory-help add-final-path" aria-invalid={Boolean(newDirectory.trim()) && !isAbsoluteServerFolder(newDirectory)} autoComplete="off" spellCheck={false} disabled={addLoading || Boolean(createdDownload)} required />
               )}
               <p id="add-directory-help" className="add-field-help">{localServer ? t(downloadDirectory ? "Uses your default download folder." : "Defaults to this Mac's Downloads folder.") : t("The Server at {server} writes downloads to this folder on its own filesystem.", { server })}</p>
               <p className="add-field-help">{t("If a name is already in use, Nexum adds a number to keep existing files safe.")}</p>
               <p id="add-final-path" className="add-final-path">{t("Destination")}: <output>{destinationPreview || t(localServer ? "Choose a folder and file name" : "Enter a Server folder and file name")}</output></p>
               {addError && <p className="form-error" role="alert">{addError}</p>}
-              <div className="modal-actions"><button type="button" className="button" onClick={closeAdd} disabled={addLoading || destinationPicking}>{t("Cancel")}</button><button type="submit" className="button primary" disabled={!canConnect || addLoading || destinationPicking || nameProbePending || !newSource.trim() || !newDirectory || !newFileName}>{addLoading ? t("Adding…") : nameProbePending ? t("Checking name…") : t("Add and Queue")}</button></div>
+              {createdDownload && <p className="add-field-help">{t("This download is already created. Retry queueing, or close this window and queue it from Downloads.")}</p>}
+              <div className="modal-actions"><button type="button" className="button" onClick={closeAdd} disabled={addLoading || destinationPicking}>{t("Cancel")}</button><button type="submit" className="button primary" disabled={!canConnect || addLoading || destinationPicking || nameProbePending || !newSource.trim() || !newDirectory || !newFileName}>{addLoading ? t(createdDownload ? "Queueing…" : "Adding…") : createdDownload ? t("Retry queueing") : nameProbePending ? t("Checking name…") : t("Add and Queue")}</button></div>
             </form>
           </section>
         </div>
@@ -1584,13 +1620,14 @@ function SettingsDetail({ title, icon, onBack, children }: { title: string; icon
 }
 
 function WelcomeFlow({ onDismiss, onFirstDownload }: { onDismiss: () => void; onFirstDownload: () => void }) {
+  const t = useTranslation();
   return (
     <div className="welcome-flow" role="status">
-      <span className="welcome-flow-title">{`Welcome to Nexum`}</span>
-      <p>{`This is your first time opening the app. Your local download service is starting up.`}</p>
+      <span className="welcome-flow-title">{t("Welcome to Nexum")}</span>
+      <p>{t("Paste an HTTP or HTTPS link to start your first download.")}</p>
       <div className="welcome-flow-actions">
-        <button className="button primary" onClick={onFirstDownload}>{`Add your first download`}</button>
-        <button className="button" onClick={onDismiss}>{`Continue to Downloads`}</button>
+        <button className="button primary" onClick={onFirstDownload}>{t("Add your first download")}</button>
+        <button className="button" onClick={onDismiss}>{t("Continue to Downloads")}</button>
       </div>
     </div>
   );

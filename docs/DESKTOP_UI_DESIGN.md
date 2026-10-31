@@ -422,9 +422,9 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 
 ### Slice B — Add Sheet 与原生设置（部分实现） / Slice B — Add sheet and native settings (partially implemented)
 
-- 增加 URL 校验。[ ]
+- 增加 URL 校验。[x]
 
-  Add URL validation. [ ]
+  Add URL validation. [x]
 - 内部生成任务 ID，并改用文件名展示任务标题。[x]
 
   Generate task IDs internally and show filename-based task titles instead. [x]
@@ -440,9 +440,9 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 - Add 流程在创建任务后自动排队。[x]
 
   Queue a newly created task as part of the Add flow. [x]
-- 在 Add 流程部分失败后重试排队，不重复创建任务。[ ]
+- 在 Add 流程部分失败后保留已创建 ID 和实际目标，原位重试排队而不重复创建任务；关闭 Sheet 或切换 Server、凭据、托管进程代次后废弃该重试上下文。[x]
 
-  Retry queueing after a partial Add failure without creating a duplicate task. [ ]
+  Retain the created ID and allocated destination after a partial Add failure, retrying queueing in the sheet without creating another task. Closing the sheet or changing the Server, credential or managed-child generation discards that retry context. [x]
 
 <a id="slice-c--live-task-surface-partially-implemented"></a>
 <a id="slice-c--实时任务界面部分实现"></a>
@@ -458,9 +458,9 @@ The RPC boundary stays in Rust/Tauri commands. React owns presentation state and
 - 增加独立 Server 事件订阅、Tauri 事件桥接和去抖任务刷新。[x]
 
   Add the dedicated Server event subscription, Tauri event bridge, and debounced task refresh. [x]
-- 为请求错误后保留的快照增加明确的过期数据标记。[ ]
+- 为请求错误后保留的快照增加明确的过期数据标记；重试期间保留，成功取得同一上下文的新快照后清除。[x]
 
-  Add explicit stale-data indicators for retained snapshots after request errors. [ ]
+  Mark retained snapshots stale after request errors, keeping that indicator during retries and clearing it after a fresh snapshot succeeds in the same context. [x]
 - 增加键盘导航、快捷键、焦点管理和可访问性标签。[x]
 
   Add keyboard navigation, shortcuts, focus management, and accessibility labels. [x]
