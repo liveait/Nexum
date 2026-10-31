@@ -209,7 +209,7 @@ const zhCN = {
   "No matching downloads": "没有匹配的下载",
   "No downloads yet": "暂无下载",
   "Try another filter or search term.": "试试其他筛选条件或搜索词。",
-  "Press + to add one": "按 + 添加下载",
+  "Use + in the toolbar or press ⌘N to add a download.": "点击上方工具栏的＋，或按 ⌘N 添加下载。",
   "Overview": "总览",
   "Current activity from your Nexum Server.": "查看 Nexum Server 当前的活动。",
   "All downloads": "全部下载",

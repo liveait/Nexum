@@ -130,9 +130,9 @@ Downloads 页头提供过滤器和紧凑控制：
 
 The Downloads header has a filter selector and compact controls:
 
-- **添加**：侧边栏“＋”是固定入口，`⌘N` 提供键盘入口；真正的空列表另显示引导按钮。下载列表和概览不再显示重复的悬浮／页头按钮，筛选无结果只提示调整筛选。
+- **添加**：下载页右上工具栏固定为“添加（＋）→ 详情 → 搜索”，`⌘N` 提供键盘入口。侧边栏、悬浮按钮和概览不再重复提供添加按钮；空列表引导使用工具栏／快捷键，首次欢迎只跳转到下载页，筛选无结果只提示调整筛选。
 
-  **Add**: the sidebar plus is the persistent entry and `⌘N` is the keyboard entry; a genuinely empty list also offers an onboarding button. Downloads and Overview have no duplicate floating/header buttons, and an empty filtered result only suggests adjusting filters.
+  **Add**: the Downloads upper-right toolbar uses “Add (+) → Details → Search”, with `⌘N` as the keyboard entry. Sidebar, floating and Overview buttons do not duplicate Add; empty lists point to the toolbar/shortcut, welcome only navigates to Downloads, and empty filtered results suggest adjusting filters.
 - **过滤**：选择全部、活动、排队、已完成或失败任务。
 
   **Filter**: selects All, Active, Queued, Completed, or Failed downloads.
@@ -232,9 +232,9 @@ The Inspector is read-only for task metadata. Row actions currently provide the 
 - **未连接：** 保留任务页面，在底部状态栏/错误条显示不可用状态，托管模式显示本机服务启动／恢复或重试提示，外部模式引导修改地址和凭据。
 
   **No connection:** keep the task surface available, show the unavailable state in the footer/banner, and show local service startup/recovery or Retry guidance in Managed mode; External directs the user to its address and credential settings.
-- **已连接但没有任务：** 将“添加下载”作为主操作。
+- **已连接但没有任务：** 引导使用工具栏“＋”或 `⌘N`，不再增加重复按钮。
 
-  **Connected with no tasks:** show Add Download as the primary action.
+  **Connected with no tasks:** point to the toolbar plus or `⌘N` without another duplicate button.
 - **加载中：** 同一 Server 与凭据上下文内刷新时保留现有列表。切换 Server 或凭据时，立即隐藏旧任务列表、选中项、上次更新时间和正在执行的行操作；只有新上下文的快照成功后才显示任务。旧请求即使迟到，也不能恢复旧任务行或对新 Server 执行行操作。
 
   **Loading:** keep the existing list visible for refreshes of the same Server and credential context. When either changes, hide the old task list, selection, last-update time, and in-flight row actions immediately; show tasks only after the new context's snapshot succeeds. A late response from the previous context cannot restore its rows or trigger a row action against the new Server.

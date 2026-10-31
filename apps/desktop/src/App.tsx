@@ -363,7 +363,8 @@ export default function App() {
   const addSourceRef = useRef<HTMLTextAreaElement>(null);
   const destinationButtonRef = useRef<HTMLButtonElement>(null);
   const addReturnFocus = useRef<HTMLElement | null>(null);
-  const sidebarAddRef = useRef<HTMLButtonElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const downloadsNavRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchToggleRef = useRef<HTMLButtonElement>(null);
   const searchReturnFocus = useRef<HTMLElement | null>(null);
@@ -782,7 +783,7 @@ export default function App() {
     setCreatedDownload(null);
     nameProbeVersion.current += 1;
     const active = document.activeElement;
-    addReturnFocus.current = trigger ?? (active instanceof HTMLElement && active.tabIndex >= 0 ? active : sidebarAddRef.current);
+    addReturnFocus.current = trigger ?? (active instanceof HTMLElement && active.tabIndex >= 0 ? active : addButtonRef.current ?? downloadsNavRef.current);
     setAddError("");
     setNewSource("");
     setNewDirectory(localServer ? downloadDirectory ?? "" : "");
@@ -828,7 +829,7 @@ export default function App() {
     return () => {
       const previous = addReturnFocus.current;
       window.requestAnimationFrame(() => {
-        (previous?.isConnected ? previous : sidebarAddRef.current)?.focus();
+        (previous?.isConnected ? previous : addButtonRef.current ?? downloadsNavRef.current)?.focus();
       });
     };
   }, [showAdd]);
@@ -1114,12 +1115,11 @@ export default function App() {
           <span className="sidebar-brand">NEXUM</span>
           <div className="sidebar-top-actions">
             <button className="sidebar-icon-button" onClick={() => setShowInspector((current) => !current)} title={t("Toggle inspector")} aria-label={showInspector ? t("Hide task details") : t("Show task details")} aria-pressed={showInspector}><Icon name="list" size={18} /></button>
-            <button ref={sidebarAddRef} className="sidebar-icon-button add-sidebar-button" onClick={(event) => openAdd(event.currentTarget)} title={t("Add download")} aria-label={t("Add download")}><Icon name="plus" size={18} /></button>
           </div>
         </div>
         <nav className="primary-nav">
           {NAV_ITEMS.map((item) => (
-            <button className={`nav-item ${section === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectSection(item.id)} aria-current={section === item.id ? "page" : undefined}>
+            <button className={`nav-item ${section === item.id ? "selected" : ""}`} key={item.id} ref={item.id === "downloads" ? downloadsNavRef : undefined} onClick={() => selectSection(item.id)} aria-current={section === item.id ? "page" : undefined}>
               <Icon name={item.icon} size={20} /><span>{t(item.label)}</span>
               {item.id === "downloads" && counts.active > 0 && <span className="nav-count">{counts.active}</span>}
             </button>
@@ -1136,7 +1136,7 @@ export default function App() {
       <section className="workspace" inert={showAdd}>
         {snapshotStale && <div className="message-banner error" role="status"><span>{t("These downloads may be out of date. The last refresh failed; retry to get their current status.")}</span><button type="button" onClick={() => void refreshTasks()} disabled={loading || !canConnect}>{t("Retry")}</button></div>}
         {isFreshInstall && connection === "connected" && (
-          <WelcomeFlow onDismiss={() => setIsFreshInstall(false)} onFirstDownload={() => { setIsFreshInstall(false); openAdd(); }} />
+          <WelcomeFlow onContinue={() => { setIsFreshInstall(false); selectSection("downloads"); }} />
         )}
         {upgradeInfo && (
           <div className="upgrade-notice" role="status">
@@ -1171,6 +1171,7 @@ export default function App() {
             showInspector={showInspector}
             searchOpen={searchOpen}
             searchQuery={searchQuery}
+            addButtonRef={addButtonRef}
             searchInputRef={searchInputRef}
             searchToggleRef={searchToggleRef}
             onFilterChange={setFilter}
@@ -1244,7 +1245,7 @@ function ManagedServerStatus({ status, busy, onRetry }: { status: ManagedConnect
 
 function DownloadsView({
   tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, eventStreamConnected, canConnect, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
-  searchInputRef, searchToggleRef, onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onDismissNotice, onDismissError, onAdd, onPause, onResume, onRemove, onQueue, onStart,
+  addButtonRef, searchInputRef, searchToggleRef, onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onDismissNotice, onDismissError, onAdd, onPause, onResume, onRemove, onQueue, onStart,
 }: {
   tasks: TaskItem[];
   visibleTasks: TaskItem[];
@@ -1263,6 +1264,7 @@ function DownloadsView({
   showInspector: boolean;
   searchOpen: boolean;
   searchQuery: string;
+  addButtonRef: RefObject<HTMLButtonElement | null>;
   searchInputRef: RefObject<HTMLInputElement | null>;
   searchToggleRef: RefObject<HTMLButtonElement | null>;
   onFilterChange: (filter: TaskFilter) => void;
@@ -1286,13 +1288,13 @@ function DownloadsView({
     <>
       <header className="content-header">
         <div className="content-title"><select value={filter} onChange={(event) => onFilterChange(event.target.value as TaskFilter)} aria-label={t("Download filter")}>{DOWNLOAD_FILTERS.map((item) => <option value={item.id} key={item.id}>{t(item.label)}</option>)}</select><span className="count-pill">{counts[filter]}/{tasks.length}</span></div>
-        <div className="header-tools"><button className="round-tool" title={t("More actions (planned)")} aria-label={t("More actions (planned)")} disabled><Icon name="more" /></button><button className={`round-tool ${showInspector ? "active" : "muted"}`} onClick={onToggleInspector} title={t("Toggle task details")} aria-label={showInspector ? t("Hide task details") : t("Show task details")} aria-pressed={showInspector}><Icon name="info" /></button><button ref={searchToggleRef} className="round-tool" onClick={(event) => onSearchOpen(event.currentTarget)} title={t("Search downloads")} aria-label={t("Search downloads")} aria-expanded={searchOpen} aria-controls={searchOpen ? "download-search" : undefined}><Icon name="search" /></button></div>
+        <div className="header-tools"><button ref={addButtonRef} className="round-tool" onClick={(event) => onAdd(event.currentTarget)} title={t("Add download")} aria-label={t("Add download")}><Icon name="plus" /></button><button className={`round-tool ${showInspector ? "active" : "muted"}`} onClick={onToggleInspector} title={t("Toggle task details")} aria-label={showInspector ? t("Hide task details") : t("Show task details")} aria-pressed={showInspector}><Icon name="info" /></button><button ref={searchToggleRef} className="round-tool" onClick={(event) => onSearchOpen(event.currentTarget)} title={t("Search downloads")} aria-label={t("Search downloads")} aria-expanded={searchOpen} aria-controls={searchOpen ? "download-search" : undefined}><Icon name="search" /></button></div>
       </header>
       {searchOpen && <div id="download-search" className="search-row"><Icon name="search" size={16} /><input ref={searchInputRef} value={searchQuery} onChange={(event) => onSearchQuery(event.target.value)} placeholder={t("Search downloads")} aria-label={t("Search downloads")} /></div>}
       {(error || notice) && <div className={`message-banner ${error ? "error" : "success"}`}><span>{error ? renderStatus(error, t) : notice && renderMessage(notice.message, t)}</span><div className="message-banner-actions">{error && <button type="button" onClick={onRefresh}>{t("Retry")}</button>}<button type="button" onClick={error ? onDismissError : onDismissNotice} aria-label={t("Dismiss message")}>{t("Dismiss")}</button></div></div>}
       <div className="download-content">
         {visibleTasks.length === 0 ? (
-          <EmptyDownloads onAdd={onAdd} hasFilter={filter !== "all" || Boolean(searchQuery)} />
+          <EmptyDownloads hasFilter={filter !== "all" || Boolean(searchQuery)} />
         ) : (
           <div className={`download-layout ${showInspector ? "with-inspector" : ""}`}>
             <section className="task-list" aria-label={t("Downloads")}>
@@ -1354,9 +1356,9 @@ function TaskInspector({ task, server, className = "" }: { task: TaskItem | null
   return <aside className={`inspector ${className}`} aria-label={t("Task details")}><span className="eyebrow">{t("Task details")}</span><h2>{name}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={t("{name} download progress", { name })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={task.total_bytes === null ? `${taskStateLabel(task.state, t)}; ${t("{bytes} downloaded; total size unknown", { bytes: formatBytes(task.downloaded_bytes) })}` : undefined}><span className={progress === null ? (task.state === "Downloading" ? "indeterminate active" : "indeterminate") : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}{detail ? ` · ${detail}` : ""}</strong></div><dl className="detail-list"><div><dt>{t("Source")}</dt><dd title={task.source}>{task.source}</dd></div><div><dt>{t("Destination")}</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>{t("Server")}</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>{t("Latest error")}</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>{t("Copy error")}</button></div>}</aside>;
 }
 
-function EmptyDownloads({ onAdd, hasFilter }: { onAdd: (trigger?: HTMLElement) => void; hasFilter: boolean }) {
+function EmptyDownloads({ hasFilter }: { hasFilter: boolean }) {
   const t = useTranslation();
-  return <div className="empty-state"><div className="empty-art" aria-hidden="true"><div className="art-block art-one" /><div className="art-block art-two" /><div className="art-block art-three" /><div className="art-block art-four" /></div><h2>{hasFilter ? t("No matching downloads") : t("No downloads yet")}</h2><p>{hasFilter ? t("Try another filter or search term.") : t("Press + to add one")}</p>{!hasFilter && <button className="button" onClick={(event) => onAdd(event.currentTarget)}>{t("Add Download")}</button>}</div>;
+  return <div className="empty-state"><div className="empty-art" aria-hidden="true"><div className="art-block art-one" /><div className="art-block art-two" /><div className="art-block art-three" /><div className="art-block art-four" /></div><h2>{hasFilter ? t("No matching downloads") : t("No downloads yet")}</h2><p>{hasFilter ? t("Try another filter or search term.") : t("Use + in the toolbar or press ⌘N to add a download.")}</p></div>;
 }
 
 function DashboardView({ tasks, connection, mode, onDownloads }: { tasks: TaskItem[]; connection: ConnectionState; mode: ConnectionMode; onDownloads: () => void }) {
@@ -1618,15 +1620,14 @@ function SettingsDetail({ title, icon, onBack, children }: { title: string; icon
   return <div className="settings-page"><button ref={backButton} className="back-button" onClick={onBack}>{t("‹ Settings")}</button><div className="settings-detail-heading"><span className="settings-tile-icon"><Icon name={icon} size={27} /></span><div><span className="eyebrow">{t("Settings")}</span><h1>{title}</h1></div></div>{children}</div>;
 }
 
-function WelcomeFlow({ onDismiss, onFirstDownload }: { onDismiss: () => void; onFirstDownload: () => void }) {
+function WelcomeFlow({ onContinue }: { onContinue: () => void }) {
   const t = useTranslation();
   return (
     <div className="welcome-flow" role="status">
       <span className="welcome-flow-title">{t("Welcome to Nexum")}</span>
       <p>{t("Paste an HTTP or HTTPS link to start your first download.")}</p>
       <div className="welcome-flow-actions">
-        <button className="button primary" onClick={onFirstDownload}>{t("Add your first download")}</button>
-        <button className="button" onClick={onDismiss}>{t("Continue to Downloads")}</button>
+        <button className="button primary" onClick={onContinue}>{t("Continue to Downloads")}</button>
       </div>
     </div>
   );

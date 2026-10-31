@@ -140,12 +140,6 @@ select:focus-visible {
   background: rgba(255, 255, 255, 0.1);
 }
 
-.sidebar-icon-button.add-sidebar-button {
-  color: #fff;
-  background: rgba(155, 124, 255, 0.78);
-  box-shadow: 0 4px 12px rgba(8, 6, 25, 0.28);
-}
-
 .primary-nav {
   display: grid;
   gap: 4px;
@@ -1591,12 +1585,6 @@ input::placeholder {
     border-color: rgba(101, 69, 207, 0.2);
     color: var(--accent-strong);
     background: rgba(101, 69, 207, 0.1);
-  }
-
-  .sidebar-icon-button.add-sidebar-button {
-    color: #fff;
-    background: #6545cf;
-    box-shadow: 0 4px 12px rgba(80, 51, 181, 0.18);
   }
 
   .nav-item { color: #4a5572; }
