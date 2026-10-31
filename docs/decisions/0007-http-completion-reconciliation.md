@@ -37,9 +37,17 @@
 
 ## 实施状态 / Implementation Status
 
-截至 2026-10-15，`f1817f4` 的 `open_core` 在监听前同步执行完整凭证对账，包括待恢复文件的 SHA-256 校验。这恢复了完成状态，但偏离第 4 条“就绪后 Worker 校验”的设计；大文件读取可能超出托管 Server 六秒就绪预算。本次单连接收敛未改变该启动路径；启动预算仍需修复及大文件原生恢复验收，现有小型 fixture 与 CI 不能证明符合该约束。第 4 条的设计要求保持有效，验证记录见[开发指南](../DEVELOPMENT.md#development-workflow-entry)。
+历史基线 `f1817f4` 至 `cf88455` 的 `open_core` 在监听前同步校验待恢复文件的 SHA-256，偏离第 4 条的设计，可能超出托管 Server 六秒就绪预算。2026-10-31 的恢复就绪切片把完整校验移到就绪后的 HTTP Worker：启动只检查有上限的凭证绑定；恢复任务领取 Scheduler 槽位并登记目标，摘要读取与暂停／取消等待不持有 Server 全局锁。对账失败保留具体错误和凭证，不进入普通网络重试；启动已观察到的凭证随后消失，也不能转为普通 GET。已经完成的任务仍只按身份清理残留，不重读下载摘要。
 
-As of 2026-10-15, `open_core` at `f1817f4` performs complete receipt reconciliation synchronously before listening, including SHA-256 validation of files awaiting recovery. This restores completion state but deviates from decision 4, which requires hashing in workers after readiness; reading large files can exceed the managed Server's six-second readiness budget. This change confining downloads to one connection leaves that startup path unchanged. The budget still needs a fix and native large-file recovery acceptance; existing small fixtures and CI do not establish compliance. Decision 4 remains a design requirement. See the [Development Guide](../DEVELOPMENT.md#development-workflow-entry) for verification records.
+In historical baselines `f1817f4` through `cf88455`, `open_core` hashes pending downloads before listening, deviating from decision 4 and potentially exceeding the managed Server's six-second readiness budget. The 2026-10-31 readiness slice moves full verification to HTTP workers after readiness: startup checks only bounded receipt bindings, while recovery claims scheduler slots and reserves destinations. Digest reads and pause/cancel waits do not hold the Server mutex. Reconciliation failures retain concrete errors and receipts without ordinary network retries; a receipt observed at startup cannot fall back to a GET if it subsequently disappears. Already completed tasks still perform identity-checked residual cleanup without rehashing downloads.
+
+Engine 新增兼容入口 `reconcile_pending_completion`：沿用既有凭证格式与校验，要求凭证存在并返回精确完成进度；无论成功、失败或取消，都终结本次 control 并唤醒暂停等待者。原 `reconcile_completion` 保留“无凭证时返回 `None`，允许调用者继续下载”的语义。RPC、任务 Schema 与 v1 凭证均不改变。直接 Engine 测试、可控阻塞验证器的测试专用 managed 子进程，以及真实生产 Server 的 managed／persistence 消费测试分别覆盖控制边界、就绪／RPC 响应与离线恢复；生产二进制没有故障注入环境开关。
+
+The Engine adds the compatible `reconcile_pending_completion` entry: it reuses receipt format and validation, requires an existing receipt and returns exact final progress, and finishes its control on success, failure or cancellation so pause waiters wake. Existing `reconcile_completion` keeps its optional `None` result, allowing callers without receipts to continue a download. RPC, task schema and v1 receipts remain unchanged. Direct Engine tests, a test-only managed subprocess with a controllably blocked verifier, and production Server managed/persistence consumer tests separately cover controls, readiness/RPC responsiveness and offline recovery. The production binary has no fault-injection environment switch.
+
+此切片的最终交付仍要求当前 SHA 的完整门槛、独立审查及合并前后 CI；大文件原生 App 恢复和 Windows 行为仍需分别验收。后端进程测试不代表 M0/M1 原生验收完成，验证记录见[开发指南](../DEVELOPMENT.md#development-workflow-entry)。
+
+Final delivery of this slice still requires complete gates, independent review and pre/post-merge CI at the current SHA. Native-App large-file recovery and Windows behavior need their own acceptance. Backend process tests do not complete native M0/M1 acceptance; see the [Development Guide](../DEVELOPMENT.md#development-workflow-entry) for records.
 
 ### 分段入口应用（实施方案） / Applying the protocol to segments (implementation design)
 
