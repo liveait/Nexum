@@ -3,6 +3,14 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { verifyIconContainer } from "./verify-icon-container.mjs";
+
+// Validate the Windows container alongside every Desktop packaging gate. A
+// macOS-only build does not otherwise decode the ICO resource directory.
+verifyIconContainer(
+  new URL("../apps/desktop/src-tauri/icons/icon.ico", import.meta.url),
+  new URL("../apps/desktop/src-tauri/icons/icon.png", import.meta.url),
+);
 
 const app = resolve(process.argv[2] || "target/release/bundle/macos/Nexum.app");
 const resources = join(app, "Contents", "Resources");
