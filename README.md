@@ -1,20 +1,29 @@
 <p align="center">
-  <img src="apps/desktop/src-tauri/icons/icon.png" alt="Nexum" width="112" height="112">
+  <img src="apps/desktop/src-tauri/icons/icon.png" alt="Nexum" width="88" height="88">
 </p>
 
-# Nexum
+<a id="nexum"></a>
+<h1 align="center">Nexum</h1>
 
-macOS 优先的 Rust 下载器，提供原生 Desktop 和 CLI，用于管理 HTTP / HTTPS 下载任务。
+<p align="center">
+  macOS 优先的 Rust 下载器，提供原生 Desktop 与 CLI。<br>
+  A macOS-first Rust downloader with a native Desktop app and CLI.
+</p>
 
-A macOS-first downloader built in Rust, with a native Desktop app and CLI for managing HTTP / HTTPS downloads.
+<p align="center">
+  <a href="https://github.com/liveait/Nexum/actions/workflows/ci.yml"><img src="https://github.com/liveait/Nexum/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+</p>
 
-[![CI](https://github.com/liveait/Nexum/actions/workflows/ci.yml/badge.svg)](https://github.com/liveait/Nexum/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <a href="#current-status">当前状态 / Status</a> · <a href="#run-the-local-task-flow">快速开始 / Quick start</a> · <a href="#documentation-and-contribution">文档 / Docs</a>
+</p>
 
 <a id="current-status"></a>
 <a id="当前状态"></a>
+<a id="当前状态--current-status"></a>
 
-## 当前状态 / Current status
+## 当前状态 / Status
 
 首个 macOS 版本仍在验收，尚无正式安装包。原生可访问性、全新用户／升级，以及分发签名、公证和安装验收仍待完成。
 
@@ -33,8 +42,9 @@ M4 multi-connection, FTP / FTPS and BT / magnet downloads remain unavailable. Se
 
 <a id="run-the-local-task-flow"></a>
 <a id="运行本地任务流程"></a>
+<a id="运行本地任务流程--run-the-local-task-flow"></a>
 
-## 运行本地任务流程 / Run the local task flow
+## 快速开始 / Quick start
 
 需要 Rust stable / Cargo、Node.js（CI 使用 22）、pnpm 11.25.0 及 Tauri 2 平台依赖，详见[环境准备](docs/DEVELOPMENT.md#environment)。以下命令从仓库根目录开始。
 
@@ -78,8 +88,9 @@ The standalone Server defaults to `127.0.0.1:39100` with authentication disabled
 
 <a id="documentation-and-contribution"></a>
 <a id="文档与贡献"></a>
+<a id="文档与贡献--documentation-and-contribution"></a>
 
-## 文档与贡献 / Documentation and contribution
+## 文档 / Docs
 
 - [开发指南 / Development Guide](docs/DEVELOPMENT.md)
 - [架构设计 / Architecture](docs/ARCHITECTURE.md)
