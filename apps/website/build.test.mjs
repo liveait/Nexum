@@ -42,7 +42,9 @@ test("builds both languages and all local resources under the project prefix", a
     await cp(new URL("assets/", import.meta.url), join(site, "assets"), { recursive: true });
     await mkdir(join(root, "apps/desktop/src-tauri/icons"), { recursive: true });
     const canonical = new URL("../desktop/src-tauri/icons/icon.png", import.meta.url);
-    await cp(canonical, join(root, "apps/desktop/src-tauri/icons/icon.png"));
+    for (const name of ["icon.png", "apple-touch-icon.png"]) {
+      await cp(new URL(`../desktop/src-tauri/icons/${name}`, import.meta.url), join(root, "apps/desktop/src-tauri/icons", name));
+    }
     execFileSync(process.execPath, [join(site, "build.mjs")], {
       env: { ...process.env, SITE_BASE_PATH: "/Nexum", GITHUB_ACTIONS: "", GITHUB_REF: "", GITHUB_EVENT_NAME: "" },
     });
