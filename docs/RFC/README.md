@@ -10,6 +10,7 @@ RFCs (Request for Comments) document major design changes that require public di
 ## 记录 / Records
 
 - [0001：分段下载完成协议 / Segment completion protocol](0001-segment-completion-protocol.md)
+- [0002：分段文件发布与清理的身份边界（提案） / Identity boundaries for segment publication and cleanup (proposed)](0002-segment-file-ownership.md)
 
 <a id="scope"></a>
 <a id="适用范围"></a>

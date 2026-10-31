@@ -99,10 +99,21 @@ select:focus-visible {
 }
 
 .sidebar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: #fff;
   font-size: 15px;
   font-weight: 800;
   letter-spacing: 0.15em;
+}
+
+.sidebar-brand img {
+  display: block;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  object-fit: contain;
 }
 
 .sidebar-top-actions {
@@ -129,8 +140,7 @@ select:focus-visible {
   border-radius: 8px;
 }
 
-.sidebar-icon-button svg,
-.floating-add svg {
+.sidebar-icon-button svg {
   display: block;
 }
 
@@ -139,12 +149,6 @@ select:focus-visible {
   border-color: rgba(255, 255, 255, 0.16);
   color: #fff;
   background: rgba(255, 255, 255, 0.1);
-}
-
-.sidebar-icon-button.add-sidebar-button {
-  color: #fff;
-  background: rgba(155, 124, 255, 0.78);
-  box-shadow: 0 4px 12px rgba(8, 6, 25, 0.28);
 }
 
 .primary-nav {
@@ -417,18 +421,6 @@ input::placeholder {
 .button.primary:hover:not(:disabled) {
   border-color: rgba(220, 207, 255, 0.62);
   background: linear-gradient(135deg, #9878fa, #6980e7);
-}
-
-.dashboard-add {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.dashboard-add svg {
-  display: block;
-  flex: none;
 }
 
 .danger-text {
@@ -829,27 +821,6 @@ input::placeholder {
 .art-two { width: 74px; height: 56px; right: 5px; top: 18px; transform: skewY(16deg); background: linear-gradient(145deg, rgba(173, 119, 248, 0.85), rgba(77, 89, 203, 0.8)); }
 .art-three { width: 67px; height: 44px; left: 38px; top: 5px; transform: skewY(-4deg); background: linear-gradient(145deg, rgba(120, 197, 255, 0.78), rgba(113, 114, 230, 0.82)); }
 .art-four { width: 55px; height: 37px; left: 45px; bottom: 1px; transform: skewY(9deg); background: linear-gradient(145deg, rgba(100, 102, 221, 0.86), rgba(64, 74, 164, 0.84)); }
-
-.floating-add {
-  position: absolute;
-  right: 30px;
-  bottom: 55px;
-  display: grid;
-  width: 48px;
-  height: 48px;
-  place-items: center;
-  border: 1px solid rgba(211, 195, 255, 0.4);
-  border-radius: 15px;
-  color: #fff;
-  background: linear-gradient(135deg, #8968f0, #587cd9);
-  box-shadow: 0 10px 25px rgba(42, 35, 108, 0.46);
-  transition: transform 140ms ease, box-shadow 140ms ease;
-}
-
-.floating-add:hover {
-  box-shadow: 0 13px 30px rgba(42, 35, 108, 0.6);
-  transform: translateY(-2px);
-}
 
 /* Footer */
 
@@ -1567,7 +1538,6 @@ input::placeholder {
   .button,
   .task-row,
   .progress-track > span,
-  .floating-add,
   .settings-card-tile {
     transition: none;
   }
@@ -1579,7 +1549,6 @@ input::placeholder {
   .button:hover:not(:disabled),
   .task-row:hover,
   .task-row.selected,
-  .floating-add:hover,
   .settings-card-tile:hover {
     transform: none;
   }
@@ -1627,12 +1596,6 @@ input::placeholder {
     border-color: rgba(101, 69, 207, 0.2);
     color: var(--accent-strong);
     background: rgba(101, 69, 207, 0.1);
-  }
-
-  .sidebar-icon-button.add-sidebar-button {
-    color: #fff;
-    background: #6545cf;
-    box-shadow: 0 4px 12px rgba(80, 51, 181, 0.18);
   }
 
   .nav-item { color: #4a5572; }

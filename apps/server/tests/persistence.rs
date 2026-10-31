@@ -1630,6 +1630,132 @@ fn completion_malformed_receipt_reports_failure_and_preserves_download() {
 }
 
 #[test]
+fn completion_recovery_save_failure_keeps_proof_and_does_not_retry_network() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let id = "recovery-save-failure";
+    let fixture = CompletionFixture::published(&dir, id, b"verified completed recovery bytes");
+    fixture.seed_task(&dir, id, TaskState::Downloading);
+    let mut repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+    let mut stored = repository.get(&TaskId::from(id)).unwrap().unwrap();
+    stored.progress = Progress::new(3, None);
+    repository.update(stored).unwrap();
+    drop(repository);
+    let database = rusqlite::Connection::open(dir.path().join("nexum.sqlite")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER reject_recovery_completion BEFORE UPDATE ON tasks
+         WHEN NEW.state = 'completed' BEGIN SELECT RAISE(FAIL, 'recovery save refused'); END;",
+        )
+        .unwrap();
+    let mut server = ServerProcess::start(dir.path());
+    server.wait_for_state(id, "Failed");
+    let task = server.call("task.get", Some(json!({"id": id})));
+    // Core claims intentionally reset the working snapshot. A rejected final
+    // commit must retain that claim snapshot, rather than publish final bytes
+    // independently of Completed.
+    assert_eq!(task["downloaded_bytes"], 0);
+    assert_eq!(task["total_bytes"], Value::Null);
+    assert!(
+        task["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not finalize HTTP transfer")
+    );
+    assert!(
+        server.request("task.start", None)["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no queued task")
+    );
+    assert!(completion_receipt_path(&fixture.context).exists());
+    assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+    server.stop();
+    let repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+    let failed = repository.get(&TaskId::from(id)).unwrap().unwrap();
+    assert_eq!(failed.state, TaskState::Failed);
+    assert_eq!(failed.progress, Progress::default());
+    drop(repository);
+    database
+        .execute_batch("DROP TRIGGER reject_recovery_completion")
+        .unwrap();
+    drop(database);
+    let mut restarted = ServerProcess::start(dir.path());
+    restarted.wait_for_state(id, "Completed");
+    restarted.stop();
+    let stored = SqliteRepository::open(dir.path().join("nexum.sqlite"))
+        .unwrap()
+        .get(&TaskId::from(id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, TaskState::Completed);
+    assert_eq!(stored.progress, fixture.progress);
+    assert!(!completion_receipt_path(&fixture.context).exists());
+}
+
+#[test]
+fn a_recovered_completion_can_be_explicitly_queued_for_another_download() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let body = large_http_body();
+    let origin = RangeAdvertisingHttpFixture::new(body.clone());
+    let id = "download-again-after-recovery";
+    let destination = fs::canonicalize(dir.output_path(id).parent().unwrap())
+        .unwrap()
+        .join(id);
+    let partial = destination.with_file_name(format!(".{id}.nexum.part"));
+    let context = CompletionContext::new(id, dir.path());
+    let progress = HttpEngine::new()
+        .download_to_resumable_with_completion(
+            &origin.source,
+            destination.to_str().unwrap(),
+            &partial,
+            &context,
+            &HttpTransferControl::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    let mut task = DownloadTask::new(
+        id,
+        DownloadSource::new(&origin.source),
+        Destination::new(destination.to_string_lossy()),
+    );
+    task.state = TaskState::Downloading;
+    task.progress = progress.clone();
+    SqliteRepository::open(dir.path().join("nexum.sqlite"))
+        .unwrap()
+        .insert(task.into())
+        .unwrap();
+    let mut server = ServerProcess::start(dir.path());
+    server.wait_for_state(id, "Completed");
+    assert!(!completion_receipt_path(&context).exists());
+    fs::remove_file(&destination).unwrap();
+    server.call("task.queue", Some(json!({"id": id})));
+    server.wait_for_state(id, "Completed");
+    assert_eq!(fs::read(&destination).unwrap(), body);
+    server.stop();
+    let requests = origin.finish();
+    assert_eq!(
+        requests.len(),
+        2,
+        "recovery must use no GET; explicit restart must use one GET"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.to_ascii_lowercase().contains("range:"))
+    );
+    let stored = SqliteRepository::open(dir.path().join("nexum.sqlite"))
+        .unwrap()
+        .get(&TaskId::from(id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, TaskState::Completed);
+    assert_eq!(stored.progress.downloaded_bytes, progress.downloaded_bytes);
+    assert_eq!(stored.progress.total_bytes, progress.total_bytes);
+}
+
+#[test]
 fn completion_startup_cleans_durable_completed_hardlink_residue() {
     let _test_guard = server_test_guard();
     let dir = TestDir::new();

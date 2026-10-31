@@ -801,3 +801,72 @@ fn managed_eof_and_recovery_never_replace_an_existing_destination() {
     restarted.eof();
     assert!(restarted.exit(Duration::from_secs(2)).success());
 }
+
+#[test]
+fn managed_ready_recovers_a_real_completion_receipt_without_the_origin() {
+    use nexum_core::nexum_domain::{Destination, DownloadSource, TaskId};
+    use nexum_core::nexum_engine::{
+        CompletionContext, HttpEngine, HttpTransferControl, completion_receipt_path,
+    };
+    use nexum_core::nexum_storage::{SqliteRepository, TaskRepository};
+    use nexum_core::nexum_task::{DownloadTask, TaskState};
+
+    let dir = TestDir::new();
+    fs::create_dir(&dir.data).unwrap();
+    let root = fs::canonicalize(&dir.root).unwrap();
+    let destination = root.join("completion.bin");
+    let partial = root.join(".completion.bin.nexum.part");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let source = format!("http://{}/complete", listener.local_addr().unwrap());
+    let origin = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_headers(&mut stream).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nmanaged completed bytes")
+            .unwrap();
+    });
+    let context = CompletionContext::new("completion", &dir.data);
+    let progress = HttpEngine::new()
+        .download_to_resumable_with_completion(
+            &source,
+            destination.to_str().unwrap(),
+            &partial,
+            &context,
+            &HttpTransferControl::new(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    origin.join().unwrap();
+    // The fixture is gone before the actual production server executable starts.
+    // Reconstruct the complete-staging boundary and require offline publication.
+    fs::rename(&destination, &partial).unwrap();
+    let mut task = DownloadTask::new(
+        "completion",
+        DownloadSource::new(source),
+        Destination::new(destination.to_string_lossy()),
+    );
+    task.state = TaskState::Failed;
+    task.progress = progress.clone();
+    SqliteRepository::open(dir.data.join("nexum.sqlite"))
+        .unwrap()
+        .insert(task.into())
+        .unwrap();
+    let mut server = ManagedChild::start(&dir.data);
+    server.wait_task("completion", "Completed");
+    let task = server.call("task.get", Some(json!({"id": "completion"})));
+    assert_eq!(task["downloaded_bytes"], progress.downloaded_bytes);
+    assert_eq!(task["total_bytes"], Value::Null);
+    assert_eq!(task["error"], Value::Null);
+    assert_eq!(fs::read(&destination).unwrap(), b"managed completed bytes");
+    assert!(!completion_receipt_path(&context).exists());
+    assert!(!partial.exists());
+    server.eof();
+    assert!(server.exit(Duration::from_secs(2)).success());
+    let stored = SqliteRepository::open(dir.data.join("nexum.sqlite"))
+        .unwrap()
+        .get(&TaskId::from("completion"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state, TaskState::Completed);
+    assert_eq!(stored.progress, progress);
+}
