@@ -39,13 +39,13 @@ See the [GitHub Pages quickstart](https://docs.github.com/en/pages/quickstart) a
 
 ## 现有品牌图标 / Existing brand icon
 
-页头、页尾、favicon 和 Apple touch icon 共用 `apps/desktop/src-tauri/icons/icon.png`，与原生 App 的既定蓝紫 N 图标一致。构建复制到产物，不新增平行图标源，也不使用临时箭头标记。
+页头和页尾使用透明底 `apps/desktop/src-tauri/icons/brand-mark.png`；favicon 使用已选石墨灰底应用图标 `icon.png`，Apple touch 使用同目录独立生成的 180px `apple-touch-icon.png`。两种用途保留同一 N 识别，源图、生成命令和哈希见[品牌资源](../../docs/BRANDING.md)。
 
-Header, footer, favicon and Apple touch icon reuse the established blue/purple N at `apps/desktop/src-tauri/icons/icon.png`. The build copies it into output without introducing another source asset or a temporary arrow mark.
+Header/footer use the transparent `brand-mark.png`; favicon uses the selected graphite App tile `icon.png`, while Apple touch uses its separately generated 180px derivative. Both variants retain the N identity. See [Branding](../../docs/BRANDING.md) for sources, generation and hashes.
 
-官网界面图 `assets/downloads-native.png` 是隔离的 Nexum Preview 原生 release 候选截图，源码为 `cf54b8c1417b8810dd9bff6d15fed979860d14fa`（与 Desktop PR #69 的 `772a302` 源码树相同）。截图原字节保留，展示当前 N 侧栏和唯一的顶部新增入口；不沿用旧版重复入口的界面，也不代表最终签名分发产物。
+官网界面图 `assets/downloads-native.png` 是隔离的 Nexum Brand QA 原生 release 候选截图，源码为 `9965cd25c94fde23d3dfb775b67c4be6f63130a0`（Desktop 源码与 PR #69 的 `df2042d` 相同）。截图原字节保留，展示 24px 透明 N 侧栏和唯一的顶部新增入口；不代表最终签名分发产物。
 
-The website image `assets/downloads-native.png` is an unaltered capture of the isolated Nexum Preview native release candidate at `cf54b8c1417b8810dd9bff6d15fed979860d14fa` (the same source tree as Desktop PR #69 at `772a302`). It shows the current N sidebar and single toolbar Add entry. It is not the final signed distribution artifact.
+The website image `assets/downloads-native.png` is an unaltered capture of the isolated Nexum Brand QA native release candidate at `9965cd25c94fde23d3dfb775b67c4be6f63130a0` (the same Desktop source as PR #69 at `df2042d`). It shows the 24px transparent N sidebar and single toolbar Add entry. It is not the final signed distribution artifact.
 
 ## 发布元数据 / Release metadata
 
