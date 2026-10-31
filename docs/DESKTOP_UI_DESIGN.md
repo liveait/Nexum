@@ -130,9 +130,9 @@ Downloads 页头提供过滤器和紧凑控制：
 
 The Downloads header has a filter selector and compact controls:
 
-- **添加**：从侧边栏或悬浮按钮打开 Add Download Sheet。
+- **添加**：侧边栏“＋”是固定入口，`⌘N` 提供键盘入口；真正的空列表另显示引导按钮。下载列表和概览不再显示重复的悬浮／页头按钮，筛选无结果只提示调整筛选。
 
-  **Add**: opens the Add Download sheet from the sidebar or floating action button.
+  **Add**: the sidebar plus is the persistent entry and `⌘N` is the keyboard entry; a genuinely empty list also offers an onboarding button. Downloads and Overview have no duplicate floating/header buttons, and an empty filtered result only suggests adjusting filters.
 - **过滤**：选择全部、活动、排队、已完成或失败任务。
 
   **Filter**: selects All, Active, Queued, Completed, or Failed downloads.
