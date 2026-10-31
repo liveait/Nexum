@@ -187,12 +187,12 @@ The order expresses dependencies and priority, not dates. M0–M3 form the first
 5. **已交付：完成凭证与取消／发布协调（PR #66，基线 `f518b43`）。** 按 [RFC 0001](RFC/0001-segment-completion-protocol.md) 添加兼容的带凭证入口，保留旧入口；所有 Worker 退出后准备身份／摘要凭证，在同一控制锁中协调取消与不覆盖发布。凭证后的普通失败保留恢复证据；取消清理成功才返回 `Cancelled`，清理失败明确返回 `Failed` 并保留取消状态，由调用者显式处理残留凭证；分段始终不认领无关 sidecar。控制原子性不代表文件系统路径竞态已解决，Server 多连接仍禁用。
 
    **Delivered: receipts and cancellation/publication coordination (PR #66, baseline `f518b43`).** Follow RFC 0001 for a compatible receipt-aware entry while retaining the old API. Prepare identity/digest proofs after worker exit; coordinate cancellation and no-clobber publication under one control lock. Ordinary errors after receipt publication retain recovery evidence. Return `Cancelled` only after successful cancellation cleanup; on cleanup failure, return `Failed` while retaining cancelled state, requiring the caller to handle residual proof explicitly. Never claim unowned sidecars. Atomic control does not solve filesystem path races; Server segmentation stays disabled.
-6. **恢复多连接前的门槛。** 校验完整无重叠的段集合及响应范围/validator，使用持有的可信 staging 文件，保证所有 worker 的暂停与失败退出、实际字节计数、完成凭证和原子取消/发布；直接测试分段 API 和 Server 消费路径，再接通有界、安全的单连接回退。
+6. **后续安全执行与回退。** 先封闭文件发布／清理的身份竞态，再加入有界、安全的单连接回退；保留已经交付的段集合／响应校验、持有句柄、Worker 屏障、字节计数及完成协议。两项均须直接验证，再进入段恢复实现。
 
-   **Gate before re-enabling multiple connections.** Validate complete, nonoverlapping segment coverage and response ranges/validators; retain a trusted staging handle. Verify all-worker pause and failure termination, actual byte counts, completion receipts, and atomic cancellation/publication. Test both the segment API and Server consumer before wiring bounded, safe single-connection fallback.
-7. **段级恢复。** 在前项稳定后设计并实现持久段状态、身份/摘要校验及跨重启段复用；验收前中断的多连接任务不得宣称可按段续传。
+   **Remaining safe execution and fallback.** Close publication/cleanup identity races first, then add bounded, safe single-connection fallback. Preserve delivered segment/response validation, held handles, worker barriers, byte counts and completion protocol. Directly validate both packages before implementing segment recovery.
+7. **段级恢复与最终启用。** 在前项稳定后设计并实现持久段状态、身份／摘要校验及跨重启段复用；验收前中断的多连接任务不得宣称可按段续传。随后通过显式策略接入真实 Server 消费路径，完成 CLI／原生 App 控制、回退与恢复验收，再默认启用多连接。
 
-   **Segment recovery.** Once the previous slice is stable, design and implement durable segment state, identity/digest checks, and cross-restart segment reuse. Do not claim per-segment restart recovery before acceptance.
+   **Segment recovery and final enablement.** Once the previous slice is stable, design and implement durable segment state, identity/digest checks, and cross-restart segment reuse. Do not claim per-segment restart recovery before acceptance. Then wire the real Server consumer through an explicit policy and validate CLI/native App controls, fallback and recovery before enabling multiple connections by default.
 
 **安全入口切片本地验证（2026-10-15，macOS）**：新增 3 项大文件 Server 回归在旧产品代码 `f1817f4` 上全部失败，修复后全部通过；验证单次普通 GET、精确文件内容及最终进度、完成保存失败后的离线对账和已有目标保护。`cargo fmt --all -- --check`、`cargo check --locked --workspace --all-targets`、`cargo test --locked --workspace -- --test-threads=1`、`cargo clippy --locked --workspace --all-targets -- -D warnings` 全部通过；workspace 共 326 项，含 Server unit 29、managed 10、persistence 54。此记录不包含原生 App 验收；独立审查和 CI 以对应 PR 的最终 SHA 为准。
 
