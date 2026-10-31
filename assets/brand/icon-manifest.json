@@ -1,0 +1,32 @@
+{
+  "source": "assets/brand/icon-graphite-v1.png",
+  "source_sha256": "6dd6608d8b9bd67fbca249470e235dcee1b495344e69f8828508f12300f07e4f",
+  "source_dimensions": [
+    1254,
+    1254
+  ],
+  "tauri_cli": "tauri-cli 2.11.5",
+  "generation_command": "node scripts/generate-brand-icons.mjs",
+  "canonical_png_size": 128,
+  "icns_record_order": "type identifiers sorted; generated record payloads unchanged",
+  "ico_sizes": [
+    32,
+    16,
+    24,
+    48,
+    64,
+    256,
+    128
+  ],
+  "outputs": {
+    "apps/desktop/src-tauri/icons/apple-touch-icon.png": "5b33083cbadc10807f52ea1bfaabc124f8dd8d1fc8eaf06ffdce14a18ad64faa",
+    "apps/desktop/src-tauri/icons/icon-1024.png": "f0ff2ffa09fae7e834d7356f9ea1049b9b0a9b5d519ce1dfed9bdc7e811aff82",
+    "apps/desktop/src-tauri/icons/icon.icns": "3bfcc0b57b729fa13935b3c1816c36e73c96de5a11097828f58950980f8eef08",
+    "apps/desktop/src-tauri/icons/icon.ico": "4dfac00520fa9e57613af74f383832ab9445d7023f1527213a92739c3d6f022e",
+    "apps/desktop/src-tauri/icons/icon.png": "f33afb54aa0984f55df8b76cd5b65950671984fef021f8d605fe399a410ef5a0",
+    "apps/extension/icons/nexum-128.png": "f33afb54aa0984f55df8b76cd5b65950671984fef021f8d605fe399a410ef5a0",
+    "apps/extension/icons/nexum-16.png": "564eba8cd8c35168d144b19f6b0c0280f77a9bb596447917f0c2525bf237e17c",
+    "apps/extension/icons/nexum-32.png": "26951537d79e60d8f04e8f567d61440e431404fc08e960f18a6cc220b5691232",
+    "apps/extension/icons/nexum-48.png": "af4910dfae010d44565787dfa5639e94e6845b5cf521bb23f51fadd4b7c0c9f0"
+  }
+}
