@@ -88,6 +88,39 @@ impl SegmentGroup {
         ))
     }
 
+    /// Transfer the sole live coordinator to single-thread completion control.
+    /// Clear group state before dropping its participant, avoiding a vacuous
+    /// all-inactive acknowledgement followed by a revoked paused flag.
+    pub(super) fn handoff(self, mut coordinator: Participant) -> Result<(), EngineError> {
+        let (lock, _) = &*self.control.inner;
+        loop {
+            coordinator.checkpoint()?;
+            let mut state = lock.lock().expect("HTTP transfer control mutex poisoned");
+            if state.cancelled {
+                return Err(EngineError::Cancelled);
+            }
+            if state.pause_requested {
+                drop(state);
+                continue;
+            }
+            let group = state.segments.as_ref().expect("registered segment group");
+            if group
+                .slots
+                .iter()
+                .enumerate()
+                .any(|(index, slot)| slot.active && index != coordinator.index)
+            {
+                return Err(EngineError::Failed(
+                    "cannot hand off completion while a segment worker is active".into(),
+                ));
+            }
+            state.segments = None;
+            drop(state);
+            drop(coordinator);
+            return Ok(());
+        }
+    }
+
     pub(super) fn fail(&self, error: EngineError) {
         fail(&self.control, error);
     }
@@ -566,5 +599,73 @@ mod tests {
         assert!(!control.is_paused());
         drop(coordinator);
         drop(group);
+    }
+    #[test]
+    fn handoff_keeps_acknowledged_pause_and_next_pause_waits_for_the_completion_owner() {
+        let control = HttpTransferControl::new();
+        let rescue = control.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let watchdog = thread::spawn(move || {
+            if done_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                rescue.cancel();
+            }
+        });
+        let (group, mut slots) = SegmentGroup::begin(&control, 1).unwrap();
+        let coordinator = slots.remove(0);
+        {
+            let (lock, _) = &*control.inner;
+            lock.lock().unwrap().pause_requested = true;
+        }
+        let child = control.clone();
+        let (handed_tx, handed_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let owner = thread::spawn(move || {
+            let result = (|| {
+                group.handoff(coordinator)?;
+                handed_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                child.wait_if_paused()
+            })();
+            result_tx.send(result).unwrap();
+        });
+        control.request_pause().unwrap();
+        assert!(control.is_paused());
+        assert!(
+            handed_rx.try_recv().is_err(),
+            "handoff cannot revoke an acknowledged pause"
+        );
+        control.resume().unwrap();
+        handed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(control.with_state(|state| state.segments.is_none()));
+        let pause = control.clone();
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let requester = thread::spawn(move || {
+            let _ = paused_tx.send(pause.request_pause());
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !control.is_pause_requested() {
+            assert!(Instant::now() < deadline);
+            thread::yield_now();
+        }
+        assert!(
+            paused_rx.try_recv().is_err(),
+            "no stale group acknowledgement may satisfy the next pause"
+        );
+        release_tx.send(()).unwrap();
+        paused_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        assert!(control.is_paused());
+        control.cancel();
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(EngineError::Cancelled)
+        );
+        requester.join().unwrap();
+        owner.join().unwrap();
+        done_tx.send(()).unwrap();
+        watchdog.join().unwrap();
     }
 }

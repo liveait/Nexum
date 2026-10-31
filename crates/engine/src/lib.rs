@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 mod completion;
 mod file_identity;
+#[cfg(test)]
+mod segment_completion_tests;
 mod segment_control;
 mod segment_staging;
 pub use completion::{
@@ -1227,18 +1229,35 @@ impl HttpTransferControl {
         Ok(())
     }
 
-    /// Marks a transfer whose bytes the caller has already committed outside the
-    /// temporary-file helpers (the multi-connection path assembles a complete
-    /// file and publishes it directly). A late pause or cancel request resolves
-    /// as completed rather than cancelling a finished transfer.
-    fn finish_committed(&self) {
+    /// Serialize the final pause/cancel decision with no-clobber publication.
+    /// The callback marks `committed` immediately after its filesystem commit,
+    /// so a later validation/sync error preserves that fact and cannot become
+    /// cancellation. The lock is held until post-publication work is complete.
+    fn finish_publication(
+        &self,
+        publish: impl FnOnce(&mut bool) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
         let (lock, wake) = &*self.inner;
-        let mut state = lock.lock().expect("HTTP transfer control mutex poisoned");
-        state.committed = true;
-        state.finished = true;
-        state.pause_requested = false;
-        state.paused = false;
-        wake.notify_all();
+        loop {
+            self.wait_if_paused()?;
+            let mut state = lock.lock().expect("HTTP transfer control mutex poisoned");
+            if state.cancelled {
+                return Err(EngineError::Cancelled);
+            }
+            // A request can arrive between wait_if_paused and locking.
+            if state.pause_requested {
+                drop(state);
+                continue;
+            }
+            let result = publish(&mut state.committed);
+            if state.committed {
+                state.finished = true;
+                state.pause_requested = false;
+                state.paused = false;
+                wake.notify_all();
+            }
+            return result;
+        }
     }
 }
 
@@ -1949,6 +1968,68 @@ async fn pump_segment(
     Ok(downloaded)
 }
 
+fn finish_segment_prepared(
+    staging: &segment_staging::SegmentStaging,
+    context: &CompletionContext,
+    prepared: Result<completion::CompletionReceipt, completion::SegmentPreparationError>,
+    control: &HttpTransferControl,
+) -> Result<(), EngineError> {
+    let receipt = match prepared {
+        Ok(receipt) => receipt,
+        Err(failure) => {
+            return Err(finish_segment_error(
+                staging,
+                context,
+                failure.receipt.as_deref(),
+                failure.error,
+                control,
+            ));
+        }
+    };
+    completion::publish_completion(&receipt, control)
+        .map_err(|error| finish_segment_error(staging, context, Some(&receipt), error, control))
+}
+
+fn finish_segment_error(
+    staging: &segment_staging::SegmentStaging,
+    context: &CompletionContext,
+    receipt: Option<&completion::CompletionReceipt>,
+    error: EngineError,
+    control: &HttpTransferControl,
+) -> EngineError {
+    if control.is_committed() {
+        return error;
+    }
+    if control.is_cancelled() || matches!(error, EngineError::Cancelled) {
+        if let Some(receipt) = receipt
+            && let Err(cleanup) = completion::validate_segment_completion(context, receipt)
+        {
+            return EngineError::Failed(format!(
+                "cancellation cleanup incomplete: could not verify completion receipt: {cleanup}; original error: {error}"
+            ));
+        }
+        if let Err(cleanup) = staging.cleanup_cancelled() {
+            return EngineError::Failed(format!(
+                "cancellation cleanup incomplete: {cleanup}; original error: {error}"
+            ));
+        }
+        if let Some(receipt) = receipt
+            && let Err(cleanup) = completion::clear_segment_completion(context, receipt)
+        {
+            return EngineError::Failed(format!(
+                "cancellation cleanup incomplete: could not clear completion receipt: {cleanup}; original error: {error}"
+            ));
+        }
+        return EngineError::Cancelled;
+    }
+    if receipt.is_some() {
+        // A complete proof exists, even if its final directory sync failed.
+        // Preserve both proof and bytes for offline reconciliation.
+        return error;
+    }
+    staging.cleanup_after_error(error)
+}
+
 impl Default for HttpEngine {
     fn default() -> Self {
         Self {
@@ -2277,8 +2358,9 @@ impl HttpEngine {
     /// cooperative header/body/pacing waits observe cancellation or the first
     /// failure, and every worker is joined before cleanup/completion. Blocking
     /// filesystem calls and user callbacks must return themselves. Identity
-    /// checks and path-based publish/unlink, and cancellation/publication, are
-    /// not atomic; this prototype is not routed from the Server.
+    /// checks and path-based publish/unlink are not atomic. Cancellation and
+    /// publication are serialized by the control lock; Server routing is disabled.
+    /// Use one control per attempt; never reuse it for concurrent/later attempts.
     #[allow(clippy::too_many_arguments)]
     pub fn download_to_segments<F>(
         &self,
@@ -2289,6 +2371,79 @@ impl HttpEngine {
         total: u64,
         validator: Option<&HttpResumeValidator>,
         control: &HttpTransferControl,
+        on_progress: F,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        let result = self.download_segments_inner(
+            source,
+            segments,
+            destination,
+            partial_path.as_ref(),
+            total,
+            validator,
+            None,
+            control,
+            on_progress,
+        );
+        control.mark_finished();
+        result
+    }
+
+    /// The disabled segment prototype with ADR 0007 completion receipts.
+    /// Receipt-proven files reconcile offline before any request or staging
+    /// creation, without requiring a fresh segment/validator plan. With no
+    /// receipt, normal segment and strong-ETag validation precedes all requests.
+    /// On success callers retain the receipt until final progress and
+    /// Completed persist atomically, then call cleanup_completion_partial and
+    /// clear_completion. Segment receipts never own resumable JSON sidecars.
+    /// Callers serialize attempts for each CompletionContext. A cancellation
+    /// cleanup failure returns Failed with "cancellation cleanup incomplete",
+    /// retaining evidence for explicit cleanup; the control stays cancelled.
+    /// Use one control per attempt; never reuse it for concurrent/later attempts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn download_to_segments_with_completion<F>(
+        &self,
+        source: &str,
+        segments: &[Segment],
+        destination: &str,
+        partial_path: impl AsRef<Path>,
+        total: u64,
+        validator: Option<&HttpResumeValidator>,
+        completion: &CompletionContext,
+        control: &HttpTransferControl,
+        on_progress: F,
+    ) -> Result<Progress, EngineError>
+    where
+        F: FnMut(Progress) -> Result<(), EngineError>,
+    {
+        let result = self.download_segments_inner(
+            source,
+            segments,
+            destination,
+            partial_path.as_ref(),
+            total,
+            validator,
+            Some(completion),
+            control,
+            on_progress,
+        );
+        control.mark_finished();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn download_segments_inner<F>(
+        &self,
+        source: &str,
+        segments: &[Segment],
+        destination: &str,
+        partial: &Path,
+        total: u64,
+        validator: Option<&HttpResumeValidator>,
+        completion: Option<&CompletionContext>,
+        control: &HttpTransferControl,
         mut on_progress: F,
     ) -> Result<Progress, EngineError>
     where
@@ -2296,12 +2451,24 @@ impl HttpEngine {
     {
         use std::sync::mpsc;
 
-        // Invalid caller input must not send requests, create directories, or
-        // truncate an existing staging file.
+        // Receipt recovery needs no fresh segment/validator plan. If there is
+        // no proof, reject invalid fresh-transfer input before any request or
+        // staging creation/truncation, preserving the legacy entry's order.
+        if let Some(context) = completion {
+            control.check_cancelled()?;
+            let reconciled = reconcile_completion(context, source, destination, partial, control);
+            match reconciled {
+                Ok(Some(progress)) => return Ok(progress),
+                Ok(None) => {}
+                Err(error) => {
+                    control.mark_finished();
+                    return Err(error);
+                }
+            }
+        }
         validate_segment_coverage(segments, total)?;
         strong_segment_etag(validator)?;
         control.check_cancelled()?;
-        let partial = partial_path.as_ref();
         ensure_destination_absent(Path::new(destination))?;
 
         let destination_parent = Path::new(destination)
@@ -2417,31 +2584,58 @@ impl HttpEngine {
             ));
         }
         if let Some(error) = group.error() {
-            let error = staging.cleanup_after_error(error);
+            let error = if let Some(context) = completion
+                && matches!(error, EngineError::Cancelled)
+            {
+                finish_segment_error(&staging, context, None, error, control)
+            } else {
+                staging.cleanup_after_error(error)
+            };
             control.mark_finished();
             return Err(error);
         }
 
-        // Cancellation before publication is checked after all workers join.
-        // Atomic coordination of cancellation and publication remains a later
-        // prototype gate; file ownership does not provide that state barrier.
-        if let Err(error) = coordinator.checkpoint() {
-            let error = staging.cleanup_after_error(error);
+        // All workers have joined. Clear the group while its sole coordinator
+        // is still registered, then transfer pause/cancel ownership to this
+        // single completion thread without a vacuous all-inactive pause ack.
+        if let Err(error) = group.handoff(coordinator) {
+            let error = if let Some(context) = completion
+                && matches!(error, EngineError::Cancelled)
+            {
+                finish_segment_error(&staging, context, None, error, control)
+            } else {
+                staging.cleanup_after_error(error)
+            };
             control.mark_finished();
             return Err(error);
         }
-        if let Err(error) = staging.publish(Path::new(destination), total) {
-            let error = staging.cleanup_after_error(error);
+        if let Some(context) = completion {
+            let prepared = completion::prepare_segment_completion(
+                context,
+                source,
+                destination,
+                partial,
+                staging.writer(),
+                &Progress::new(total, Some(total)),
+                control,
+            );
+            if let Err(error) = finish_segment_prepared(&staging, context, prepared, control) {
+                control.mark_finished();
+                return Err(error);
+            }
+            // Cleanup of a remaining hard-link alias belongs to the durable
+            // completion acknowledgement, not this transfer's success path.
+        } else if let Err(error) = control.finish_publication(|committed| {
+            staging.publish(Path::new(destination), total, committed)
+        }) {
+            let error = if control.is_committed() {
+                error
+            } else {
+                staging.cleanup_after_error(error)
+            };
             control.mark_finished();
             return Err(error);
         }
-        // The existing cancellation/publication race is not widened into a
-        // destination removal: a published destination is never cleanup input.
-        if let Err(error) = control.check_cancelled() {
-            control.mark_finished();
-            return Err(error);
-        }
-        control.finish_committed();
 
         Ok(Progress::new(total, Some(total)))
     }

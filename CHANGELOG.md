@@ -45,17 +45,29 @@ This changelog records notable changes, not acceptance of every milestone. PR #5
 
   **Held staging files and identity checks for the segment prototype**: `create_new` rejects and preserves pre-existing regular files, symlinks, FIFOs and directories. Every segment writes at explicit offsets through one held regular-file handle. Requests, writes, publication and cleanup check file identity, and the final length comes from the held handle. An observed path replacement rejects further writes/publication or cleanup of the replacement. The segment prototype does not delete JSON sidecars it did not create.
 
-  身份检查与基于路径的 rename／hard-link／unlink 之间仍存在 TOCTOU，尚不能抵抗同权限进程持续并发改名；本项不代表原子文件所有权或取消／发布协议完成。完成凭证、安全回退及段级恢复仍待实现和验收，Server 多连接保持禁用。
+  身份检查与基于路径的 rename／hard-link／unlink 之间仍存在 TOCTOU，尚不能抵抗同权限进程持续并发改名；文件系统原子身份绑定、安全回退及段级恢复仍待实现和验收，Server 多连接保持禁用。
 
-  A TOCTOU window remains between identity checks and path-based rename/hard-link/unlink; continuous concurrent renames by a same-privilege process are not covered. This does not complete an atomic file-ownership or cancellation/publication protocol. Completion receipts, safe fallback and segment recovery still need implementation and acceptance; Server multi-connection routing remains disabled.
+  A TOCTOU window remains between identity checks and path-based rename/hard-link/unlink; continuous concurrent renames by a same-privilege process are not covered. Atomic filesystem identity binding, safe fallback and segment recovery still need implementation and acceptance; Server multi-connection routing remains disabled.
 
 - **分段 Worker 的暂停／退出屏障**：分段 Worker 和进度协调者共同参与暂停确认；全部停稳后才报告暂停，恢复时继续原请求。响应头与响应体等待保留同一个 Future 分段检查控制，不因控制轮询重发 GET；限速与暂停等待也观察组内失败或取消。任一 Worker、进度回调或线程启动失败时唤醒其他参与者，收拢全部已启动 Worker 后才清理和标记完成，保留具体错误及取消类型。
 
   **Segment-worker pause/termination barriers**: segment workers and the progress coordinator jointly acknowledge pause only when all are parked, then resume their existing requests. Header/body waits retain one future while polling controls without repeating GETs; bandwidth and pause waits also observe group failure/cancellation. Worker, progress-callback and thread-start failures wake other participants. Join every started worker before cleanup/completion, preserving concrete failures and cancellation types.
 
-  这是未启用分段原型的协作控制；同步文件系统调用、底层系统 DNS 解析与不返回的用户回调无法被强制终止。Server 多连接仍禁用，完成凭证、原子文件所有权与取消／发布、安全回退及段级恢复仍为后续门槛。
+  这是未启用分段原型的协作控制；同步文件系统调用、底层系统 DNS 解析与不返回的用户回调无法被强制终止。Server 多连接仍禁用，原子文件所有权、安全回退及段级恢复仍为后续门槛。
 
-  This is cooperative control for the disabled segment prototype; synchronous filesystem calls, underlying OS DNS resolution and caller callbacks that never return cannot be forcibly terminated. Server multi-connection routing remains disabled; completion receipts, atomic filesystem ownership and cancellation/publication, safe fallback and segment recovery remain subsequent gates.
+  This is cooperative control for the disabled segment prototype; synchronous filesystem calls, underlying OS DNS resolution and caller callbacks that never return cannot be forcibly terminated. Server multi-connection routing remains disabled; atomic filesystem ownership, safe fallback and segment recovery remain subsequent gates.
+
+- **分段原型的完成凭证与发布协调**：新增兼容的 `download_to_segments_with_completion` 入口，按任务／来源／目标绑定优先离线对账；无凭证才验证新传输计划。所有 Worker 退出后准备身份／摘要凭证，发布和取消在同一控制锁内协调，提交成功后不再误报迟到取消；恢复暂停后在锁内重新校验文件身份。
+
+  **Segment-prototype receipts and publication coordination**: add compatible `download_to_segments_with_completion`, prioritizing offline reconciliation bound to task/source/destination; validate a fresh transfer plan only without a receipt. After worker exit, prepare identity/digest proofs and coordinate publication/cancellation under one control lock. Successful commits cannot become late cancellations; recheck identity under the lock after a publication pause.
+
+  凭证已落盘后的普通错误保留完整字节和证明，即使错误发生在目录同步。取消先核对凭证归属、清理自有暂存文件，再清理匹配凭证；清理失败明确返回 `Failed`，保留取消请求状态和诊断证据，调用者不能自动重试已请求取消的 control。分段凭证不认领无关续传 sidecar；成功后的凭证由调用者在最终进度／`Completed` 原子保存后确认清理。
+
+  Ordinary errors after receipt publication retain complete bytes and proof, including directory-sync failure. Cancellation validates proof ownership, removes owned staging, then removes matching proof. Cleanup failure explicitly returns `Failed`, preserving cancellation-request state and diagnostic evidence; callers must not automatically retry a cancelled control. Segment receipts never claim unowned resume sidecars. Successful receipts await caller acknowledgement after atomic final-progress/`Completed` persistence.
+
+  真实 Server 测试验证现有恢复消费者可离线处理新凭证；Server 分段派发、安全回退和段级恢复仍未启用或验收，路径检查到改名／删除的竞态仍待处理。后续顺序已记录在开发计划，本轮公共 API 合约见 RFC 0001。
+
+  Real Server tests verify existing recovery consumers can handle new receipts offline. Server segment dispatch, safe fallback and segment restart reuse remain disabled or unaccepted; check-to-rename/unlink races remain open. The development plan records the sequence, and RFC 0001 records this slice’s public API contract.
 
 - **恢复测试的终态同步**：第二个 Server 的数据锁保护测试在重启后等待异步恢复／重试进入 `Failed`，再同时核对 RPC 与 SQLite 终态和持久化错误。监听就绪不代表任务已完成重试；保留原有拒锁及活动任务状态保护。
 

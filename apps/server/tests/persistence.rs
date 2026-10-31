@@ -573,6 +573,82 @@ impl CompletionFixture {
         }
     }
 
+    /// Produce a real v1 receipt using the new segment consumer, with every
+    /// HTTP request served before this fixture returns. No hand-written proof.
+    fn segmented(dir: &TestDir, id: &str, body: &'static [u8]) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = format!("http://{}/segmented", listener.local_addr().unwrap());
+        let segments = HttpEngine::split_segments(body.len() as u64, 3);
+        let count = segments.len();
+        let worker = thread::spawn(move || {
+            for _ in 0..count {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let range = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("range").then_some(value.trim())
+                    })
+                    .unwrap();
+                let (start, end) = range
+                    .strip_prefix("bytes=")
+                    .unwrap()
+                    .split_once('-')
+                    .unwrap();
+                let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
+                write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nETag: \"segmented-recovery\"\r\nConnection: close\r\n\r\n", body.len(), end-start+1).unwrap();
+                stream.write_all(&body[start..=end]).unwrap();
+            }
+        });
+        let destination = fs::canonicalize(dir.output_path(id).parent().unwrap())
+            .unwrap()
+            .join(id);
+        let partial = destination.with_file_name(format!(".{id}.nexum.part"));
+        let context = CompletionContext::new(id, dir.path());
+        fs::write(
+            nexum_core::nexum_engine::resumable_metadata_path(&partial),
+            b"unowned sidecar",
+        )
+        .unwrap();
+        let progress = HttpEngine::new()
+            .download_to_segments_with_completion(
+                &source,
+                &segments,
+                destination.to_str().unwrap(),
+                &partial,
+                body.len() as u64,
+                Some(&nexum_core::nexum_engine::HttpResumeValidator::Etag(
+                    "\"segmented-recovery\"".into(),
+                )),
+                &context,
+                &HttpTransferControl::new(),
+                |_| Ok(()),
+            )
+            .unwrap();
+        worker.join().unwrap();
+        Self {
+            source,
+            destination,
+            partial,
+            context,
+            progress,
+            body,
+        }
+    }
+
     fn seed_task(&self, dir: &TestDir, id: &str, state: TaskState) {
         let mut repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
         let mut task = DownloadTask::new(
@@ -1479,6 +1555,55 @@ fn completion_receipt_survives_when_neither_terminal_state_can_be_saved() {
         b"complete response despite both terminal saves failing"
     );
     assert!(!completion_receipt_path(&context).exists());
+}
+
+#[test]
+fn segmented_completion_receipts_recover_through_the_existing_server_without_network() {
+    let _test_guard = server_test_guard();
+    for staged in [false, true] {
+        let dir = TestDir::new();
+        let id = if staged {
+            "segmented-staged"
+        } else {
+            "segmented-published"
+        };
+        let fixture =
+            CompletionFixture::segmented(&dir, id, b"complete segmented response through Server");
+        if staged {
+            fs::rename(&fixture.destination, &fixture.partial).unwrap();
+        }
+        fixture.seed_task(
+            &dir,
+            id,
+            if staged {
+                TaskState::Failed
+            } else {
+                TaskState::Downloading
+            },
+        );
+        // The segment listener has exited. A second request would fail; startup
+        // must consume the real Engine receipt through existing reconciliation.
+        let mut server = ServerProcess::start(dir.path());
+        server.wait_for_state(id, "Completed");
+        let task = server.call("task.get", Some(json!({"id": id})));
+        assert_eq!(task["downloaded_bytes"], fixture.body.len() as u64);
+        assert_eq!(task["total_bytes"], fixture.body.len() as u64);
+        assert_eq!(fs::read(&fixture.destination).unwrap(), fixture.body);
+        assert!(!completion_receipt_path(&fixture.context).exists());
+        assert!(!fixture.partial.exists());
+        assert_eq!(
+            fs::read(nexum_core::nexum_engine::resumable_metadata_path(
+                &fixture.partial
+            ))
+            .unwrap(),
+            b"unowned sidecar"
+        );
+        server.stop();
+        let repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+        let stored = repository.get(&TaskId::from(id)).unwrap().unwrap();
+        assert_eq!(stored.state, TaskState::Completed);
+        assert_eq!(stored.progress, fixture.progress);
+    }
 }
 
 #[test]
