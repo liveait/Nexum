@@ -98,7 +98,8 @@ The standalone Server defaults to `127.0.0.1:39100` with authentication disabled
 - [发布流程 / Release Process](docs/RELEASE.md)
 - [架构决策 / Architecture Decisions](docs/decisions/README.md)
 - [变更日志 / Changelog](CHANGELOG.md)
-- [贡献指南 / Contributing](CONTRIBUTING.md) · [治理规则 / Governance](GOVERNANCE.md)
+- [贡献指南 / Contributing](CONTRIBUTING.md)
+- [治理规则 / Governance](GOVERNANCE.md)
 
 Nexum 采用 [MIT License](LICENSE)，第三方依赖遵循各自许可证。
 
