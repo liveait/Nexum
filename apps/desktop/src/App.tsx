@@ -9,6 +9,7 @@ import { isConnectionReady, type ConnectionMode, type ManagedConnectionStatus } 
 import { addDownload, invokeTaskCommand, savePartialMetadata, readPartialMetadata, clearPartialMetadata, type CreatedDownload, type TaskCommand, type PartialMetadata } from "./taskCommands";
 import { valueForContext, type ContextValue, type TaskContext } from "./taskContext";
 import { taskDisplayName } from "./taskPresentation";
+import { openProjectLink, readAboutVersion, type AboutVersion, type ProjectLink } from "./aboutContent";
 import brandIcon from "../src-tauri/icons/brand-mark.png";
 import "./App.css";
 
@@ -142,7 +143,7 @@ const SETTINGS_CARDS: Array<{
   { id: "integration", label: "Integration", description: "Browser extension and CLI", icon: "integration", available: false },
   { id: "network", label: "Network", description: "Proxy, TLS and connection limits", icon: "network", available: false },
   { id: "advanced", label: "Advanced", description: "RPC, storage and diagnostics", icon: "advanced", available: true },
-  { id: "about", label: "About", description: "Version, updates and documentation", icon: "about", available: true },
+  { id: "about", label: "About", description: "Version and project links", icon: "about", available: true },
 ];
 
 function isActiveTask(task: TaskItem): boolean {
@@ -1476,11 +1477,52 @@ function SettingsView({ category, mode, modeDraft, server, serverDraft, settings
     if (category === "appearance") return <SettingsDetail title={t(card?.label ?? "Appearance")} icon="appearance" onBack={goBack}>
       <div className="settings-card"><span className="eyebrow">{t("Appearance")}</span><h2>{t("System appearance and language")}</h2><p className="field-help">{t("Appearance follows the Mac system setting.")}</p><label>{t("Language")}<select value={language} onChange={(event) => onLanguageChange(event.target.value as LanguagePreference)} disabled={settingsBusy || !settingsReady}><option value="system">{t("Follow system")}</option><option value="en">{t("English")}</option><option value="zh-CN">{t("Simplified Chinese")}</option></select></label><p className="field-help">{t("Language changes are saved immediately.")}</p></div>
     </SettingsDetail>;
+    if (category === "about") return <SettingsDetail title={t("About")} icon="about" onBack={goBack}><AboutView /></SettingsDetail>;
     return <SettingsDetail title={t(card?.label ?? "Settings")} icon={card?.icon ?? "settings"} onBack={goBack}>
       <div className="settings-card settings-planned"><span className="eyebrow">{t("Planned capability")}</span><h2>{t(card?.label ?? "Settings")}</h2><p>{t("{description}. This page is reserved so the navigation can remain stable while the underlying engine and protocol are implemented.", { description: t(card?.description ?? "Planned capability") })}</p><span className="planned-badge">{t("Coming later")}</span></div>
     </SettingsDetail>;
   }
   return <div className="settings-page"><div className="page-heading"><div><span className="eyebrow">{t("Client preferences")}</span><h1>{t("Settings")}</h1><p>{t("Configure Nexum without mixing connection options into the download list.")}</p></div></div><div className="settings-grid">{SETTINGS_CARDS.map((card) => <button ref={(element) => { categoryButtons.current[card.id] = element; }} className={`settings-card-tile ${card.available ? "" : "planned"}`} key={card.id} onClick={() => onCategory(card.id)}><span className={`settings-tile-icon icon-${card.id}`}><Icon name={card.icon} size={28} /></span><strong>{t(card.label)}</strong><p>{t(card.description)}</p>{!card.available && <span className="planned-badge">{t("Planned")}</span>}</button>)}</div></div>;
+}
+
+function AboutView() {
+  const t = useTranslation();
+  const [version, setVersion] = useState<AboutVersion>({ state: "loading" });
+  const [versionRequest, setVersionRequest] = useState(0);
+  const [opening, setOpening] = useState<ProjectLink | null>(null);
+  const [openFailed, setOpenFailed] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  useEffect(() => {
+    let active = true;
+    setVersion({ state: "loading" });
+    void readAboutVersion().then((next) => { if (active) setVersion(next); });
+    return () => { active = false; };
+  }, [versionRequest]);
+  const openLink = async (link: ProjectLink) => {
+    if (opening) return;
+    setOpening(link);
+    setOpenFailed(false);
+    try { await openProjectLink(link); }
+    catch { if (mounted.current) setOpenFailed(true); }
+    finally { if (mounted.current) setOpening(null); }
+  };
+  return <div className="settings-card">
+    <div className="about-brand"><img src={brandIcon} alt="" width={32} height={32} /><h2>Nexum</h2></div>
+    <p className="field-help" role="status" aria-busy={version.state === "loading"}>{version.state === "ready" ? t("Version {version}", { version: version.version }) : t(version.state === "loading" ? "Loading version…" : "Version unavailable")}</p>
+    {version.state === "error" && <button className="text-button" onClick={() => setVersionRequest((value) => value + 1)}>{t("Retry version")}</button>}
+    <p>{t("A macOS-first Rust downloader with a native Desktop app and CLI.")}</p>
+    <div className="about-links">
+      <button type="button" className="button" disabled={opening !== null} onClick={() => void openLink("website")}>{t("Website")}</button>
+      <button type="button" className="button" disabled={opening !== null} onClick={() => void openLink("source")}>{t("Source code")}</button>
+      <button type="button" className="button" disabled={opening !== null} onClick={() => void openLink("documentation")}>{t("Documentation")}</button>
+    </div>
+    <p className="field-help">{t("Links open in your browser.")}</p>
+    {openFailed && <p className="credential-feedback error" role="alert">{t("Could not open the link. Please try again.")}</p>}
+  </div>;
 }
 
 function CredentialSettings({ server, serverDraft, settingsReady, onCredentialChanged }: { server: string; serverDraft: string; settingsReady: boolean; onCredentialChanged: () => void }) {
