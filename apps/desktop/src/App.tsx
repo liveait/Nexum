@@ -11,6 +11,7 @@ import { valueForContext, type ContextValue, type TaskContext } from "./taskCont
 import { taskDisplayName } from "./taskPresentation";
 import { openProjectLink, readAboutVersion, type AboutVersion, type ProjectLink } from "./aboutContent";
 import { EMPTY_UPGRADE_NOTICE, UpgradeNoticeController, type UpgradeNoticeState } from "./upgradeNotice";
+import { FirstRunNoticeController } from "./firstRunNotice";
 import brandIcon from "../src-tauri/icons/brand-mark.png";
 import "./App.css";
 
@@ -357,6 +358,7 @@ export default function App() {
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
   const [isFreshInstall, setIsFreshInstall] = useState(false);
+  const firstRunController = useRef<FirstRunNoticeController | null>(null);
   const [upgradeNotice, setUpgradeNotice] = useState<UpgradeNoticeState>(EMPTY_UPGRADE_NOTICE);
   const upgradeController = useRef<UpgradeNoticeController | null>(null);
   const upgradeInfo = upgradeNotice.info;
@@ -498,13 +500,19 @@ export default function App() {
     return () => { controller.dispose(); upgradeController.current = null; };
   }, [settingsReady]);
 
-  // Check fresh install and partial downloads once settings are ready.
+  // A welcome belongs to this startup, independently of task refreshes.
+  useEffect(() => {
+    if (!settingsReady) return undefined;
+    const controller = new FirstRunNoticeController(setIsFreshInstall);
+    firstRunController.current = controller;
+    void controller.load();
+    return () => { controller.dispose(); firstRunController.current = null; };
+  }, [settingsReady]);
+
+  // Check partial downloads once settings and a task snapshot are ready.
   useEffect(() => {
     if (!settingsReady) return undefined;
     let active = true;
-    void invoke<boolean>("check_fresh_install")
-      .then((fresh) => { if (active) setIsFreshInstall(fresh); })
-      .catch(() => undefined);
     // Check for partial metadata from interrupted downloads.
     if (currentSnapshot) {
       const items = currentSnapshot.items;
@@ -1147,7 +1155,7 @@ export default function App() {
       <section className="workspace" inert={showAdd}>
         {snapshotStale && <div className="message-banner error" role="status"><span>{t("These downloads may be out of date. The last refresh failed; retry to get their current status.")}</span><button type="button" onClick={() => void refreshTasks()} disabled={loading || !canConnect}>{t("Retry")}</button></div>}
         {isFreshInstall && connection === "connected" && (
-          <WelcomeFlow onContinue={() => { setIsFreshInstall(false); selectSection("downloads"); window.requestAnimationFrame(() => addButtonRef.current?.focus()); }} />
+          <WelcomeFlow onContinue={() => { firstRunController.current?.dismiss(); selectSection("downloads"); window.requestAnimationFrame(() => addButtonRef.current?.focus()); }} />
         )}
         {upgradeInfo && (
           <div className="upgrade-notice" role="status">

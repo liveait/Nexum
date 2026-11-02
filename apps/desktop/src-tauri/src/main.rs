@@ -65,6 +65,7 @@ impl Default for DesktopSettings {
 
 struct DesktopRuntime {
     settings: Mutex<DesktopSettings>,
+    first_run: FirstRunState,
     managed: ManagedServer,
     // Serializes settings commits/acknowledgement with mode changes and task creation.
     creation: Mutex<()>,
@@ -116,18 +117,20 @@ fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("could not resolve application data directory: {error}"))
 }
 
-/// Checks whether this is a fresh install: no settings file and no server
-/// data directory. A fresh install has never been run before.
-fn is_fresh_install(app: &AppHandle) -> Result<bool, String> {
-    let settings = settings_path(app)?;
-    if settings.is_file() {
-        return Ok(false);
+struct FirstRunState {
+    fresh: bool,
+}
+
+impl FirstRunState {
+    fn capture(settings: &Path, server_dir: &Path) -> Self {
+        Self {
+            fresh: !settings.is_file() && !server_dir.is_dir(),
+        }
     }
-    let server_dir = data_dir(app)?.join("server");
-    if server_dir.is_dir() {
-        return Ok(false);
+
+    fn is_fresh(&self) -> bool {
+        self.fresh
     }
-    Ok(true)
 }
 
 fn read_settings(app: &AppHandle) -> Result<DesktopSettings, String> {
@@ -250,8 +253,8 @@ fn acknowledge_upgrade(
 }
 
 #[tauri::command]
-fn check_fresh_install(app: AppHandle) -> Result<bool, String> {
-    is_fresh_install(&app)
+fn check_fresh_install(state: tauri::State<'_, Arc<DesktopRuntime>>) -> bool {
+    state.first_run.is_fresh()
 }
 
 #[tauri::command]
@@ -592,6 +595,9 @@ fn main() {
         .manage(desktop_lib::EventSubscriptionManager::default())
         .setup(|app| {
             let settings = read_settings(app.handle())?;
+            let server_data_dir = data_dir(app.handle())?.join("server");
+            // Capture before the asynchronous supervisor can create Server data.
+            let first_run = FirstRunState::capture(&settings_path(app.handle())?, &server_data_dir);
             let binary = if cfg!(debug_assertions) && !env!("NEXUM_SERVER_DEV_PATH").is_empty() {
                 PathBuf::from(env!("NEXUM_SERVER_DEV_PATH"))
             } else {
@@ -600,7 +606,7 @@ fn main() {
             let managed = ManagedServer::new(
                 binary,
                 env!("NEXUM_SERVER_SHA256").to_owned(),
-                app.path().app_data_dir()?.join("server"),
+                server_data_dir,
             );
             if settings.mode == ServerMode::Managed {
                 // Supervisor failures remain visible in Settings rather than
@@ -609,6 +615,7 @@ fn main() {
             }
             app.manage(Arc::new(DesktopRuntime {
                 settings: Mutex::new(settings),
+                first_run,
                 managed,
                 creation: Mutex::new(()),
             }));
@@ -689,6 +696,84 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn first_run_capture_is_read_only() {
+        let directory = SettingsDirectory::new();
+        let settings = directory.path();
+        let server = directory.0.join("server");
+        let startup = FirstRunState::capture(&settings, &server);
+        assert!(startup.is_fresh());
+        assert!(!settings.exists());
+        assert!(!server.exists());
+    }
+
+    #[test]
+    fn first_run_server_startup_does_not_erase_initial_eligibility() {
+        let directory = SettingsDirectory::new();
+        let server = directory.0.join("server");
+        let startup = FirstRunState::capture(&directory.path(), &server);
+        // Managed startup can create its data directory before the first RPC.
+        std::fs::create_dir(&server).unwrap();
+        std::fs::write(server.join("data.lock"), b"owned fixture").unwrap();
+        assert!(startup.is_fresh());
+    }
+
+    #[test]
+    fn first_run_preference_save_does_not_reclassify_current_startup() {
+        let directory = SettingsDirectory::new();
+        let startup = FirstRunState::capture(&directory.path(), &directory.0.join("server"));
+        let settings = Mutex::new(DesktopSettings::default());
+        persist_user_settings(&settings, DesktopSettings::default(), "0.1.0", |next| {
+            write_settings_at(&directory.path(), next)
+        })
+        .unwrap();
+        assert!(startup.is_fresh());
+        assert_eq!(
+            read_settings_at(&directory.path())
+                .unwrap()
+                .last_seen_version
+                .as_deref(),
+            Some("0.1.0")
+        );
+    }
+
+    #[test]
+    fn first_run_existing_settings_in_both_modes_are_not_fresh() {
+        for mode in [ServerMode::Managed, ServerMode::External] {
+            let directory = SettingsDirectory::new();
+            let settings = DesktopSettings {
+                mode,
+                ..DesktopSettings::default()
+            };
+            write_settings_at(&directory.path(), &settings).unwrap();
+            let before = std::fs::read(directory.path()).unwrap();
+            let server = directory.0.join("server");
+            let startup = FirstRunState::capture(&directory.path(), &server);
+            assert!(!startup.is_fresh());
+            assert!(!server.exists());
+            assert_eq!(std::fs::read(directory.path()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn first_run_existing_server_without_settings_is_not_fresh() {
+        let directory = SettingsDirectory::new();
+        let server = directory.0.join("server");
+        std::fs::create_dir(&server).unwrap();
+        let startup = FirstRunState::capture(&directory.path(), &server);
+        assert!(!startup.is_fresh());
+        assert!(!directory.path().exists());
+    }
+
+    #[test]
+    fn first_run_existing_profile_cannot_become_fresh_in_the_same_runtime() {
+        let directory = SettingsDirectory::new();
+        write_settings_at(&directory.path(), &DesktopSettings::default()).unwrap();
+        let startup = FirstRunState::capture(&directory.path(), &directory.0.join("server"));
+        std::fs::remove_file(directory.path()).unwrap();
+        assert!(!startup.is_fresh());
     }
 
     #[test]
