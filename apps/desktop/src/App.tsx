@@ -11,6 +11,7 @@ import { valueForContext, type ContextValue, type TaskContext } from "./taskCont
 import { taskDisplayName } from "./taskPresentation";
 import { openProjectLink, readAboutVersion, type AboutVersion, type ProjectLink } from "./aboutContent";
 import { EMPTY_UPGRADE_NOTICE, UpgradeNoticeController, type UpgradeNoticeState } from "./upgradeNotice";
+import { FirstRunNoticeController } from "./firstRunNotice";
 import brandIcon from "../src-tauri/icons/brand-mark.png";
 import "./App.css";
 
@@ -357,6 +358,8 @@ export default function App() {
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
   const [isFreshInstall, setIsFreshInstall] = useState(false);
+  const firstRunController = useRef<FirstRunNoticeController | null>(null);
+  const firstRunDismissed = useRef(false);
   const [upgradeNotice, setUpgradeNotice] = useState<UpgradeNoticeState>(EMPTY_UPGRADE_NOTICE);
   const upgradeController = useRef<UpgradeNoticeController | null>(null);
   const upgradeInfo = upgradeNotice.info;
@@ -498,13 +501,19 @@ export default function App() {
     return () => { controller.dispose(); upgradeController.current = null; };
   }, [settingsReady]);
 
-  // Check fresh install and partial downloads once settings are ready.
+  // A welcome belongs to this startup, independently of task refreshes.
+  useEffect(() => {
+    if (!settingsReady) return undefined;
+    const controller = new FirstRunNoticeController(setIsFreshInstall, firstRunDismissed.current);
+    firstRunController.current = controller;
+    void controller.load();
+    return () => { controller.dispose(); firstRunController.current = null; };
+  }, [settingsReady]);
+
+  // Check partial downloads once settings and a task snapshot are ready.
   useEffect(() => {
     if (!settingsReady) return undefined;
     let active = true;
-    void invoke<boolean>("check_fresh_install")
-      .then((fresh) => { if (active) setIsFreshInstall(fresh); })
-      .catch(() => undefined);
     // Check for partial metadata from interrupted downloads.
     if (currentSnapshot) {
       const items = currentSnapshot.items;
@@ -790,6 +799,8 @@ export default function App() {
   };
 
   const openAdd = (trigger?: HTMLElement) => {
+    firstRunDismissed.current = true;
+    firstRunController.current?.dismiss();
     addAttempt.current = { context: snapshotContext.current, created: null, inFlight: false };
     setCreatedDownload(null);
     nameProbeVersion.current += 1;
@@ -1146,9 +1157,6 @@ export default function App() {
 
       <section className="workspace" inert={showAdd}>
         {snapshotStale && <div className="message-banner error" role="status"><span>{t("These downloads may be out of date. The last refresh failed; retry to get their current status.")}</span><button type="button" onClick={() => void refreshTasks()} disabled={loading || !canConnect}>{t("Retry")}</button></div>}
-        {isFreshInstall && connection === "connected" && (
-          <WelcomeFlow onContinue={() => { setIsFreshInstall(false); selectSection("downloads"); window.requestAnimationFrame(() => addButtonRef.current?.focus()); }} />
-        )}
         {upgradeInfo && (
           <div className="upgrade-notice" role="status">
             <span>{t("Upgraded from {oldVersion} to {newVersion}.", { oldVersion: upgradeInfo.old_version, newVersion: upgradeInfo.new_version })}</span>
@@ -1175,6 +1183,7 @@ export default function App() {
             connection={connection}
             eventStreamConnected={eventStreamConnected}
             canConnect={canConnect}
+            firstRunWelcome={isFreshInstall && connection === "connected"}
             server={mode === "managed" ? t("This Mac") : server}
             loading={loading}
             error={error}
@@ -1256,7 +1265,7 @@ function ManagedServerStatus({ status, busy, onRetry }: { status: ManagedConnect
 }
 
 function DownloadsView({
-  tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, eventStreamConnected, canConnect, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
+  tasks, visibleTasks, counts, filter, selectedTask, actionByTask, connection, eventStreamConnected, canConnect, firstRunWelcome, server, loading, error, notice, lastUpdatedAt, showInspector, searchOpen, searchQuery,
   addButtonRef, searchInputRef, searchToggleRef, onFilterChange, onSelect, onSearchOpen, onSearchQuery, onToggleInspector, onRefresh, onDismissNotice, onDismissError, onAdd, onPause, onResume, onRemove, onQueue, onStart,
 }: {
   tasks: TaskItem[];
@@ -1268,6 +1277,7 @@ function DownloadsView({
   connection: ConnectionState;
   eventStreamConnected: boolean;
   canConnect: boolean;
+  firstRunWelcome: boolean;
   server: string;
   loading: boolean;
   error: string | LocalizedMessage;
@@ -1306,7 +1316,7 @@ function DownloadsView({
       {(error || notice) && <div className={`message-banner ${error ? "error" : "success"}`}><span>{error ? renderStatus(error, t) : notice && renderMessage(notice.message, t)}</span><div className="message-banner-actions">{error && <button type="button" onClick={onRefresh}>{t("Retry")}</button>}<button type="button" onClick={error ? onDismissError : onDismissNotice} aria-label={t("Dismiss message")}>{t("Dismiss")}</button></div></div>}
       <div className="download-content">
         {visibleTasks.length === 0 ? (
-          <EmptyDownloads hasFilter={filter !== "all" || Boolean(searchQuery)} />
+          <EmptyDownloads hasFilter={filter !== "all" || Boolean(searchQuery)} firstRun={firstRunWelcome && tasks.length === 0} />
         ) : (
           <div className={`download-layout ${showInspector ? "with-inspector" : ""}`}>
             <section className="task-list" aria-label={t("Downloads")}>
@@ -1368,9 +1378,9 @@ function TaskInspector({ task, server, className = "" }: { task: TaskItem | null
   return <aside className={`inspector ${className}`} aria-label={t("Task details")}><span className="eyebrow">{t("Task details")}</span><h2>{name}</h2><span className={`state-badge state-${task.state.toLowerCase()}`}>{taskStateLabel(task.state, t)}</span><div className="inspector-progress"><div className="progress-track" role="progressbar" aria-label={t("{name} download progress", { name })} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress === null ? undefined : Math.round(progress)} aria-valuetext={task.total_bytes === null ? `${taskStateLabel(task.state, t)}; ${t("{bytes} downloaded; total size unknown", { bytes: formatBytes(task.downloaded_bytes) })}` : undefined}><span className={progress === null ? (task.state === "Downloading" ? "indeterminate active" : "indeterminate") : ""} style={progress === null ? undefined : { width: `${progress}%` }} /></div><strong>{formatBytes(task.downloaded_bytes)} / {formatBytesMaybe(task.total_bytes, t)}{detail ? ` · ${detail}` : ""}</strong></div><dl className="detail-list"><div><dt>{t("Source")}</dt><dd title={task.source}>{task.source}</dd></div><div><dt>{t("Destination")}</dt><dd title={task.destination}>{task.destination}</dd></div><div><dt>{t("Server")}</dt><dd>{server}</dd></div></dl>{task.error && <div className="inspector-error"><strong>{t("Latest error")}</strong><p>{task.error}</p><button className="text-button" onClick={() => void navigator.clipboard?.writeText(task.error ?? "")}>{t("Copy error")}</button></div>}</aside>;
 }
 
-function EmptyDownloads({ hasFilter }: { hasFilter: boolean }) {
+function EmptyDownloads({ hasFilter, firstRun }: { hasFilter: boolean; firstRun: boolean }) {
   const t = useTranslation();
-  return <div className="empty-state"><div className="empty-art" aria-hidden="true"><div className="art-block art-one" /><div className="art-block art-two" /><div className="art-block art-three" /><div className="art-block art-four" /></div><h2>{hasFilter ? t("No matching downloads") : t("No downloads yet")}</h2><p>{hasFilter ? t("Try another filter or search term.") : t("Use + in the toolbar or press ⌘N to add a download.")}</p></div>;
+  return <div className="empty-state" role={firstRun && !hasFilter ? "status" : undefined}><div className="empty-art" aria-hidden="true"><div className="art-block art-one" /><div className="art-block art-two" /><div className="art-block art-three" /><div className="art-block art-four" /></div><h2>{hasFilter ? t("No matching downloads") : firstRun ? t("Welcome to Nexum") : t("No downloads yet")}</h2><p>{hasFilter ? t("Try another filter or search term.") : t("Use + in the toolbar or press ⌘N to add a download.")}</p></div>;
 }
 
 function DashboardView({ tasks, connection, mode, onDownloads }: { tasks: TaskItem[]; connection: ConnectionState; mode: ConnectionMode; onDownloads: () => void }) {
@@ -1671,17 +1681,4 @@ function SettingsDetail({ title, icon, onBack, children }: { title: string; icon
   const backButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { backButton.current?.focus(); }, []);
   return <div className="settings-page"><button ref={backButton} className="back-button" onClick={onBack}>{t("‹ Settings")}</button><div className="settings-detail-heading"><span className="settings-tile-icon"><Icon name={icon} size={27} /></span><div><span className="eyebrow">{t("Settings")}</span><h1>{title}</h1></div></div>{children}</div>;
-}
-
-function WelcomeFlow({ onContinue }: { onContinue: () => void }) {
-  const t = useTranslation();
-  return (
-    <div className="welcome-flow" role="status">
-      <span className="welcome-flow-title">{t("Welcome to Nexum")}</span>
-      <p>{t("Paste an HTTP or HTTPS link to start your first download.")}</p>
-      <div className="welcome-flow-actions">
-        <button className="button primary" onClick={onContinue}>{t("Continue to Downloads")}</button>
-      </div>
-    </div>
-  );
 }
