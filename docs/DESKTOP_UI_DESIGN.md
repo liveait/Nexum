@@ -130,9 +130,9 @@ Downloads 页头提供过滤器和紧凑控制：
 
 The Downloads header has a filter selector and compact controls:
 
-- **添加**：下载页右上工具栏固定为“添加（＋）→ 详情 → 搜索”，`⌘N` 提供键盘入口。侧边栏、悬浮按钮和概览不再重复提供添加按钮；空列表引导使用工具栏／快捷键，首次欢迎只跳转到下载页，筛选无结果只提示调整筛选。
+- **添加**：下载页右上工具栏固定为“添加（＋）→ 详情 → 搜索”，`⌘N` 提供键盘入口。侧边栏、悬浮按钮和概览不再重复提供添加按钮。首次欢迎并入已连接、未筛选的下载空状态，居中显示标题及工具栏／快捷键说明；不额外提供顶部横条或进入按钮。打开添加表单后，取消或刷新不再恢复欢迎；筛选无结果只提示调整筛选。
 
-  **Add**: the Downloads upper-right toolbar uses “Add (+) → Details → Search”, with `⌘N` as the keyboard entry. Sidebar, floating and Overview buttons do not duplicate Add; empty lists point to the toolbar/shortcut, welcome only navigates to Downloads, and empty filtered results suggest adjusting filters.
+  **Add**: the Downloads upper-right toolbar uses “Add (+) → Details → Search”, with `⌘N` as the keyboard entry. Sidebar, floating and Overview buttons do not duplicate Add. First-run welcome appears as the centered, connected and unfiltered download empty state, pointing to the toolbar/shortcut without a top banner or extra entry button. Opening Add ends welcome across cancellation or refresh; empty filtered results suggest adjusting filters.
 - **过滤**：选择全部、活动、排队、已完成或失败任务。
 
   **Filter**: selects All, Active, Queued, Completed, or Failed downloads.
