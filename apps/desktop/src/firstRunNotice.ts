@@ -1,16 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 
-// One startup read per WebView; task snapshots never reset a continued welcome.
+// One startup read per WebView; opening Add ends the welcome for this WebView.
 export class FirstRunNoticeController {
   private requested = false;
-  private dismissed = false;
+  private dismissed: boolean;
   private active = true;
   private readonly changed: (visible: boolean) => void;
 
-  constructor(changed: (visible: boolean) => void) { this.changed = changed; }
+  constructor(changed: (visible: boolean) => void, initiallyDismissed = false) {
+    this.changed = changed;
+    this.dismissed = initiallyDismissed;
+  }
 
   async load(): Promise<void> {
-    if (this.requested || !this.active) return;
+    if (this.requested || !this.active || this.dismissed) return;
     this.requested = true;
     try {
       const fresh = await invoke<boolean>("check_fresh_install");

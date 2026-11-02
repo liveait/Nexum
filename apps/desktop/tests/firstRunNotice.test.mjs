@@ -28,7 +28,7 @@ test("first-run eligibility uses one native IPC read per controller", async () =
   assert.equal(calls.length, 1);
 });
 
-test("continuing a welcome cannot be reversed by another task refresh or load", async () => {
+test("opening Add cannot be reversed by another task refresh or load", async () => {
   let reads = 0;
   const states = [];
   mockIPC(() => { ++reads; return true; });
@@ -40,7 +40,7 @@ test("continuing a welcome cannot be reversed by another task refresh or load", 
   assert.equal(reads, 1);
 });
 
-test("a late native reply cannot revive a continued welcome", async () => {
+test("a late native reply cannot revive a welcome after opening Add", async () => {
   const read = deferred();
   const states = [];
   mockIPC(() => read.promise);
@@ -50,6 +50,16 @@ test("a late native reply cannot revive a continued welcome", async () => {
   read.resolve(true);
   await pending;
   assert.deepEqual(states, [false]);
+});
+
+test("opening Add before settings are ready suppresses a later startup read", async () => {
+  let reads = 0;
+  const states = [];
+  mockIPC(() => { ++reads; return true; });
+  const controller = new FirstRunNoticeController((visible) => states.push(visible), true);
+  await controller.load();
+  assert.equal(reads, 0);
+  assert.deepEqual(states, []);
 });
 
 test("disposed controllers ignore pending native replies and issue no new reads", async () => {

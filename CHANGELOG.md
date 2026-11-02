@@ -3,9 +3,9 @@
 
 # 变更日志 / Changelog
 
-- **Desktop 首次启动欢迎**：修复异步 Server 启动创建数据目录后误判为已有用户的竞态。在启动前只读捕获资格，继续后任务刷新不再恢复欢迎；既有设置／数据和首次保存版本契约保持不变，不增加启动写入。
+- **Desktop 首次启动欢迎**：修复异步 Server 启动创建数据目录后误判为已有用户的竞态。在启动前只读捕获资格，欢迎并入居中下载空状态，沿用工具栏＋／⌘N；打开添加表单后取消或刷新不再恢复欢迎；既有设置／数据和首次保存版本契约保持不变，不增加启动写入。
 
-  **Desktop first-run welcome**: fix the race where asynchronous Server startup creates its data directory before eligibility is queried. Capture eligibility read-only before startup and prevent task refreshes from reviving a continued welcome. Preserve existing-profile handling and first-save version metadata without startup writes.
+  **Desktop first-run welcome**: fix the race where asynchronous Server startup creates its data directory before eligibility is queried. Capture eligibility read-only before startup and place welcome in the centered download empty state, using the toolbar +/⌘N entry. Opening Add ends welcome even after cancellation or refresh. Preserve existing-profile handling and first-save version metadata without startup writes.
 
 - **Desktop 升级提示**：修复首次保存未落盘版本记录、普通设置覆盖内部记录以及关闭提示重开后再次出现的问题。仅对 SemVer 递增显示升级；关闭失败保留提示并支持重试，迟到读取不再恢复已关闭提示。此修复不代表完整安装升级验收。
 
