@@ -10,6 +10,7 @@ import { addDownload, invokeTaskCommand, savePartialMetadata, readPartialMetadat
 import { valueForContext, type ContextValue, type TaskContext } from "./taskContext";
 import { taskDisplayName } from "./taskPresentation";
 import { openProjectLink, readAboutVersion, type AboutVersion, type ProjectLink } from "./aboutContent";
+import { EMPTY_UPGRADE_NOTICE, UpgradeNoticeController, type UpgradeNoticeState } from "./upgradeNotice";
 import brandIcon from "../src-tauri/icons/brand-mark.png";
 import "./App.css";
 
@@ -356,7 +357,9 @@ export default function App() {
   const [destinationPicking, setDestinationPicking] = useState(false);
   const [addError, setAddError] = useState("");
   const [isFreshInstall, setIsFreshInstall] = useState(false);
-  const [upgradeInfo, setUpgradeInfo] = useState<{ old_version: string; new_version: string } | null>(null);
+  const [upgradeNotice, setUpgradeNotice] = useState<UpgradeNoticeState>(EMPTY_UPGRADE_NOTICE);
+  const upgradeController = useRef<UpgradeNoticeController | null>(null);
+  const upgradeInfo = upgradeNotice.info;
   const [partialDownloads, setPartialDownloads] = useState<PartialMetadata[]>([]);
   const localServer = mode === "managed" || isLocalServerAddress(externalServer);
   const remoteFinalPath = localServer ? null : serverDestination(newDirectory, newFileName);
@@ -486,15 +489,21 @@ export default function App() {
     return () => { mounted = false; };
   }, []);
 
-  // Check fresh install, upgrade info, and partial downloads once settings are ready.
+  // Upgrade reads are independent of task snapshots; dismissal invalidates old reads.
+  useEffect(() => {
+    if (!settingsReady) return undefined;
+    const controller = new UpgradeNoticeController(setUpgradeNotice);
+    upgradeController.current = controller;
+    void controller.load();
+    return () => { controller.dispose(); upgradeController.current = null; };
+  }, [settingsReady]);
+
+  // Check fresh install and partial downloads once settings are ready.
   useEffect(() => {
     if (!settingsReady) return undefined;
     let active = true;
     void invoke<boolean>("check_fresh_install")
       .then((fresh) => { if (active) setIsFreshInstall(fresh); })
-      .catch(() => undefined);
-    void invoke<{ old_version: string; new_version: string } | null>("get_upgrade_info")
-      .then((info) => { if (active) setUpgradeInfo(info); })
       .catch(() => undefined);
     // Check for partial metadata from interrupted downloads.
     if (currentSnapshot) {
@@ -1142,8 +1151,9 @@ export default function App() {
         )}
         {upgradeInfo && (
           <div className="upgrade-notice" role="status">
-            <span>{t("Upgraded from {oldVersion} to {newVersion}. Tasks are being restored.", { oldVersion: upgradeInfo.old_version, newVersion: upgradeInfo.new_version })}</span>
-            <button className="text-button" onClick={() => setUpgradeInfo(null)}>{t("Dismiss")}</button>
+            <span>{t("Upgraded from {oldVersion} to {newVersion}.", { oldVersion: upgradeInfo.old_version, newVersion: upgradeInfo.new_version })}</span>
+            <button className="text-button" disabled={upgradeNotice.busy} onClick={() => void upgradeController.current?.dismiss()}>{t(upgradeNotice.failed ? "Retry" : "Dismiss")}</button>
+            {upgradeNotice.failed && <span role="alert">{t("Could not dismiss this message. Please try again.")}</span>}
           </div>
         )}
         {partialDownloads.length > 0 && (

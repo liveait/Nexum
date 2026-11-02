@@ -3,6 +3,10 @@
 
 # 变更日志 / Changelog
 
+- **Desktop 升级提示**：修复首次保存未落盘版本记录、普通设置覆盖内部记录以及关闭提示重开后再次出现的问题。仅对 SemVer 递增显示升级；关闭失败保留提示并支持重试，迟到读取不再恢复已关闭提示。此修复不代表完整安装升级验收。
+
+  **Desktop upgrade notices**: persist the version on first save, preserve internal metadata during ordinary preference saves, and persist dismissal across relaunch. Show upgrades only for increasing SemVer precedence. Failed dismissal retains the notice with retry, and late reads cannot revive it. This repair does not accept complete installation/upgrade behavior.
+
 此处记录 Nexum 的重要变更，条目不代表所有里程碑已验收。PR #58 已合并为 `f1817f4`，恢复单连接 HTTP 与启动完成对账，验证记录见[开发指南](docs/DEVELOPMENT.md#development-workflow-entry)。PR #61 已将大文件下载统一到会话路径，并通过合并后 Rust 与 Desktop macOS CI；M4/M5 仍属部分实现，M0/M1/M3 的剩余验收见[开发计划](docs/DEVELOPMENT_PLAN.md)。
 
 This changelog records notable changes, not acceptance of every milestone. PR #58 merged as `f1817f4`, restoring single-connection HTTP and startup completion reconciliation; see the [Development Guide](docs/DEVELOPMENT.md#development-workflow-entry) for verification records. PR #61 routes large downloads through the session path and passed post-merge Rust and Desktop macOS CI. M4/M5 remain partial; see the [Development Plan](docs/DEVELOPMENT_PLAN.md) for remaining M0/M1/M3 acceptance.

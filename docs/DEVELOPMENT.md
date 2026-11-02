@@ -292,6 +292,10 @@ Vite 使用 `1420` 端口；浏览器预览不能代替 Tauri 命令验收。从
 
 Vite uses port `1420`; browser preview alone cannot exercise Tauri commands. From `apps/desktop`, use `pnpm exec tauri dev`: its hook prepares an explicit target-architecture Server and starts Vite, then opens the native window. A separate Server is needed only when Settings selects External. `pnpm exec tauri build --bundles app` runs the Server preparation hook and frontend build, then creates `target/release/bundle/macos/Nexum.app`. Add `--debug` for a debug bundle. The hook signs the staged macOS Server before hashing, and `build.rs` embeds its hash and checks its target/package version. A plain debug workspace check may have no staged Server; a release build requires it. Use the pinned CLI and frozen pnpm lockfile. Verify the finished bundle with `node scripts/verify-desktop-bundle.mjs target/release/bundle/macos/Nexum.app` from the repository root. Do not re-sign the nested Server after hashing; a distribution signature requires preparing and hashing that final signed executable before compiling Desktop.
 
+升级版本记录由后端管理：普通设置保存不能覆盖或确认 `last_seen_version`，首次保存将真实包版本一并写入。`get_upgrade_info` 只读并按 SemVer 优先级识别升级；`acknowledge_upgrade` 在写入成功后才更新内存。原生验收应覆盖普通保存保留待确认记录、关闭失败与重试、退出重开及其他偏好保留；预置旧版本设置只能证明受控提示流程，不能替代真实旧版安装升级。
+
+The backend owns upgrade-version metadata: ordinary saves cannot overwrite or acknowledge `last_seen_version`, and the first save writes the actual package version. `get_upgrade_info` is read-only and identifies upgrades by SemVer precedence; `acknowledge_upgrade` updates memory only after persistence succeeds. Native checks cover ordinary saves retaining a pending record, failed dismissal/retry, relaunch and preservation of other preferences. Seeding an older settings value verifies only the controlled notice flow, not installation over a real older artifact.
+
 本机构建 release App 后，如需验证完整包，可在 `apps/desktop` 显式添加并检查临时签名：
 
 For local bundle validation after a release build, explicitly apply and verify an ad-hoc signature from `apps/desktop`:
