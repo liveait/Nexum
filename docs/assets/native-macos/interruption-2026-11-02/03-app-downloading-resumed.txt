@@ -1,0 +1,52 @@
+Window: "Nexum Interruption QA", App: Nexum Interruption QA.
+0 标准窗口 Nexum Interruption QA, Secondary Actions: Raise
+	1 滚动区
+		2 HTML内容 Description: Nexum, URL: tauri://localhost
+			3 container
+				4 container Nexum 导航
+					5 文本 NEXUM
+					6 开关按钮 隐藏任务详情, Help: 切换任务详情, Value: on
+					7 container
+						8 按钮 概览
+						9 按钮 下载 1
+						10 按钮 Tracker
+						11 按钮 插件
+					12 按钮 通知
+					13 按钮 设置
+				14 弹出式按钮 (collapsed) 下载筛选, Value: 全部下载, Secondary Actions: Expand
+				15 text 1 / 1
+				16 按钮 添加下载
+				17 开关按钮 隐藏任务详情, Help: 切换任务详情, Value: on
+				18 按钮 (collapsed) 搜索下载, Secondary Actions: Expand
+				19 container 下载
+					20 container
+						21 开关按钮 选择 app-downloading.bin，下载中，已完成 4%, 108.9 KB/s · 还剩 9m 35s, Value: on
+						22 text 2.8 MB / 64.0 MB · 108.9 KB/s · 还剩 9m 35s /Users/archlich/Documents/Nexum-backups/desktop-interruption-20261102/downloads/app-downloading.bin
+						23 按钮 暂停 app-downloading.bin
+						24 按钮 移除 app-downloading.bin
+				25 container 任务详情
+					26 文本 任务详情
+					27 标题 app-downloading.bin, Value: 2
+						28 文本 app-downloading.bin
+					29 文本 下载中
+					30 进度指示条 (settable, float) app-downloading.bin 下载进度, Value: 4
+					31 文本 2.8 MB / 64.0 MB · 108.9 KB/s · 还剩 9m 35s
+					32 描述列表
+						33 文本 来源
+						34 container http://127.0.0.1:53166/app-downloading.bin
+							35 文本 http://127.0.0.1:53166/app-downloading.bin
+						36 文本 保存位置
+						37 container /Users/archlich/Documents/Nexum-backups/desktop-interruption-20261102/downloads/app-downloading.bin
+							38 文本 /Users/archlich/Documents/Nexum-backups/desktop-interruption-20261102/downloads/app-downloading.bin
+						39 文本 下载服务
+						40 文本 这台 Mac
+				41 text HTTP/HTTPS ↓ — ↑ — 下载服务已连接 实时更新 刚刚更新 全部下载
+	42 文本 Nexum Interruption QA
+	43 菜单按钮 窗口共享
+44 menu bar
+	45 Nexum Interruption QA
+	46 File
+	47 Edit
+	48 View
+	49 Window
+	50 Help

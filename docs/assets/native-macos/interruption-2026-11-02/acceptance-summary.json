@@ -1,0 +1,128 @@
+{
+  "date": "2026-11-02",
+  "source_sha": "4038834f7460e9966e33b3d17a2a2a45535cc44a",
+  "source_tree": "893f90622f34206b71f86ef1395b41deab46e36b",
+  "platform": "macOS arm64",
+  "bundle_identifier": "com.nexum.qa.interruption",
+  "bundle_version": "0.1.0",
+  "signature": "ad-hoc; not Developer ID/notarized",
+  "archive": {
+    "size": 9471836,
+    "sha256": "8fccb92f90e10acc14949b7a59c75daeed9dfb2a4869e4e583e8a349200459d7",
+    "crc_verified": true
+  },
+  "archive_name": "Nexum-Interruption-QA-4038834f7460-macos-arm64.zip",
+  "app_files": [
+    {
+      "path": "Contents/Info.plist",
+      "size": 1104,
+      "sha256": "f8b7250bb36c270baa9487d6ed293196e2808ca9bccc33fd92853161e75c02e2"
+    },
+    {
+      "path": "Contents/MacOS/nexum-desktop",
+      "size": 17114096,
+      "sha256": "407ba904ae13e505fe0d405c6a86924782d275b2565c5321119bd58050cdee56"
+    },
+    {
+      "path": "Contents/Resources/icon.icns",
+      "size": 1137384,
+      "sha256": "3bfcc0b57b729fa13935b3c1816c36e73c96de5a11097828f58950980f8eef08"
+    },
+    {
+      "path": "Contents/Resources/nexum-server",
+      "size": 7075424,
+      "sha256": "8916a6230e2ac2b89323dba94da9fd6f5540f8a02eadaf76f1a99ff2f6178f2b"
+    },
+    {
+      "path": "Contents/Resources/nexum-server-build.json",
+      "size": 148,
+      "sha256": "778a187d4e28e1d8ee0364540a0a76e83e75e9004ca0716d511205bc801dd7e9"
+    },
+    {
+      "path": "Contents/_CodeSignature/CodeResources",
+      "size": 2922,
+      "sha256": "ed7789f72271dc212ed95fb213c3ff3c14a3dfa14f751af02812d422da92a565"
+    }
+  ],
+  "native_creation_and_controls": true,
+  "cases": [
+    {
+      "name": "app-downloading.bin",
+      "resume_offset": 2490368,
+      "state": "completed",
+      "size": 67108864,
+      "sha256": "ce77f2df0ac6a728eab5c3f119f50555df7d81039a7080993da6fb9577eecda3",
+      "stopped_snapshot": "02-app-downloading-stopped",
+      "completed_snapshot": "04-app-downloading-completed"
+    },
+    {
+      "name": "app-paused.bin",
+      "resume_offset": 589824,
+      "state": "completed",
+      "size": 67108864,
+      "sha256": "3c99831d4177451dcc681687c54d6f888b5ec5d16a38c985a656b0cbae0cc1d7",
+      "stopped_snapshot": "07-app-paused-stopped",
+      "completed_snapshot": "09-app-paused-completed"
+    },
+    {
+      "name": "server-downloading.bin",
+      "resume_offset": 1572864,
+      "state": "completed",
+      "size": 67108864,
+      "sha256": "1baed3ba3898fdbb2345ef7a2dd9d898a86f7493af47ee32310b91dd4cb70092",
+      "stopped_snapshot": "11-server-downloading-killed",
+      "completed_snapshot": "13-server-downloading-completed"
+    },
+    {
+      "name": "server-paused.bin",
+      "resume_offset": 720896,
+      "state": "completed",
+      "size": 67108864,
+      "sha256": "183491cdc228b4b98bf8ccff3ca27fde95db4437448ee0d684e4165b9c2d48a2",
+      "stopped_snapshot": "16-server-paused-killed",
+      "completed_snapshot": "18-server-paused-completed"
+    }
+  ],
+  "paused_observation_intervals_seconds": {
+    "app-paused.bin": 16,
+    "server-paused.bin": 11,
+    "cancel.bin": 13
+  },
+  "same_process_resume_get_count": 1,
+  "native_cancel": {
+    "task_removed_from_sqlite": true,
+    "engine_partial_and_sidecar_removed": true,
+    "no_final_file_published": true,
+    "no_resurrection_on_relaunch": true
+  },
+  "completed_record_removal": {
+    "record_removed": true,
+    "final_file_preserved": true
+  },
+  "final_reopen": {
+    "completed_tasks": 3,
+    "total_completed_files": 4,
+    "additional_origin_requests": 0
+  },
+  "final_owned_processes": [],
+  "sqlite_backups": 25,
+  "sqlite_integrity_checks": "all ok",
+  "all_partial_digests": "matched source prefixes",
+  "all_final_digests": "matched source manifests",
+  "unrelated_sentinel_sha256": "2876f1e54ac84ad86dd80470618ae55c738a57053ccfbc2382d82edf110fa116",
+  "origin_request_count": 14,
+  "evidence_directory_name": "desktop-interruption-20261102",
+  "evidence_seal_sha256": "c5d78cd9525e917c27935ceefca33261b7643ca656f7843081ee61d01bcb28c7",
+  "known_baseline_gap": "Desktop hint metadata was absent: savePartialMetadata sends downloaded_bytes/total_bytes while default Tauri command arguments use downloadedBytes/totalBytes; the caller suppresses the error. This marker is separate from Engine resume metadata. Hint generation/completion cleanup is not accepted.",
+  "limits": [
+    "process crash, not power loss",
+    "no invalid range or validator change in this fixture",
+    "Desktop hint metadata not generated; separate IPC argument defect",
+    "no clean-user, VoiceOver listening, historical installation upgrade, signing/notarization acceptance",
+    "private App ID does not replace clean OS user acceptance",
+    "no exact publication/SQLite persistence crash-window injection in native App",
+    "M4 segmented routing remains disabled",
+    "UI and database snapshots captured at different times"
+  ],
+  "audit_harness_correction": "Cross-process monotonic values were unsuitable for elapsed comparison in this environment; recorded UTC intervals prove >=10 seconds of paused stability."
+}

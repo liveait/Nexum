@@ -1,0 +1,63 @@
+Window: "Nexum Interruption QA", App: Nexum Interruption QA.
+0 标准窗口 Nexum Interruption QA, Secondary Actions: Raise
+	1 滚动区
+		2 HTML内容 Description: Nexum, URL: tauri://localhost
+			3 container
+				4 container Nexum 导航
+					5 文本 NEXUM
+					6 开关按钮 隐藏任务详情, Help: 切换任务详情, Value: on
+					7 container
+						8 按钮 概览
+						9 按钮 下载
+						10 按钮 Tracker
+						11 按钮 插件
+					12 按钮 通知
+					13 按钮 设置
+				14 弹出式按钮 (collapsed) 下载筛选, Value: 全部下载, Secondary Actions: Expand
+				15 text 3 / 3
+				16 按钮 添加下载
+				17 开关按钮 隐藏任务详情, Help: 切换任务详情, Value: on
+				18 按钮 (collapsed) 搜索下载, Secondary Actions: Expand
+				19 container 下载
+					20 container
+						21 开关按钮 选择 server-paused.bin，已完成，已完成 100%, Value: on
+						22 text 64.0 MB / 64.0 MB /Users/archlich/Documents/Nexum-backups/desktop-interruption-20261102/downloads/server-paused.bin
+						23 按钮 移除 server-paused.bin
+					24 container
+						25 开关按钮 选择 app-paused.bin，已完成，已完成 100%, Value: off
+						26 text 64.0 MB / 64.0 MB /Users/archlich/Documents/Nexum-backups/desktop-interruption-20261102/downloads/app-paused.bin
+						27 按钮 移除 app-paused.bin
+					28 container
+						29 开关按钮 选择 server-downloading.bin，已完成，已完成 100%, Value: off
+						30 text 64.0 MB / 64.0 MB /Users/archlich/Documents/Nexum-backups/desktop-interruption-20261102/downloads/server-downloading.bin
+						31 按钮 移除 server-downloading.bin
+				32 container 任务详情
+					33 文本 任务详情
+					34 标题 server-paused.bin, Value: 2
+						35 文本 server-paused.bin
+					36 文本 已完成
+					37 进度指示条 (settable, float) server-paused.bin 下载进度, Value: 100
+					38 文本 64.0 MB / 64.0 MB
+					39 描述列表
+						40 文本 来源
+						41 container http://127.0.0.1:53166/server-paused.bin
+							42 文本 http://127.0.0.1:53166/server-paused.bin
+						43 文本 保存位置
+						44 container /Users/archlich/Documents/Nexum-backups/desktop-interruption-20261102/downloads/server-paused.bin
+							45 文本 /Users/archlich/Documents/Nexum-backups/desktop-interruption-20261102/downloads/server-paused.bin
+						46 文本 下载服务
+						47 文本 这台 Mac
+				48 text HTTP/HTTPS ↓ — ↑ — 下载服务已连接 实时更新 刚刚更新 全部下载
+	49 关闭按钮
+	50 全屏幕按钮 Help: 此按钮也可以执行缩放窗口的操作, Secondary Actions: 缩放窗口
+	51 最小化按钮
+	52 文本 Nexum Interruption QA
+53 menu bar
+	54 Nexum Interruption QA
+	55 File
+	56 Edit
+	57 View
+	58 Window
+	59 Help
+
+The focused UI element is 2 HTML内容 Description: Nexum, URL: tauri://localhost
