@@ -11,6 +11,7 @@ tauri-plugin-shell = "=2.3.6"
 tauri-plugin-opener = "=2.5.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 nexum-protocol = { path = "../../../crates/protocol" }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-native-certs = "0.8"

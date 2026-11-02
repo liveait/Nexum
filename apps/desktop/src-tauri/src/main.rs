@@ -34,9 +34,7 @@ struct DesktopSettings {
     language: DesktopLanguage,
     #[serde(default)]
     download_directory: Option<String>,
-    /// Version string from the last time the app was running. Used to detect
-    /// upgrades: if current CARGO_PKG_VERSION > last_seen_version, the user
-    /// has upgraded and we should re-sync tasks.
+    /// Backend-owned version recorded on first save or explicit upgrade acknowledgement.
     #[serde(default)]
     last_seen_version: Option<String>,
 }
@@ -68,7 +66,7 @@ impl Default for DesktopSettings {
 struct DesktopRuntime {
     settings: Mutex<DesktopSettings>,
     managed: ManagedServer,
-    // Serializes mode changes with task target allocation and creation.
+    // Serializes settings commits/acknowledgement with mode changes and task creation.
     creation: Mutex<()>,
 }
 
@@ -133,18 +131,24 @@ fn is_fresh_install(app: &AppHandle) -> Result<bool, String> {
 }
 
 fn read_settings(app: &AppHandle) -> Result<DesktopSettings, String> {
-    let path = settings_path(app)?;
+    read_settings_at(&settings_path(app)?)
+}
+
+fn read_settings_at(path: &Path) -> Result<DesktopSettings, String> {
     if !path.is_file() {
         return Ok(DesktopSettings::default());
     }
-    let content = std::fs::read_to_string(&path)
+    let content = std::fs::read_to_string(path)
         .map_err(|error| format!("could not read application settings: {error}"))?;
     serde_json::from_str(&content)
         .map_err(|error| format!("could not parse application settings: {error}"))
 }
 
 fn write_settings(app: &AppHandle, settings: &DesktopSettings) -> Result<(), String> {
-    let path = settings_path(app)?;
+    write_settings_at(&settings_path(app)?, settings)
+}
+
+fn write_settings_at(path: &Path, settings: &DesktopSettings) -> Result<(), String> {
     let directory = path
         .parent()
         .ok_or_else(|| "application settings path has no parent".to_owned())?;
@@ -155,7 +159,7 @@ fn write_settings(app: &AppHandle, settings: &DesktopSettings) -> Result<(), Str
     let temporary = directory.join(format!(".settings-{}.tmp", std::process::id()));
     std::fs::write(&temporary, content)
         .map_err(|error| format!("could not write settings: {error}"))?;
-    std::fs::rename(&temporary, &path).map_err(|error| format!("could not save settings: {error}"))
+    std::fs::rename(&temporary, path).map_err(|error| format!("could not save settings: {error}"))
 }
 
 #[tauri::command]
@@ -182,13 +186,13 @@ fn save_settings(
         .lock()
         .expect("download creation mutex poisoned");
     let previous_mode = state.settings().mode;
-    write_settings(&app, &settings)?;
-    // On first save, record the current version for upgrade detection.
-    if settings.last_seen_version.is_none() {
-        settings.last_seen_version = Some(env!("CARGO_PKG_VERSION").to_owned());
-    }
     let next_mode = settings.mode;
-    *state.settings.lock().expect("settings mutex poisoned") = settings;
+    persist_user_settings(
+        &state.settings,
+        settings,
+        env!("CARGO_PKG_VERSION"),
+        |next| write_settings(&app, next),
+    )?;
     if previous_mode != next_mode {
         match next_mode {
             ServerMode::Managed => state.managed.enable()?,
@@ -196,6 +200,53 @@ fn save_settings(
         }
     }
     Ok(())
+}
+
+fn persist_user_settings(
+    current: &Mutex<DesktopSettings>,
+    mut settings: DesktopSettings,
+    current_version: &str,
+    write: impl FnOnce(&DesktopSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut stored = current.lock().expect("settings mutex poisoned");
+    // Frontend preferences never own or acknowledge this internal metadata.
+    settings.last_seen_version = stored
+        .last_seen_version
+        .clone()
+        .or_else(|| Some(current_version.to_owned()));
+    write(&settings)?;
+    *stored = settings;
+    Ok(())
+}
+
+fn persist_upgrade_acknowledgement(
+    current: &Mutex<DesktopSettings>,
+    current_version: &str,
+    write: impl FnOnce(&DesktopSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut stored = current.lock().expect("settings mutex poisoned");
+    if stored.last_seen_version.as_deref() == Some(current_version) {
+        return Ok(());
+    }
+    let mut next = stored.clone();
+    next.last_seen_version = Some(current_version.to_owned());
+    write(&next)?;
+    *stored = next;
+    Ok(())
+}
+
+#[tauri::command]
+fn acknowledge_upgrade(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<DesktopRuntime>>,
+) -> Result<(), String> {
+    let _creation = state
+        .creation
+        .lock()
+        .expect("download creation mutex poisoned");
+    persist_upgrade_acknowledgement(&state.settings, env!("CARGO_PKG_VERSION"), |next| {
+        write_settings(&app, next)
+    })
 }
 
 #[tauri::command]
@@ -208,18 +259,21 @@ fn get_upgrade_info(
     _app: AppHandle,
     state: tauri::State<'_, Arc<DesktopRuntime>>,
 ) -> Result<Option<Value>, String> {
-    let settings = state.settings();
-    let current_version = env!("CARGO_PKG_VERSION");
-    match settings.last_seen_version {
-        Some(last) if last != current_version => {
-            // User upgraded — return upgrade info for the frontend to display.
-            Ok(Some(serde_json::json!({
+    Ok(upgrade_info(state.settings(), env!("CARGO_PKG_VERSION")))
+}
+
+fn upgrade_info(settings: DesktopSettings, current_version: &str) -> Option<Value> {
+    let last = settings.last_seen_version?;
+    let previous = semver::Version::parse(&last).ok()?;
+    let current = semver::Version::parse(current_version).ok()?;
+    if current.cmp_precedence(&previous).is_gt() {
+        Some(serde_json::json!({
                 "upgraded": true,
                 "old_version": last,
                 "new_version": current_version,
-            })))
-        }
-        _ => Ok(None),
+        }))
+    } else {
+        None
     }
 }
 
@@ -591,6 +645,7 @@ fn main() {
             clear_partial_metadata,
             check_fresh_install,
             get_upgrade_info,
+            acknowledge_upgrade,
             open_project_link,
         ])
         .build(tauri::generate_context!())
@@ -615,6 +670,303 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct SettingsDirectory(PathBuf);
+
+    impl SettingsDirectory {
+        fn new() -> Self {
+            let directory = std::env::temp_dir().join(download_target::random_task_id().unwrap());
+            std::fs::create_dir(&directory).unwrap();
+            Self(directory)
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join(SETTINGS_FILE)
+        }
+    }
+
+    impl Drop for SettingsDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn upgrade_record_first_save_persists_the_actual_version() {
+        let directory = SettingsDirectory::new();
+        let state = Mutex::new(DesktopSettings::default());
+        persist_user_settings(&state, DesktopSettings::default(), "0.1.0", |next| {
+            write_settings_at(&directory.path(), next)
+        })
+        .unwrap();
+        let restarted = read_settings_at(&directory.path()).unwrap();
+        assert_eq!(restarted.last_seen_version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn upgrade_record_ordinary_save_preserves_unacknowledged_backend_version() {
+        let directory = SettingsDirectory::new();
+        let state = Mutex::new(DesktopSettings {
+            last_seen_version: Some("0.0.9".to_owned()),
+            ..DesktopSettings::default()
+        });
+        persist_user_settings(&state, DesktopSettings::default(), "0.1.0", |next| {
+            write_settings_at(&directory.path(), next)
+        })
+        .unwrap();
+        let restarted = read_settings_at(&directory.path()).unwrap();
+        assert_eq!(restarted.last_seen_version.as_deref(), Some("0.0.9"));
+        assert!(upgrade_info(restarted, "0.1.0").is_some());
+        assert_eq!(
+            state.lock().unwrap().last_seen_version.as_deref(),
+            Some("0.0.9")
+        );
+    }
+
+    #[test]
+    fn upgrade_record_frontend_cannot_forge_internal_version() {
+        let directory = SettingsDirectory::new();
+        let state = Mutex::new(DesktopSettings::default());
+        let submitted = DesktopSettings {
+            last_seen_version: Some("99.0.0".to_owned()),
+            ..DesktopSettings::default()
+        };
+        persist_user_settings(&state, submitted, "0.1.0", |next| {
+            write_settings_at(&directory.path(), next)
+        })
+        .unwrap();
+        assert_eq!(
+            read_settings_at(&directory.path())
+                .unwrap()
+                .last_seen_version
+                .as_deref(),
+            Some("0.1.0")
+        );
+    }
+
+    #[test]
+    fn upgrade_record_downgrade_is_not_an_upgrade() {
+        assert!(
+            upgrade_info(
+                DesktopSettings {
+                    last_seen_version: Some("0.2.0".to_owned()),
+                    ..DesktopSettings::default()
+                },
+                "0.1.0"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn upgrade_record_unknown_version_is_not_an_upgrade() {
+        assert!(
+            upgrade_info(
+                DesktopSettings {
+                    last_seen_version: Some("unknown".to_owned()),
+                    ..DesktopSettings::default()
+                },
+                "0.1.0"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn upgrade_record_semver_precedence_ignores_build_metadata_and_unknown_versions() {
+        for (previous, current, upgraded) in [
+            (Some("0.0.9"), "0.1.0", true),
+            (Some("0.1.0"), "0.1.0", false),
+            (Some("0.2.0"), "0.1.0", false),
+            (Some("0.1.0+one"), "0.1.0+two", false),
+            (Some("0.1.0-rc.2"), "0.1.0", true),
+            (Some("0.1.0-rc.2"), "0.1.0-rc.10", true),
+            (Some("0.1.0"), "0.1.0-rc.1", false),
+            (Some("0.1"), "0.1.0", false),
+            (Some("garbage"), "0.1.0", false),
+            (Some("0.1.0"), "unknown", false),
+            (None, "0.1.0", false),
+        ] {
+            let settings = DesktopSettings {
+                last_seen_version: previous.map(str::to_owned),
+                ..DesktopSettings::default()
+            };
+            assert_eq!(
+                upgrade_info(settings, current).is_some(),
+                upgraded,
+                "{previous:?} -> {current}"
+            );
+        }
+    }
+
+    #[test]
+    fn upgrade_record_submitted_metadata_never_clears_or_acknowledges_pending_upgrade() {
+        let directory = SettingsDirectory::new();
+        let state = Mutex::new(DesktopSettings {
+            last_seen_version: Some("0.0.9".to_owned()),
+            ..DesktopSettings::default()
+        });
+        for submitted in [None, Some("0.1.0"), Some("99.0.0")] {
+            let mut value =
+                json!({"server":"localhost:39101", "refresh_interval_secs":9, "language":"en"});
+            if let Some(version) = submitted {
+                value["last_seen_version"] = json!(version);
+            }
+            let settings = serde_json::from_value(value).unwrap();
+            persist_user_settings(&state, settings, "0.1.0", |next| {
+                write_settings_at(&directory.path(), next)
+            })
+            .unwrap();
+            let restored = read_settings_at(&directory.path()).unwrap();
+            assert_eq!(restored.last_seen_version.as_deref(), Some("0.0.9"));
+            assert_eq!(restored.language, DesktopLanguage::English);
+            assert_eq!(restored.server, "localhost:39101");
+            assert_eq!(
+                upgrade_info(restored, "0.1.0").unwrap()["old_version"],
+                "0.0.9"
+            );
+        }
+    }
+
+    #[test]
+    fn upgrade_record_acknowledgement_persists_survives_restart_and_is_idempotent() {
+        let directory = SettingsDirectory::new();
+        let initial = DesktopSettings {
+            last_seen_version: Some("0.0.9".to_owned()),
+            language: DesktopLanguage::English,
+            server: "localhost:39102".to_owned(),
+            download_directory: Some("/private/example".to_owned()),
+            ..DesktopSettings::default()
+        };
+        write_settings_at(&directory.path(), &initial).unwrap();
+        let state = Mutex::new(initial);
+        persist_upgrade_acknowledgement(&state, "0.1.0", |next| {
+            write_settings_at(&directory.path(), next)
+        })
+        .unwrap();
+        let restarted = read_settings_at(&directory.path()).unwrap();
+        assert!(upgrade_info(restarted.clone(), "0.1.0").is_none());
+        assert_eq!(restarted.last_seen_version.as_deref(), Some("0.1.0"));
+        assert_eq!(restarted.language, DesktopLanguage::English);
+        assert_eq!(restarted.server, "localhost:39102");
+        assert_eq!(
+            restarted.download_directory.as_deref(),
+            Some("/private/example")
+        );
+        let state = Mutex::new(restarted);
+        persist_upgrade_acknowledgement(&state, "0.1.0", |_| {
+            panic!("idempotent acknowledgement must not write")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn upgrade_record_write_failures_keep_memory_disk_and_pending_notice_unchanged() {
+        let directory = SettingsDirectory::new();
+        let original = DesktopSettings {
+            last_seen_version: Some("0.0.9".to_owned()),
+            language: DesktopLanguage::English,
+            ..DesktopSettings::default()
+        };
+        write_settings_at(&directory.path(), &original).unwrap();
+        let before = std::fs::read(directory.path()).unwrap();
+        let state = Mutex::new(original.clone());
+        let blocked = directory
+            .0
+            .join(format!(".settings-{}.tmp", std::process::id()));
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(
+            persist_upgrade_acknowledgement(&state, "0.1.0", |next| write_settings_at(
+                &directory.path(),
+                next
+            ))
+            .is_err()
+        );
+        assert!(
+            persist_user_settings(&state, DesktopSettings::default(), "0.1.0", |next| {
+                write_settings_at(&directory.path(), next)
+            })
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(state.lock().unwrap().clone()).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+        assert_eq!(std::fs::read(directory.path()).unwrap(), before);
+        assert!(upgrade_info(state.lock().unwrap().clone(), "0.1.0").is_some());
+        std::fs::remove_dir(blocked).unwrap();
+        persist_upgrade_acknowledgement(&state, "0.1.0", |next| {
+            write_settings_at(&directory.path(), next)
+        })
+        .unwrap();
+        assert_eq!(
+            read_settings_at(&directory.path()).unwrap().language,
+            DesktopLanguage::English
+        );
+    }
+
+    #[test]
+    fn upgrade_record_failed_first_save_leaves_version_unrecorded() {
+        let state = Mutex::new(DesktopSettings::default());
+        assert!(
+            persist_user_settings(&state, DesktopSettings::default(), "0.1.0", |_| Err(
+                "storage failed".to_owned()
+            ))
+            .is_err()
+        );
+        assert!(state.lock().unwrap().last_seen_version.is_none());
+    }
+
+    #[test]
+    fn upgrade_record_concurrent_save_and_acknowledgement_preserve_latest_preferences() {
+        let directory = SettingsDirectory::new();
+        let state = Arc::new(Mutex::new(DesktopSettings {
+            last_seen_version: Some("0.0.9".to_owned()),
+            ..DesktopSettings::default()
+        }));
+        let creation = Arc::new(Mutex::new(()));
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for acknowledge in [true, false] {
+            let state = state.clone();
+            let creation = creation.clone();
+            let start = start.clone();
+            let path = directory.path();
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                let _creation = creation.lock().unwrap();
+                if acknowledge {
+                    persist_upgrade_acknowledgement(&state, "0.1.0", |next| {
+                        write_settings_at(&path, next)
+                    })
+                    .unwrap();
+                } else {
+                    let submitted = DesktopSettings {
+                        language: DesktopLanguage::English,
+                        server: "localhost:39103".to_owned(),
+                        ..DesktopSettings::default()
+                    };
+                    persist_user_settings(&state, submitted, "0.1.0", |next| {
+                        write_settings_at(&path, next)
+                    })
+                    .unwrap();
+                }
+            }));
+        }
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let restored = read_settings_at(&directory.path()).unwrap();
+        assert_eq!(restored.last_seen_version.as_deref(), Some("0.1.0"));
+        assert_eq!(restored.language, DesktopLanguage::English);
+        assert_eq!(restored.server, "localhost:39103");
+        assert_eq!(
+            serde_json::to_value(state.lock().unwrap().clone()).unwrap(),
+            serde_json::to_value(restored).unwrap()
+        );
+    }
+
     #[test]
     fn settings_round_trip_managed_external_and_language() {
         let mut settings = DesktopSettings::default();
