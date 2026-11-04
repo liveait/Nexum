@@ -169,6 +169,37 @@ The October 11 follow-up under [ADR 0007](decisions/0007-http-completion-reconci
 
 The recovery-readiness slice from `cf88455` implements bounded startup checks and controllable reconciliation after Ready. Complete local Rust gates pass (410 tests, zero failures/ignored, including Server unit, managed and persistence). The real managed loop responds to RPC while verification waits; production Server fixtures recover offline and retain proofs after SQLite rejects completion. Ready does not mean every task is terminal; clients/acceptance scripts must wait for the desired terminal state. See [M1](DEVELOPMENT_PLAN.md#m1) and [ADR 0007](decisions/0007-http-completion-reconciliation.md) for coverage. This does not change the identity/acceptance of October 10/11 native artifacts. Native large-file recovery was not covered at this backend-check stage. [PR #71](https://github.com/liveait/Nexum/pull/71) records the later isolated 64GiB controlled recovery, full-file hash, pause/resume and relaunch evidence at source `85715c3`, retaining the missing pre-cleanup binary QA database-copy boundary. The final signed candidate, VoiceOver, a clean OS user and upgrade acceptance remain open. Verify PR review/CI, distribution signing/notarization and publishing separately.
 
+<a id="november-2-native-interruption-qa"></a>
+
+#### 11 月 2 日非空任务中断恢复：原生验收 / November 2 nonempty-task interruption recovery: native QA
+
+固定源码 `4038834f7460e9966e33b3d17a2a2a45535cc44a` 的 macOS arm64 release App 使用私有名称 `Nexum Interruption QA`、ID `com.nexum.qa.interruption`、实际版本 `0.1.0` 和隔离数据／下载目录。QA ZIP 为 `Nexum-Interruption-QA-4038834f7460-macos-arm64.zip`，9,471,836 字节，SHA256 `8fccb92f90e10acc14949b7a59c75daeed9dfb2a4869e4e583e8a349200459d7`。构建、ad-hoc 签名、deep/strict 验签、包内 Server 校验和 ZIP CRC 通过；没有启动生产 ID 的 App 或发布安装包。
+
+The macOS arm64 release App at fixed source `4038834f7460e9966e33b3d17a2a2a45535cc44a` uses private name `Nexum Interruption QA`, ID `com.nexum.qa.interruption`, actual version `0.1.0`, and isolated data/download directories. Its QA ZIP is `Nexum-Interruption-QA-4038834f7460-macos-arm64.zip`, 9,471,836 bytes, SHA256 `8fccb92f90e10acc14949b7a59c75daeed9dfb2a4869e4e583e8a349200459d7`. Build, ad-hoc signing, deep/strict signature verification, bundled-Server verification and ZIP CRC passed. The production-ID App was not launched and no installer was published.
+
+通过真实 App 创建并控制四个各 64 MiB 的非空 HTTP 任务。每项只有初次 GET 200 和一次恢复 GET 206；恢复的 `Range` 精确匹配旧进程退出后的部分文件长度，`If-Range` 匹配强 ETag。四个最终文件的完整 SHA256 均与源文件一致；原生界面显示 100%，SQLite 同任务终态为 `completed`、67,108,864/67,108,864 字节、speed=0、ETA/error=NULL。
+
+Four nonempty 64 MiB HTTP tasks were created and controlled through the real App. Each has one initial GET 200 and one recovery GET 206; recovery `Range` matches the partial length after the old process exited, and `If-Range` matches the strong ETag. All four final full-file SHA256 digests match their sources. Native UI shows 100%; each corresponding SQLite terminal snapshot is `completed`, 67,108,864/67,108,864 bytes, speed=0, ETA/error=NULL.
+
+| 中断场景<br>Interruption | 已验证续传偏移（字节）<br>Verified resume offset (bytes) |
+| --- | ---: |
+| 下载中 SIGKILL App，旧 owned Server 随 EOF 退出<br>SIGKILL downloading App; old owned Server exits on EOF | 2,490,368 |
+| 暂停后 SIGKILL App，重开后自动排队／续传<br>SIGKILL paused App; automatic queue/resume on relaunch | 589,824 |
+| 下载中 SIGKILL owned Server，同 App 自动启动新 Server<br>SIGKILL downloading owned Server; same App starts a new Server | 1,572,864 |
+| 暂停后 SIGKILL owned Server，同 App 自动恢复任务<br>SIGKILL paused owned Server; same App recovers the task | 720,896 |
+
+三次暂停观察窗口分别为 16、11、13 秒，部分文件长度／前缀 SHA256 和暂停状态保持稳定。额外取消任务同进程恢复不增加 GET；原生移除后任务从 SQLite 消失，Engine 部分文件与 sidecar 清除，没有发布最终文件。移除一个已完成记录保留其正确文件；再次重开只有其余三个 Completed 记录，没有额外请求或任务复活。25 份 SQLite backup API 副本均通过完整性检查；无关 sentinel 未变化，结束后 QA App、owned Server 与 fixture 均已停止。
+
+Three paused observation windows lasted 16, 11 and 13 seconds, with stable partial lengths/prefix SHA256 and paused states. Resuming the additional cancellation task in the same process adds no GET. Native removal deletes its SQLite record and Engine partial/sidecar without publishing a final file. Removing one completed record preserves its correct file; relaunch shows the remaining three Completed records without additional requests or resurrected tasks. All 25 SQLite backup-API copies pass integrity checks. The unrelated sentinel is unchanged; the QA App, owned Server and fixture are stopped afterward.
+
+[验收摘要与产物文件哈希](assets/native-macos/interruption-2026-11-02/acceptance-summary.json)、[实际 HTTP 日志](assets/native-macos/interruption-2026-11-02/origin.jsonl)、[App 重开续传截图](assets/native-macos/interruption-2026-11-02/03-app-downloading-resumed.png)、[暂停 Server 崩溃后截图](assets/native-macos/interruption-2026-11-02/17-server-paused-restarted.png)及[最终重开截图](assets/native-macos/interruption-2026-11-02/24-final-reopen.png)随仓库保存。完整私有原始证据保留于 `desktop-interruption-20261102`，摘要记录封存清单的哈希。首次审计错误地跨进程比较 monotonic 值；已改为读取记录的 UTC，保留至少 10 秒的稳定性断言及修正说明，没有修改产品行为。
+
+The repository retains the [acceptance summary and artifact file hashes](assets/native-macos/interruption-2026-11-02/acceptance-summary.json), [actual HTTP log](assets/native-macos/interruption-2026-11-02/origin.jsonl), [App relaunch/resume capture](assets/native-macos/interruption-2026-11-02/03-app-downloading-resumed.png), [paused-Server crash/recovery capture](assets/native-macos/interruption-2026-11-02/17-server-paused-restarted.png), and [final relaunch capture](assets/native-macos/interruption-2026-11-02/24-final-reopen.png). Complete private raw evidence is preserved under `desktop-interruption-20261102`, with its sealed-manifest hash recorded in the summary. The initial audit incorrectly compared monotonic values across processes; it now uses recorded UTC, retaining an assertion of at least 10 seconds of stability and a correction record, without changing product behavior.
+
+**保留缺口**：Desktop 的提示元数据未生成；源码中 `savePartialMetadata` 发送 snake_case 字节参数，而默认 Tauri command 要求 camelCase，错误被调用方吞掉。此标记与正常工作的 Engine 续传元数据分离，提示生成及完成清理须单独修复／原生复验。它不阻止本次证据文档交付，但不能据此接受提示功能或发布。此次仅验证进程异常退出；不覆盖断电、原生发布／SQLite 保存之间的精确崩溃窗口、异常 Range 或来源变化。干净 OS 用户、VoiceOver 实际听读、历史安装升级及 Developer ID／公证／Gatekeeper／安装包仍待完成，M0/M1/M3 未完成，M4 多连接保持禁用。
+
+**Remaining gaps:** Desktop hint metadata was absent. Source `savePartialMetadata` sends snake_case byte arguments while the default Tauri command requires camelCase, and the caller suppresses the error. This marker is separate from working Engine resume metadata; hint creation/completion cleanup needs a separate repair and native recheck. It does not block delivering this evidence-only document, but neither accepts the hint feature nor authorizes release. This checks process crashes, not power loss, the exact native publication/SQLite-save crash window, invalid Range responses or changed sources. Clean-OS-user, actual VoiceOver listening, historical installation upgrades, Developer ID/notarization/Gatekeeper and installer acceptance remain open. M0/M1/M3 remain incomplete and M4 multi-connection routing stays disabled.
+
 <a id="native-macos-visual-evidence"></a>
 <a id="macos-原生界面截图留证"></a>
 
