@@ -7,6 +7,10 @@
   Status: Accepted
 - 日期 / Date: 2026-09-26
 
+实现参数按 `317dbc035fb60ffe89b0d13e9d2603ef3547ec21` 复核于 2026-11-04。当前会话控制与重启续传的操作说明见[开发指南](../DEVELOPMENT.md#server-and-cli)。
+
+Implementation parameters were checked at `317dbc035fb60ffe89b0d13e9d2603ef3547ec21` on 2026-11-04. See the [Development Guide](../DEVELOPMENT.md#server-and-cli) for current session controls and restart resume.
+
 <a id="context"></a>
 <a id="背景"></a>
 
@@ -31,8 +35,8 @@ Cross-restart resume would require stable partial-file names, validators, Range 
    `task.pause` requests a boundary pause, persists the latest progress, and transitions the task to `Paused`. The worker keeps its temporary file and response open while paused.
 3. `task.resume` 使用现有 Scheduler 槽位计数并唤醒同一个 Worker。没有可用槽位时返回 `false`，保持现有协议契约。<br>
    `task.resume` uses the existing Scheduler slot accounting and wakes the same worker. It returns `false` when no slot is available, matching the existing protocol contract.
-4. `task.remove` 将活跃传输标记为破坏性取消，唤醒 Worker，最多等待 30 秒后通过 `Core` 删除任务。Worker 仍阻塞时请求返回错误，退出后可以重试。取消会丢弃暂存文件，不进入普通失败/重试路径；已有目标文件保持不变。<br>
-   `task.remove` marks the active transfer for destructive cancellation, wakes the worker, waits up to 30 seconds for completion, and then removes the task through `Core`. If the worker remains blocked, the request returns an error and can be retried after it exits. Cancellation drops the temporary file and never enters the normal failed/retry path; an existing destination is left untouched.
+4. `task.remove` 将活跃传输标记为破坏性取消，唤醒 Worker，使用 10 秒的 Worker 完成等待预算，退出后通过 `Core` 删除任务。Worker 仍阻塞时请求返回错误，退出后可以重试。取消路径按续传／完成元数据尝试清理暂存文件，具体边界见 [ADR 0007](0007-http-completion-reconciliation.md)。<br>
+   `task.remove` marks the active transfer for destructive cancellation, wakes the worker, and uses a 10-second budget to wait for worker completion before removing the task through `Core`. If the worker remains blocked, the request returns an error and can be retried after it exits. The cancellation path attempts partial-file cleanup under the recovery/completion rules in [ADR 0007](0007-http-completion-reconciliation.md).
 5. 通用同步 `HttpEngine` Adapter 仍不声明暂停/恢复能力。在 Adapter 支持异步会话 API 前，这些控制属于 Server 自己拥有的 Worker 路径。<br>
    Keep the generic synchronous `HttpEngine` adapter pause/resume capabilities disabled. These controls belong to the server-owned worker path until the adapter supports an asynchronous session API.
 
@@ -52,8 +56,8 @@ The server already owns the worker, Core lock, scheduler slot, destination reser
 
 - 暂停和恢复只在同一 Server 进程以及 HTTP 响应仍保持有效时生效。远端或网络关闭空闲响应时，恢复仍可能失败。<br>
   Pause and resume work only while the same server process and HTTP response remain alive. A peer or network that closes an idle response can still make resume fail.
-- 阻塞中的响应读取无法立即观察 Condvar，因此 `task.pause` 可能要等到 30 分钟 HTTP 请求超时。`task.remove` 最多等待 Worker 30 秒；Worker 仍阻塞时返回错误，退出后可以重试删除。<br>
-  A blocking response read cannot observe a condition variable until the 30-minute HTTP request timeout expires, so `task.pause` may be delayed by that timeout. `task.remove` waits up to 30 seconds for the worker and returns an error if it is still blocked; the request can be retried after the worker exits.
+- 响应体读取在响应块边界及每个 1 秒无数据窗口后检查暂停／取消，连续 8 个读取窗口没有数据时判为停滞失败，收到字节后重置计数。暂停保留当前响应。同进程控制的响应体读取预算、连接／响应头等待、文件 I/O 和最终保存分别受各自边界约束。`task.remove` 的 Worker 完成等待使用 10 秒预算，超时返回可重试错误。<br>
+  Response-body reads check pause/cancellation at chunk boundaries and after each one-second no-data window. Eight consecutive empty read windows fail the transfer as stalled, while received bytes reset the counter. Pause retains the current response. Response-body control checks, connection/header waits, file I/O and final persistence have their respective boundaries. The worker-completion wait for `task.remove` uses a 10-second budget and returns a retryable error on timeout.
 - 重启恢复仍会将中断任务归一为 `Queued`；带校验的跨重启 Range 续传由[ADR 0004](0004-cross-restart-http-resume.md)定义，没有可用校验器的响应仍从零开始。<br>
   Restart recovery still normalizes interrupted work to `Queued`; validated cross-restart Range resume is defined by [ADR 0004](0004-cross-restart-http-resume.md), while responses without a usable validator still begin from byte zero.
 - 现有 JSON-RPC 返回形状不变：暂停和删除返回 `true`，恢复返回 `true` 或 `false`。<br>
