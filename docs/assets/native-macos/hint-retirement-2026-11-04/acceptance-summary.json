@@ -1,0 +1,130 @@
+{
+  "result": "passed",
+  "native_source_sha": "7174afcde66c4665f1451a94b2ed889fcc59bf4e",
+  "reviewed_at_utc": "2026-11-04T13:16:23.407575+00:00",
+  "cases": [
+    {
+      "name": "app-downloading.bin",
+      "resume_offset": 7405568,
+      "source_and_final_sha256": "1119fc45529a2ea17f9750b409c1bf191096df4cf1f973e9e5a6a046304c742b",
+      "app_sigstop_barrier_seconds": null
+    },
+    {
+      "name": "app-paused.bin",
+      "resume_offset": 2752512,
+      "source_and_final_sha256": "7bbb2031ca20f117aa12c991e6b818c27db0e3fc028f45c70e13d461bbe41bc3",
+      "app_sigstop_barrier_seconds": null
+    },
+    {
+      "name": "server-downloading.bin",
+      "resume_offset": 1245184,
+      "source_and_final_sha256": "8d9ab8e518826d9eeb67023fcfaa225abe0ebb7cd6b2095e2ce9c96f539c7b62",
+      "app_sigstop_barrier_seconds": 0.094983
+    },
+    {
+      "name": "server-paused.bin",
+      "resume_offset": 196608,
+      "source_and_final_sha256": "4337ede2251f59aa52fc4c30a40f2db8ff94bbbbb1d0361bd9e5acdf05cb913d",
+      "app_sigstop_barrier_seconds": 0.140293
+    }
+  ],
+  "pause_windows_seconds": [
+    11.055099,
+    11.098106,
+    11.124485
+  ],
+  "sqlite_backups": {
+    "managed": 26,
+    "external": 2,
+    "total": 28
+  },
+  "legacy_markers_unchanged": 6,
+  "jpeg_frames": 22,
+  "request_counts": {
+    "all": 14,
+    "head": 5,
+    "get": 9
+  },
+  "same_id_context_isolation": "download-353aeae0204470f173aa93b58c686f16",
+  "retained_managed_completed_rows": 3,
+  "retained_completed_files": 4,
+  "final_owned_processes_empty": true,
+  "fixtures_pid_absent_and_ports_refused": true,
+  "manual_and_timing_boundaries": {
+    "recorded_utc": "2026-11-04T13:08:35.937094+00:00",
+    "remote_menu_selection": "Initial Remote dropdown selection was assisted by the user, then CUA observed Remote, filled private127.0.0.1:58408 and saved through the native App.",
+    "local_menu_selection": "CUA expanded the Remote select, pressed Up, observed Local selected, pressed Return, observed Local draft and saved. Both actual modes became visible; no product defect established by the earlier unsuccessful automation.",
+    "server_crash_observation_barrier": "Both owned-Server SIGKILL cases briefly SIGSTOP the App solely to capture exact frozen post-exit partial length, then finally SIGCONT the same App for automatic supervisor restart. This is recorded separately from unstopped-App concurrency.",
+    "screenshot_boundary": "Original captures include background/transition frames. Foreground20b after native Raise/selection is used for visual completed row/inspector progress acceptance. All original image bytes retained with correct JPEG suffixes.",
+    "snapshot_boundary": "Managed24 snapshot was captured later during External mode, after native24 removal. It proves retained post-removal state at its own UTC, not an immediate simultaneous UI/database capture.",
+    "native_source_sha": "7174afcde66c4665f1451a94b2ed889fcc59bf4e"
+  },
+  "qa_zip": {
+    "size": 9463416,
+    "sha256": "1bff546bcc17beb7d8c527299dd669f61a8ff93e6b04fab6cfa7fc0d305b962f",
+    "crc_verified": true,
+    "name": "Nexum-Recovery-QA-7174afcde66c-macos-arm64.zip"
+  },
+  "preserved_prior_sealed_files": 53,
+  "preserved_prior_archives": 3,
+  "open_actionable_findings": {
+    "P0": 0,
+    "P1": 0,
+    "P2": 0
+  },
+  "milestones_accepted": [],
+  "pending_acceptance": [
+    "M0/M1 milestone criteria including deferred clean user and actual VoiceOver listening",
+    "Developer ID/notarization/Gatekeeper/installer and historical installation upgrades",
+    "Power-loss durability and exact publication/SQLite-save crash window",
+    "M4 segmentation and adversarial directory-entry replacement",
+    "Invalid Range or changed-source native cases"
+  ],
+  "schema_version": 1,
+  "base_sha": "539ed170730c06a403f84e94a19a2435ba7b130f",
+  "accepted_scope": "Legacy Desktop interruption-notice retirement and controlled native HTTP regression in the fixed QA candidate.",
+  "qa_identity": {
+    "product": "Nexum Recovery QA",
+    "bundle_id": "com.nexum.qa.hint-retirement",
+    "version": "0.1.0",
+    "target": "aarch64-apple-darwin",
+    "signing": "ad-hoc"
+  },
+  "private_evidence": {
+    "directory": "desktop-hints-20261104/followup-main-539ed170",
+    "sealed_manifest": "native-qa-seal.json",
+    "manifest_sha256": "00d57a1c3385b55d1dec95e6a8bfb90626f720a29a10967bbca7fb6cb06f0726",
+    "sealed_files": 164,
+    "independent_review_sha256": "f38ffcd10f0e490b1c8e271272759bc73003ffd2e18f8e49abaeb8aed76ca300"
+  },
+  "files": {
+    "20b-foreground-completed-progress.jpg": {
+      "bytes": 368718,
+      "sha256": "3140bcf04f4c7068d45d517a751b6418e331544c3b1fcc8998e448616d28eb55"
+    },
+    "20b-foreground-completed-progress.json": {
+      "bytes": 115,
+      "sha256": "9a6c77705aea8dbf2a58a163af73f63fa935b9b9ddab0d6bf01be120914ed54e"
+    },
+    "25-external-context.jpg": {
+      "bytes": 198777,
+      "sha256": "978813789bbb871b604fa232fa11864e20ed24ef97f37dcefa3b661bbbcd3412"
+    },
+    "25-external-context.json": {
+      "bytes": 101,
+      "sha256": "72b176482836900ecfe79bfd51ca120239dd64e46059f8d91757ff89f1fe7544"
+    },
+    "28-offline-reopen.jpg": {
+      "bytes": 266034,
+      "sha256": "e05c5691b82913085e4dc1a662c918103ae60740940ea6e007c965a032900930"
+    },
+    "28-offline-reopen.json": {
+      "bytes": 99,
+      "sha256": "6960a02e4e2ef4bb75645253bfad3bf62db7abc28ba031ad056ad6d761295a9c"
+    },
+    "origin.jsonl": {
+      "bytes": 5325,
+      "sha256": "eec18729f7427144a47274a7c0575de9016ea092ba03b84762cf5e8f15638d42"
+    }
+  }
+}
