@@ -272,9 +272,9 @@ The sheet has one focused flow:
 
    Cancel and Add Download buttons.
 
-提交时创建任务并立即排队。只有两个 RPC 都成功后才关闭 Sheet。创建成功但排队失败后，不重复创建任务的重试流程仍待实现。
+提交时创建任务并立即排队。只有创建和排队都成功后才关闭 Sheet。创建成功但排队失败时，Sheet 保留已创建的 ID 和实际分配目标，并显示排队错误；在同一表单重试只使用原 ID 排队。关闭 Sheet，或切换 Server、凭据、托管进程代次后，废弃该重试上下文。
 
-Submit creates the task and immediately queues it. The sheet closes only after both RPC calls succeed. Retrying queueing without creating a duplicate after a partial failure remains planned.
+Submit creates the task and immediately queues it. The sheet closes after both creation and queueing succeed. If creation succeeds but queueing fails, the sheet retains the created ID and allocated destination and displays the queueing error. Retrying in the same sheet only queues the original ID. Closing the sheet or changing the Server, credentials or managed-process generation discards that retry context.
 
 Server RPC 要求 ID 和目标路径；Desktop Rust 后端生成 ID，校验 HTTP(S) URL、单一安全文件名和目录，再分配目标。托管模式默认使用系统 Downloads 或已保存的默认目录，可用原生选择器为单项另选文件夹；文件名会绕开任务占用、完整文件、部分文件和 sidecar 自动添加序号。远程外部目录属于 Server 主机，支持绝对 POSIX、Windows 驱动器和 UNC 路径；Mac 不检查远程文件系统。分配不创建最终文件，Engine 的不覆盖提交继续防止后续竞态。
 
