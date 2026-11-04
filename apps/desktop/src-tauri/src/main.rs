@@ -532,52 +532,6 @@ async fn suggest_download_filename(source: String) -> Option<String> {
     download_metadata::suggest_download_filename(source).await
 }
 
-/// Saves partial download metadata so an interrupted task can be resumed.
-#[tauri::command]
-fn save_partial_metadata(
-    app: tauri::AppHandle,
-    task_id: String,
-    source: String,
-    downloaded_bytes: u64,
-    total_bytes: Option<u64>,
-) -> Result<String, String> {
-    let server_data_dir = data_dir(&app)?.join("server");
-    if !server_data_dir.is_dir() {
-        return Err("server data directory not found; start a server first".to_owned());
-    }
-    download_metadata::save_partial_metadata(
-        &server_data_dir,
-        &task_id,
-        &source,
-        downloaded_bytes,
-        total_bytes,
-    )
-    .map(|p| p.to_string_lossy().to_string())
-}
-
-/// Retrieves partial metadata for a task to reconstruct an interrupted download.
-#[tauri::command]
-fn read_partial_metadata(
-    app: tauri::AppHandle,
-    task_id: String,
-) -> Result<Option<download_metadata::PartialMetadata>, String> {
-    let server_data_dir = data_dir(&app)?.join("server");
-    if !server_data_dir.is_dir() {
-        return Ok(None);
-    }
-    download_metadata::read_partial_metadata(&server_data_dir, &task_id)
-}
-
-/// Removes partial metadata for a completed task.
-#[tauri::command]
-fn clear_partial_metadata(app: tauri::AppHandle, task_id: String) -> Result<(), String> {
-    let server_data_dir = data_dir(&app)?.join("server");
-    if !server_data_dir.is_dir() {
-        return Ok(());
-    }
-    download_metadata::clear_partial_metadata(&server_data_dir, &task_id)
-}
-
 #[tauri::command]
 fn open_project_link(app: AppHandle, link: about_links::ProjectLink) -> Result<(), String> {
     about_links::open_project_link(link, |url| app.opener().open_url(url, None::<&str>))
@@ -647,9 +601,6 @@ fn main() {
             credential_status,
             save_credential,
             clear_credential,
-            save_partial_metadata,
-            read_partial_metadata,
-            clear_partial_metadata,
             check_fresh_install,
             get_upgrade_info,
             acknowledge_upgrade,

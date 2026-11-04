@@ -200,6 +200,18 @@ The repository retains the [acceptance summary and artifact file hashes](assets/
 
 **Remaining gaps:** Desktop hint metadata was absent. Source `savePartialMetadata` sends snake_case byte arguments while the default Tauri command requires camelCase, and the caller suppresses the error. This marker is separate from working Engine resume metadata; hint creation/completion cleanup needs a separate repair and native recheck. It does not block delivering this evidence-only document, but neither accepts the hint feature nor authorizes release. This checks process crashes, not power loss, the exact native publication/SQLite-save crash window, invalid Range responses or changed sources. Clean-OS-user, actual VoiceOver listening, historical installation upgrades, Developer ID/notarization/Gatekeeper and installer acceptance remain open. M0/M1/M3 remain incomplete and M4 multi-connection routing stays disabled.
 
+<a id="desktop-interruption-notice-retirement"></a>
+
+#### Desktop 旧中断提示退役 / Desktop legacy interruption-notice retirement
+
+基线 `317dbc035fb60ffe89b0d13e9d2603ef3547ec21` 的后续切片移除旧 Desktop 提示层。该横幅仅提供刷新／关闭按钮，独立标记的参数缺陷及生命周期竞态使其不能可靠表达上次会话。任务恢复采用 SQLite 和 Engine 目标旁的校验元数据，任务列表继续呈现恢复进度、暂停、失败及完成状态。退役范围包含前端横幅／状态／读写调用、三个私有 Tauri command、Rust 标记文件辅助函数和对应的单个 round-trip 单元测试。完整 Server／Engine 恢复覆盖保留在验证门槛内。
+
+The follow-up slice based on `317dbc035fb60ffe89b0d13e9d2603ef3547ec21` retires the legacy Desktop notice layer. The banner only offered refresh/dismiss actions; its separate marker argument defect and lifecycle races prevented reliable previous-session reporting. Task recovery uses SQLite and validated Engine metadata beside the destination, while the task list presents recovery progress, pause, failure and completion. Retirement covers frontend banner/state/file calls, three private Tauri commands, Rust marker-file helpers and their single round-trip unit test. Full Server/Engine recovery coverage remains in the verification gates.
+
+历史 Desktop `.<task_id>.nexum.part.json` 文件保留在原数据目录，作为旧版遗留文件处理。新候选的原生任务创建、中断重开、完成／取消和连接切换仍须复验；源码 `4038834` 的四项已通过记录独立保留。此切片当前为实现待验收，M0／M1／M3 的剩余门槛沿用上节记录。
+
+Legacy Desktop `.<task_id>.nexum.part.json` files are retained in their original data directory. The new candidate still requires native task creation, crash/reopen, completion/cancellation and connection-switch checks. The four passing cases at source `4038834` remain separately recorded. This slice is implemented awaiting acceptance; the remaining M0/M1/M3 gates are recorded above.
+
 <a id="native-macos-visual-evidence"></a>
 <a id="macos-原生界面截图留证"></a>
 
