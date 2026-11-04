@@ -6,7 +6,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { hasHardLineBreak, isHttpSource, isValidFileName, suggestedFileName } from "./downloadDraft";
 import { isMessageKey, resolveLocale, translate, TranslationProvider, useTranslation, type LanguagePreference, type Locale, type MessageKey, type Translate } from "./i18n";
 import { isConnectionReady, type ConnectionMode, type ManagedConnectionStatus } from "./connectionState";
-import { addDownload, invokeTaskCommand, savePartialMetadata, readPartialMetadata, clearPartialMetadata, type CreatedDownload, type TaskCommand, type PartialMetadata } from "./taskCommands";
+import { addDownload, invokeTaskCommand, type CreatedDownload, type TaskCommand } from "./taskCommands";
 import { valueForContext, type ContextValue, type TaskContext } from "./taskContext";
 import { taskDisplayName } from "./taskPresentation";
 import { openProjectLink, readAboutVersion, type AboutVersion, type ProjectLink } from "./aboutContent";
@@ -363,7 +363,6 @@ export default function App() {
   const [upgradeNotice, setUpgradeNotice] = useState<UpgradeNoticeState>(EMPTY_UPGRADE_NOTICE);
   const upgradeController = useRef<UpgradeNoticeController | null>(null);
   const upgradeInfo = upgradeNotice.info;
-  const [partialDownloads, setPartialDownloads] = useState<PartialMetadata[]>([]);
   const localServer = mode === "managed" || isLocalServerAddress(externalServer);
   const remoteFinalPath = localServer ? null : serverDestination(newDirectory, newFileName);
   const destinationPreview = createdDownload?.destination ?? (localServer ? finalPath : remoteFinalPath);
@@ -509,32 +508,6 @@ export default function App() {
     void controller.load();
     return () => { controller.dispose(); firstRunController.current = null; };
   }, [settingsReady]);
-
-  // Check partial downloads once settings and a task snapshot are ready.
-  useEffect(() => {
-    if (!settingsReady) return undefined;
-    let active = true;
-    // Check for partial metadata from interrupted downloads.
-    if (currentSnapshot) {
-      const items = currentSnapshot.items;
-      const partials: PartialMetadata[] = [];
-      void Promise.all(
-        items
-          .filter((task: TaskItem) => task.state === "Downloading" || task.state === "Paused")
-          .map(async (task: TaskItem) => {
-            try {
-              const meta = await readPartialMetadata(invoke, task.id);
-              if (meta && active) partials.push(meta);
-            } catch { /* ignore */ }
-          }),
-      ).then(() => {
-        if (active && partials.length > 0) {
-          setPartialDownloads(partials);
-        }
-      });
-    }
-    return () => { active = false; };
-  }, [settingsReady, currentSnapshot, invoke]);
 
   useEffect(() => {
     if (!settingsReady) return undefined;
@@ -966,10 +939,6 @@ export default function App() {
       await invokeTaskCommand(invoke, command, id);
       if (snapshotContext.current !== context) return;
       pushNotification(taskActionMessage(successMessage, name), "success", command === "task_remove" ? undefined : id);
-      // Clear partial metadata when a task is removed (interrupted downloads no longer need recovery).
-      if (command === "task_remove") {
-        void clearPartialMetadata(invoke, id).catch(() => {});
-      }
       await refreshTasks();
     } catch (caught) {
       if (snapshotContext.current !== context) return;
@@ -1084,10 +1053,6 @@ export default function App() {
         await refreshTasks();
         return;
       }
-      // Save partial metadata for interruption recovery.
-      void savePartialMetadata(invoke, result.id, newSource.trim(), 0, null)
-        .then(() => {})
-        .catch(() => {});
       nameProbeVersion.current += 1;
       addAttempt.current = null;
       setCreatedDownload(null);
@@ -1162,13 +1127,6 @@ export default function App() {
             <span>{t("Upgraded from {oldVersion} to {newVersion}.", { oldVersion: upgradeInfo.old_version, newVersion: upgradeInfo.new_version })}</span>
             <button className="text-button" disabled={upgradeNotice.busy} onClick={() => void upgradeController.current?.dismiss()}>{t(upgradeNotice.failed ? "Retry" : "Dismiss")}</button>
             {upgradeNotice.failed && <span role="alert">{t("Could not dismiss this message. Please try again.")}</span>}
-          </div>
-        )}
-        {partialDownloads.length > 0 && (
-          <div className="partial-notice" role="status">
-            <span>{t(partialDownloads.length === 1 ? "Found {count} incomplete download from a previous session." : "Found {count} incomplete downloads from previous sessions.", { count: partialDownloads.length })}</span>
-            <button className="text-button" onClick={() => { setPartialDownloads([]); void refreshTasks(); }}>{t("Refresh downloads")}</button>
-            <button className="text-button" onClick={() => setPartialDownloads([])}>{t("Dismiss")}</button>
           </div>
         )}
         {mode === "managed" && !canConnect && <ManagedServerStatus status={connectionStatus} busy={retryingServer} onRetry={() => void retryManagedServer()} /> }
