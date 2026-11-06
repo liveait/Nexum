@@ -145,6 +145,11 @@ impl std::error::Error for EngineError {}
 pub trait EngineAdapter {
     fn name(&self) -> &str;
     fn capabilities(&self) -> EngineCapabilities;
+    /// Returns an optional long-running transfer factory. This hook must only
+    /// perform bounded in-memory work, since callers may hold their Core lock.
+    fn session_factory(&self) -> Option<Arc<dyn TransferSessionFactory>> {
+        None
+    }
     fn start(
         &mut self,
         task_id: &TaskId,
@@ -187,6 +192,44 @@ pub trait TransferSession: Send + Sync {
     /// Blocks until the transfer reaches a terminal state (Completed or Failed)
     /// and returns (state, progress).
     fn wait(self: Box<Self>) -> (EngineTaskState, Progress);
+}
+
+/// Owned inputs for a single-file session. Protocol-specific resume validation
+/// belongs to the factory. HTTP retains its existing control and receipt types.
+pub struct TransferSessionRequest {
+    pub source: String,
+    pub destination: String,
+    pub partial_path: PathBuf,
+    pub control: HttpTransferControl,
+    pub completion_context: Option<CompletionContext>,
+}
+
+/// Starts sessions outside the caller's Core lock. Before returning an error,
+/// a factory must stop and join any workers it created, leaving no active I/O.
+/// Consumers use [`start_transfer_session`] to close the control on failure.
+pub trait TransferSessionFactory: Send + Sync {
+    fn start(
+        &self,
+        request: TransferSessionRequest,
+    ) -> Result<Box<dyn TransferSession>, EngineError>;
+}
+
+/// Starts a selected factory, waking pause waiters if no session is returned.
+/// Cancellation before startup prevents the factory from being invoked.
+pub fn start_transfer_session(
+    factory: &dyn TransferSessionFactory,
+    request: TransferSessionRequest,
+) -> Result<Box<dyn TransferSession>, EngineError> {
+    let control = request.control.clone();
+    let result = if control.is_cancelled() {
+        Err(EngineError::Cancelled)
+    } else {
+        factory.start(request)
+    };
+    if result.is_err() {
+        control.mark_finished();
+    }
+    result
 }
 
 /// Trait for engines that support cross-restart resume after a process restart.
@@ -960,6 +1003,32 @@ pub struct HttpEngine {
     client: reqwest::Client,
     tasks: std::collections::HashMap<String, (TaskId, EngineTaskState, Progress, String)>,
     next_handle: u64,
+}
+
+struct HttpSessionFactory;
+
+impl TransferSessionFactory for HttpSessionFactory {
+    fn start(
+        &self,
+        request: TransferSessionRequest,
+    ) -> Result<Box<dyn TransferSession>, EngineError> {
+        let has_valid_partial = resumable_partial_progress(
+            &request.source,
+            &request.destination,
+            &request.partial_path,
+        )
+        .is_ok_and(|progress| progress.is_some());
+        HttpTransferSession::start_download_with_partial(
+            &HttpEngine::new(),
+            &request.source,
+            &request.destination,
+            &request.partial_path,
+            request.control,
+            has_valid_partial,
+            request.completion_context,
+        )
+        .map(|session| Box::new(session) as Box<dyn TransferSession>)
+    }
 }
 
 /// Shared control state for a blocking HTTP transfer.
@@ -3034,6 +3103,10 @@ impl EngineAdapter for HttpEngine {
         HttpEngine::capabilities(self)
     }
 
+    fn session_factory(&self) -> Option<Arc<dyn TransferSessionFactory>> {
+        Some(Arc::new(HttpSessionFactory))
+    }
+
     fn start(
         &mut self,
         task_id: &TaskId,
@@ -3110,6 +3183,36 @@ impl EngineRegistry {
             .iter()
             .find(|engine| engine.name() == name)
             .map(|engine| engine.as_ref())
+    }
+
+    /// Selects one factory by declared protocol, ignoring synchronous-only
+    /// adapters. Ambiguous registrations fail instead of relying on order.
+    pub fn session_factory_for_protocol(
+        &self,
+        protocol: &str,
+    ) -> Result<Arc<dyn TransferSessionFactory>, EngineError> {
+        let mut selected = None;
+        for engine in &self.engines {
+            if engine
+                .capabilities()
+                .supported_protocols
+                .iter()
+                .any(|supported| supported.eq_ignore_ascii_case(protocol))
+                && let Some(factory) = engine.session_factory()
+            {
+                if selected.is_some() {
+                    return Err(EngineError::Failed(format!(
+                        "ambiguous transfer session factories for protocol: {protocol}"
+                    )));
+                }
+                selected = Some(factory);
+            }
+        }
+        selected.ok_or_else(|| {
+            EngineError::Failed(format!(
+                "no transfer session factory for protocol: {protocol}"
+            ))
+        })
     }
 
     pub fn start_engine(
@@ -3388,7 +3491,10 @@ mod tests {
             "fake"
         }
         fn capabilities(&self) -> EngineCapabilities {
-            EngineCapabilities::BASIC
+            EngineCapabilities {
+                supported_protocols: &["legacy"],
+                ..EngineCapabilities::BASIC
+            }
         }
         fn start(
             &mut self,
@@ -4284,11 +4390,133 @@ mod tests {
         assert_eq!(registry.names(), vec!["fake"]);
         assert!(registry.get("fake").is_some());
         assert!(registry.get("missing").is_none());
+        assert!(registry.get("fake").unwrap().session_factory().is_none());
+        assert!(registry.session_factory_for_protocol("legacy").is_err());
         assert!(
             registry
                 .start_engine("fake", &TaskId::new("x"), "https://x", "/x")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn registry_routes_only_available_protocol_factories() {
+        let mut registry = EngineRegistry::new();
+        registry.register(Box::new(FakeEngine));
+        registry.register(Box::new(HttpEngine::new()));
+        for protocol in ["http", "https", "HTTP", "hTtPs"] {
+            assert!(registry.session_factory_for_protocol(protocol).is_ok());
+        }
+        for protocol in ["", "ftp", "legacy"] {
+            assert!(registry.session_factory_for_protocol(protocol).is_err());
+        }
+    }
+
+    #[test]
+    fn registry_rejects_ambiguous_session_factories() {
+        let mut registry = EngineRegistry::new();
+        registry.register(Box::new(HttpEngine::new()));
+        registry.register(Box::new(HttpEngine::new()));
+        assert!(registry.session_factory_for_protocol("http").is_err());
+        assert!(registry.session_factory_for_protocol("HTTPS").is_err());
+    }
+
+    struct StartFailureFactory {
+        calls: AtomicU64,
+    }
+
+    impl TransferSessionFactory for StartFailureFactory {
+        fn start(
+            &self,
+            _request: TransferSessionRequest,
+        ) -> Result<Box<dyn TransferSession>, EngineError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(EngineError::Failed("factory startup rejected".into()))
+        }
+    }
+
+    #[test]
+    fn failed_session_start_finishes_control() {
+        let dir = TestDir::new();
+        let control = HttpTransferControl::new();
+        let factory = StartFailureFactory {
+            calls: AtomicU64::new(0),
+        };
+        let result = start_transfer_session(
+            &factory,
+            TransferSessionRequest {
+                source: "http://127.0.0.1:1/unused".into(),
+                destination: dir.0.join("file").to_string_lossy().into_owned(),
+                partial_path: dir.0.join("partial"),
+                control: control.clone(),
+                completion_context: None,
+            },
+        );
+        assert!(matches!(result, Err(EngineError::Failed(_))));
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+        assert!(control.is_finished());
+        control.request_pause().unwrap();
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cancellation_before_start_skips_factory() {
+        let dir = TestDir::new();
+        let control = HttpTransferControl::new();
+        control.cancel();
+        let factory = StartFailureFactory {
+            calls: AtomicU64::new(0),
+        };
+        let result = start_transfer_session(
+            &factory,
+            TransferSessionRequest {
+                source: "http://127.0.0.1:1/unused".into(),
+                destination: dir.0.join("file").to_string_lossy().into_owned(),
+                partial_path: dir.0.join("partial"),
+                control: control.clone(),
+                completion_context: None,
+            },
+        );
+        assert!(matches!(result, Err(EngineError::Cancelled)));
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 0);
+        assert!(control.is_finished());
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn registry_http_session_keeps_completion_context_and_final_progress() {
+        let dir = TestDir::new();
+        let destination = dir.0.join("file");
+        let partial_path = resumable_partial_path(&destination);
+        let data = dir.0.join("data");
+        std::fs::create_dir(&data).unwrap();
+        let context = CompletionContext::new("factory-task", &data);
+        let (source, origin) =
+            serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+        let mut registry = EngineRegistry::new();
+        registry.register(Box::new(HttpEngine::new()));
+        let factory = registry.session_factory_for_protocol("http").unwrap();
+        let control = HttpTransferControl::new();
+        let session = start_transfer_session(
+            factory.as_ref(),
+            TransferSessionRequest {
+                source,
+                destination: destination.to_string_lossy().into_owned(),
+                partial_path: partial_path.clone(),
+                control: control.clone(),
+                completion_context: Some(context.clone()),
+            },
+        )
+        .unwrap();
+        let (state, progress) = session.wait();
+        origin.join().unwrap();
+        assert_eq!(state, EngineTaskState::Completed);
+        assert_eq!(progress.downloaded_bytes, 5);
+        assert_eq!(progress.total_bytes, Some(5));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"hello");
+        assert!(completion_receipt_path(&context).is_file());
+        assert!(!partial_path.exists());
+        assert!(control.is_finished());
     }
 
     #[test]

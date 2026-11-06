@@ -12,8 +12,8 @@ use nexum_core::{
         has_pending_completion, remove_resumable_files, resumable_partial_progress,
     },
     nexum_engine::{
-        EngineError, EngineTaskState, HttpEngine, HttpTransferControl, HttpTransferSession,
-        TransferSession,
+        EngineError, EngineTaskState, HttpTransferControl, TransferSessionFactory,
+        TransferSessionRequest, start_transfer_session,
     },
     nexum_resolver::ResolveKind,
     nexum_scheduler::{BandwidthPolicyKind, SchedulerConfig},
@@ -307,6 +307,7 @@ struct HttpTransfer {
     latest_progress: Arc<Mutex<nexum_core::nexum_domain::Progress>>,
     remove_requested: Arc<AtomicBool>,
     recovery_only: bool,
+    session_factory: Option<Arc<dyn TransferSessionFactory>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -650,32 +651,25 @@ fn run_session_download(
     let id = transfer.id.clone();
     let partial_path = transfer.partial_path.clone();
     let completion_context = transfer.completion_context.clone();
-    let control = transfer.control.clone();
     let source = transfer.source.clone();
     let destination = transfer.destination.clone();
 
-    // Check if a valid partial exists (restored by claim_next_http_transfer).
-    // When resuming, open the partial in append mode so the partial data is preserved.
-    let has_valid_partial = resumable_partial_progress(
-        &transfer.source,
-        &transfer.destination,
-        &transfer.partial_path,
-    )
-    .is_ok_and(|p| p.is_some());
-
-    // Start the session-based download. The session owns a cloned reqwest
-    // Client; the background thread writes directly to the partial path so
-    // the stall test can observe the partial file during download.
-    // Keep a clone of the control to check is_cancelled after wait().
+    // Factory selection happened before the scheduler claim. Startup and
+    // protocol-specific partial validation run outside the Core lock.
     let control_clone = transfer.control.clone();
-    let session = match HttpTransferSession::start_download_with_partial(
-        &HttpEngine::new(),
-        &source,
-        &destination,
-        &partial_path,
-        control,
-        has_valid_partial,
-        Some(completion_context.clone()),
+    let session = match start_transfer_session(
+        transfer
+            .session_factory
+            .as_ref()
+            .expect("network transfer has a selected factory")
+            .as_ref(),
+        TransferSessionRequest {
+            source: source.clone(),
+            destination: destination.clone(),
+            partial_path: partial_path.clone(),
+            control: transfer.control.clone(),
+            completion_context: Some(completion_context.clone()),
+        },
     ) {
         Ok(session) => session,
         Err(error) => {
@@ -688,7 +682,15 @@ fn run_session_download(
                 &partial_path,
                 &completion_context,
                 false,
-                Err(error),
+                Err(
+                    if control_clone.is_cancelled()
+                        || transfer.remove_requested.load(Ordering::Acquire)
+                    {
+                        EngineError::Cancelled
+                    } else {
+                        error
+                    },
+                ),
             );
         }
     };
@@ -747,8 +749,7 @@ fn run_session_download(
     // made RPC callers unable to distinguish a local publication refusal from
     // a network failure.
     let session_error = session.error();
-    let (final_state, final_progress) =
-        <HttpTransferSession as TransferSession>::wait(Box::new(session));
+    let (final_state, final_progress) = session.wait();
 
     let cancelled = final_state == EngineTaskState::Failed && control_clone.is_cancelled();
     let completed = final_state == EngineTaskState::Completed;
@@ -983,6 +984,27 @@ fn claim_next_http_transfer(
             std::fs::symlink_metadata(completion_receipt_path(&completion_context)),
             Err(error) if error.kind() == io::ErrorKind::NotFound
         );
+    let session_factory = if recovery_only {
+        None
+    } else {
+        let protocol = match state
+            .core
+            .resolve_source(&source)
+            .expect("matching queued task has a valid HTTP source")
+            .kind
+        {
+            ResolveKind::Http => "http",
+            ResolveKind::Https => "https",
+            _ => unreachable!("matching queued task has an HTTP source"),
+        };
+        Some(
+            state
+                .core
+                .engines
+                .session_factory_for_protocol(protocol)
+                .map_err(|error| RpcErrorObject::internal_error(error.to_string()))?,
+        )
+    };
     let resume_progress = if recovery_only {
         None
     } else {
@@ -1021,6 +1043,7 @@ fn claim_next_http_transfer(
         latest_progress: Arc::new(Mutex::new(latest_progress)),
         remove_requested: Arc::new(AtomicBool::new(false)),
         recovery_only,
+        session_factory,
     };
     state.active_http.insert(id, transfer.clone());
     state.active_destinations.insert(active_destination);
