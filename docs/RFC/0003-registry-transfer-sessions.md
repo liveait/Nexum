@@ -68,3 +68,19 @@ Retain controls, source/Range validation, file/sidecar identity, pre-publication
 FTP RFC 决定依赖、FTPS 模式、凭据作用域、版本化恢复格式和可信前缀复用。BT RFC 决定 v1／hybrid／v2-only、torrent 内容上传、发现／上传／做种策略、文件树预约、分片恢复、持有文件存储、真正的写入退出屏障和多文件完成证明。实际协议采用的文件发布／清理机制须通过平台验证，首发门槛见[开发计划](../DEVELOPMENT_PLAN.md#2-delivery-milestones)。
 
 The FTP RFC decides dependencies, FTPS modes, credential scope, versioned recovery and trustworthy prefix reuse. The BT RFC decides v1/hybrid/v2-only, torrent-content upload, discovery/upload/seeding, tree reservations, piece recovery, held-file storage, actual write-drain barriers and multi-file completion proofs. Each protocol's publication/cleanup mechanisms require platform verification. See the [Development Plan](../DEVELOPMENT_PLAN.md#2-delivery-milestones) for first-release gates.
+
+<a id="local-consumers-and-baseline-finding"></a>
+
+## 本地消费者与基线问题 / Local consumers and baseline finding
+
+固定产品源码 `311aa4a` 的真实 Server／CLI 检查完成 8 MiB 文件下载、完整哈希和 SQLite Completed、暂停后同 GET 恢复、取消清理、三槽占满后释放给第四任务，以及 Server 强退后从 524,288 字节精确 Range／If-Range 续传。关闭源站后离线重开没有额外 GET，18 份 SQLite 副本完整，所属进程均已退出。本轮采用私有数据与下载目录，首发协议的最终原生候选验收继续按开发计划执行。
+
+Real Server/CLI checks at product source `311aa4a` cover 8 MiB downloads, full hashes and SQLite Completed, same-GET pause/resume, cancellation cleanup, release of one of three occupied slots to a fourth task, and exact Range/If-Range resume from 524,288 bytes after a Server crash. Offline reopen with the origin stopped adds no GET. All 18 SQLite backups pass integrity checks and owned processes exit. Checks use private data/download directories, with final native-candidate acceptance for first-release protocols tracked in the Development Plan.
+
+消费者首轮“暂停返回后的首个 SQLite 计数已是最终暂停值”断言失败，原记录保留。F0 的三次精确观测中，文件长度和 SHA256 已停止变化，数据库落后一个 64 KiB 块并在约 0.100–0.114 秒后补齐。独立构建的基线 `b9bb2d4` 使用同一脚本也在三次观测中复现，约 0.101–0.127 秒补齐；状态始终为 Paused，速率为零，ETA 为空。既有控制、完成和进度轮询函数逐字节相同。
+
+The initial consumer assertion that the first SQLite count after pause already equals the final paused count fails, with the original result retained. In three F0 observations, file length and SHA256 stop changing while the database trails by one 64 KiB chunk and catches up after approximately 0.100–0.114 seconds. An independently built `b9bb2d4` baseline reproduces this with the same script in three observations, catching up after approximately 0.101–0.127 seconds. State remains Paused with zero speed and no ETA. Existing control, completion and progress-polling functions are byte-identical.
+
+该继承的进度快照延迟作为已知 P2 接受本次工厂路由独立交付。文件已停止写入，最终完整性、取消清理和重启恢复通过，F0 没有扩大该窗口。首发前另行修复暂停时进度采样／持久化的同步，并增加对应的确定性回归；本次不把原始计数断言记为通过，也不据此完成 M1／M2／M5。
+
+This inherited progress-snapshot delay is accepted as a known P2 for independent delivery of factory routing. Files have stopped writing, final integrity/cancellation/restart recovery pass, and F0 does not widen the observed window. Before the first release, fix pause-time progress sampling/persistence synchronization separately and add a deterministic regression. The original counter assertion remains failed, and this slice completes neither M1, M2 nor M5.

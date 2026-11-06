@@ -367,6 +367,10 @@ Motrix features such as automatic Tracker lists, UPnP/NAT-PMP, upload limits, la
 
 **Contract work package (F0 locally verified).** Optional factories, Registry protocol selection and the existing HTTP consumer are wired under RFC 0003, retaining synchronous-adapter compatibility. General recovery and FTP/BT wiring retain their M5/M6 acceptance gates. [ADR 0008](decisions/0008-long-running-transfer-contract.md) records the design and type boundaries.
 
+**首发前待修 P2**。真实 CLI 检查发现暂停返回后 SQLite 进度短暂落后文件长度，约 0.1 秒后补齐，文件字节及摘要已稳定；同脚本在 `b9bb2d4` 复现。F0 的独立接受原因、原始失败边界和后续同步修复见 [RFC 0003](RFC/0003-registry-transfer-sessions.md#local-consumers-and-baseline-finding)。
+
+**P2 to fix before the first release.** Real CLI checks find SQLite progress briefly trailing file length after pause, catching up after approximately 0.1 seconds while file bytes/digests remain stable. The same script reproduces this at `b9bb2d4`. [RFC 0003](RFC/0003-registry-transfer-sessions.md#local-consumers-and-baseline-finding) records independent F0 acceptance, the original failed assertion and the follow-up synchronization fix.
+
 **M5 HTTP 会话实现状态**。`HttpTransferSession` 沿用后台线程、进度和控制，F0 由 Registry 选择的工厂进入该会话。`f1817f4` 及 PR #61 已交付的单连接控制、整文件进度、完成恢复和统一入口继续回归验证。F0 保留原有下载 I/O 结束后的终态等待语义；后续 FTP／BT 的恢复格式和多 Worker 退出屏障单独设计。基线 `3768c3a` 的 40 项通过、11 项失败记录保留为历史。
 
 **M5 HTTP session implementation status.** `HttpTransferSession` retains its background thread, progress and controls, entered through a Registry-selected factory in F0. Regression checks retain the single-connection controls, whole-file progress, completion recovery and unified entry delivered by `f1817f4` and PR #61. F0 retains the terminal wait after existing download I/O ends. Later FTP/BT recovery formats and multi-worker exit barriers require their respective designs. The `3768c3a` record of 40 passes and 11 failures remains historical.
