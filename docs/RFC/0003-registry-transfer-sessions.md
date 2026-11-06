@@ -1,7 +1,7 @@
 # RFC 0003 — Registry 传输会话路由 / Registry transfer-session routing
 
-- 状态为提案，F0 实现与验收分别记录。
-  Status is proposed, with F0 implementation and acceptance recorded separately.
+- F0 方案已通过固定提交 `44113fd` 的独立审查，实现与本地完整 Rust 验证通过。真实消费者、最终源码审查及合并前后 CI 由对应 PR 记录。
+  The F0 design passed independent review at fixed commit `44113fd`. Implementation and complete local Rust checks pass. The corresponding PR records real consumers, final-source review and pre/post-merge CI.
 - 日期 / Date `2026-11-06`
 - 实现基线 / Implementation baseline `b9bb2d4bc9aebfe9d3c8813d33f9bfbc03ed56a9`
 
