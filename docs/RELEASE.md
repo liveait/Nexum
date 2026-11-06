@@ -10,6 +10,10 @@
 
 ## 当前状态 / Current Status
 
+首发范围于 2026-11-06 按维护者要求更新，正式 macOS 候选必须同时通过 HTTP(S)、FTP、BT 种子和 Magnet 的真实 CLI／原生 Desktop 下载、控制、完整性及重启恢复验收，并完成 M0／M1／M3 的原生与分发门槛。FTP／BT 尚未实现，当前正式下载继续关闭。FTPS 模式、BT 版本与做种等变体须在协议 RFC 中明确范围。下文带日期和源码身份的 HTTP 证据保留其原验收范围。当前依赖顺序见[开发计划](DEVELOPMENT_PLAN.md#2-delivery-milestones)。
+
+The maintainer's first-release scope was updated on 2026-11-06. The official macOS candidate must pass real CLI/native Desktop download, control, integrity and restart-recovery acceptance for HTTP(S), FTP, torrent files and Magnet, together with the native and distribution gates in M0/M1/M3. FTP/BT remain unimplemented and official downloads remain closed. Protocol RFCs must define FTPS modes, BT versions and seeding variants. Dated source-bound HTTP evidence below retains its original scope. See the [Development Plan](DEVELOPMENT_PLAN.md#2-delivery-milestones) for the dependency order.
+
 仓库目前没有自动发布工作流，当前检出也没有版本标签。`.github/workflows/ci.yml` 在推送和 Pull Request 上执行 Rust 格式、检查、测试和 Clippy。新增的 macOS job 安装 pnpm 11.25.0 和 Node.js 22，使用冻结锁文件安装 Desktop 依赖，构建前端及 macOS `.app`，并检查语言声明、包内 Server 的哈希／版本／架构及嵌套签名，以及本机临时签名的 App 签名。CI 仍不构建 Browser 扩展，不进行分发签名或公证，也不会发布 GitHub Release。各包与应用清单目前声明 `0.1.0`，而变更日志仍将该版本标为 TBD。
 
 There is no automated release workflow or version tag in this checkout. `.github/workflows/ci.yml` runs Rust formatting, check, tests, and Clippy on pushes and pull requests. Its macOS job installs pnpm 11.25.0 and Node.js 22, installs the Desktop dependencies from the frozen lockfile, builds the frontend and a macOS `.app`, and checks language declarations, the bundled Server hash/version/architecture and nested signature, and the locally ad-hoc-signed App signature. CI does not build the Browser extension, sign or notarize for distribution, or publish a GitHub Release. The packages and app manifests currently declare `0.1.0`, while the changelog still marks that release as TBD.

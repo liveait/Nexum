@@ -24,9 +24,9 @@
 
 ## 当前状态 / Status
 
-首个 macOS 版本仍在验收，尚无正式安装包。原生可访问性、全新用户／升级，以及分发签名、公证和安装验收仍待完成。
+首个 macOS 版本须支持 HTTP(S)、FTP、BT 种子和磁力链接，尚无正式安装包。FTP／BT 实现及端到端验收、原生可访问性、全新用户／升级，以及分发签名、公证和安装验收仍待完成。
 
-The first macOS release is still in validation, with no official installer yet. Native accessibility, clean-user/upgrade, distribution signing, notarization and installation acceptance remain open.
+The first macOS release requires HTTP(S), FTP, torrent files and magnet links, with no official installer yet. FTP/BT implementation and end-to-end acceptance, native accessibility, clean-user/upgrade, distribution signing, notarization and installation acceptance remain open.
 
 - HTTP / HTTPS 单连接下载，支持进度、暂停／恢复和限速。<br>
   Single-connection HTTP / HTTPS downloads with progress, pause/resume and bandwidth limits.
