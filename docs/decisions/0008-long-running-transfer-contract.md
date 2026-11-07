@@ -132,9 +132,9 @@ The plan for M5 says: “Define capability declarations, asynchronous start/prog
 
 As of 2026-10-15, capability fields, `TransferSession`, `ResumableEngine`, and `ResumeMetadata` are defined, and the HTTP session is wired through its Server consumer. PR #58 at `f1817f4` repairs whole-file resume progress, response lengths, specific errors, control responsiveness, and completion receipts in the single-connection path, and performs startup reconciliation before network dispatch. See the [Development Guide](../DEVELOPMENT.md#development-workflow-entry) for verification records.
 
-本轮将 Server HTTP/HTTPS 派发统一到单连接 session，移除自动分段／探测及 fixture URL 特判；本次改动同样须满足独立审查、完整门槛及合并前后 CI。保留的分段 API 是未验收的 M4 基础，不能据此宣称支持安全多连接、段级恢复或安全回退。Server 仍直接选择 HTTP/HTTPS，尚未按 Engine Registry 的能力声明通用路由；`ResumableEngine` 尚无可用实现，FTP/FTPS 的凭据、控制、续传和重启恢复均未实现。因此本 ADR 的设计接受与单连接 HTTP 回归修复不等于 M4 或 M5 完成。
+本轮将 Server HTTP/HTTPS 派发统一到单连接 session，移除自动分段／探测及 fixture URL 特判；本次改动同样须满足独立审查、完整门槛及合并前后 CI。保留的分段 API 是未验收的 M4 基础，不能据此宣称支持安全多连接、段级恢复或安全回退。F0 按 [RFC 0003](../RFC/0003-registry-transfer-sessions.md) 将既有 HTTP 会话接入 Registry 工厂选择，来源入口仍限 HTTP/HTTPS；`ResumableEngine` 尚无可用实现，FTP/FTPS 的凭据、控制、续传和重启恢复均未实现。因此本 ADR 的设计接受与单连接 HTTP 回归修复不等于 M4 或 M5 完成。
 
-This change confines Server HTTP/HTTPS dispatch to the single-connection session, removing automatic segmentation/probing and fixture-URL special cases; it must also satisfy independent review, complete gates, and CI before and after merge. Retained segment APIs are unaccepted M4 foundations and do not establish safe multi-connection downloads, segment recovery, or safe fallback. The Server still selects HTTP/HTTPS directly instead of routing generically through Engine Registry capability declarations. `ResumableEngine` has no usable implementation, and FTP/FTPS credentials, controls, resume, and restart recovery remain unimplemented. Acceptance of this design and the single-connection HTTP regression fixes therefore do not complete M4 or M5.
+This change confines Server HTTP/HTTPS dispatch to the single-connection session, removing automatic segmentation/probing and fixture-URL special cases; it must also satisfy independent review, complete gates, and CI before and after merge. Retained segment APIs are unaccepted M4 foundations and do not establish safe multi-connection downloads, segment recovery, or safe fallback. F0 wires the existing HTTP session through Registry factory selection under [RFC 0003](../RFC/0003-registry-transfer-sessions.md), with source eligibility still limited to HTTP/HTTPS. `ResumableEngine` has no usable implementation, and FTP/FTPS credentials, controls, resume, and restart recovery remain unimplemented. Acceptance of this design and the single-connection HTTP regression fixes therefore do not complete M4 or M5.
 
 <a id="rationale"></a>
 <a id="理由"></a>
@@ -163,8 +163,8 @@ This change confines Server HTTP/HTTPS dispatch to the single-connection session
   The HTTP engine must implement the session API while preserving current behavior.
 - FTP、BT 等新引擎可实现 session API 并被自动发现。<br>
   New engines such as FTP and BT can implement the session API and be discovered automatically.
-- 本设计弃用但保留同步 `EngineAdapter`，供不需要长期运行支持的简单引擎使用。<br>
-  Under this design, the synchronous `EngineAdapter` is deprecated but retained for simple engines that do not need long-running support.
+- 本设计为长期任务提供可选 Session 接口，同步 `EngineAdapter` 保留兼容，源码未加 deprecated 标记。<br>
+  This design adds an opt-in session interface for long-running tasks while retaining synchronous `EngineAdapter` compatibility without a source deprecation annotation.
 
 <a id="alternatives-considered"></a>
 <a id="考虑的替代方案"></a>

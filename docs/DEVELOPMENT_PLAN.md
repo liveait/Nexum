@@ -40,7 +40,20 @@ Latest delivery reconciliation (2026-11-01): [PR #71](https://github.com/liveait
 
 ## 2. 按交付物推进的里程碑 / 2. Delivery milestones
 
-### 后续推进顺序（2026-10-31） / Remaining sequence (2026-10-31)
+### 首发优先顺序（2026-11-06） / First-release priorities (2026-11-06)
+
+维护者要求 FTP、BT 种子和 Magnet 在首个版本之前支持。先推进 M5 会话路由与协议恢复设计，再完成 FTP 和 BT 的真实消费者链路，使用同一最终 macOS 候选完成 HTTP(S)／FTP／torrent／Magnet 及 M0／M1／M3 验收。协议范围与依赖记录在 RFC 中，里程碑按实际验收结果更新。
+
+The maintainer requires FTP, torrent files and Magnet before the first release. First advance M5 session routing and protocol-recovery design, then complete real FTP and BT consumer paths. Use the same final macOS candidate for HTTP(S)/FTP/torrent/Magnet and M0/M1/M3 acceptance. RFCs record protocol scope and dependencies, with milestone status based on actual acceptance.
+
+| 顺序 / Order | 工作与进入下一阶段的条件 / Work and exit criteria |
+| --- | --- |
+| 1 | F0 按 [RFC 0003](RFC/0003-registry-transfer-sessions.md) 增加可选 session factory 和 Registry 协议路由，让真实 Server 消费既有 HTTP 单连接会话，保留同步 Adapter、完成凭证、控制和恢复。 / F0 adds optional session factories and Registry protocol routing under [RFC 0003](RFC/0003-registry-transfer-sessions.md), moving the real Server consumer through the existing HTTP session while preserving synchronous adapters, receipts, controls and recovery. |
+| 2 | 完成匿名与认证 FTP 的来源解析、凭据、下载、控制、有界重试和可信跨重启恢复，CLI／原生 Desktop 完成真实文件与失败场景验收；FTPS 模式与恢复格式先形成协议 RFC。 / Deliver anonymous/authenticated FTP resolution, credentials, downloads, controls, bounded retry and trustworthy restart recovery, with real CLI/native Desktop file and failure checks. Define FTPS modes and recovery formats in a protocol RFC first. |
+| 3 | 完成 torrent 内容导入、Magnet 元数据获取、文件选择、Tracker／Peer、分片校验、控制和重启恢复，并经 CLI／原生 Desktop 验收；BT 版本、上传／做种及发现策略先明确。 / Deliver torrent-content import, Magnet metadata, file selection, trackers/peers, piece verification, controls and restart recovery through CLI/native Desktop. Define BT versions, upload/seeding and discovery policy first. |
+| 4 | 用同一最终候选完成上述协议与 M0／M1 原生验收，再完成 M3 签名、公证、安装升级和正式下载。 / Accept these protocols and M0/M1 in one final candidate, then complete M3 signing, notarization, installation/upgrades and official downloads. |
+
+### M4 的依赖顺序 / M4 dependency sequence
 
 | 顺序 / Order | 工作与进入下一阶段的条件 / Work and exit criteria |
 | --- | --- |
@@ -49,11 +62,10 @@ Latest delivery reconciliation (2026-11-01): [PR #71](https://github.com/liveait
 | 2 | 加入安全且有界的单连接回退：先停止并 join 全部 Worker，每次任务尝试最多降级一次；取消及本地文件安全错误不自动回退，沿用 Scheduler 重试预算。 / Add bounded safe single-connection fallback: stop and join all workers first, allow at most one downgrade per task attempt, never automatically fall back after cancellation or local file-safety errors, and retain Scheduler retry limits. |
 | 3 | 先固定独立版本化段恢复格式，绑定来源、目标、validator、文件身份及可信字节范围；校验后跨重启复用，不把预分配长度当作进度。 / Fix a separately versioned segment-recovery format binding source, destination, validator, identity and proven byte ranges; validate before reuse and never treat preallocated length as progress. |
 | 4 | 通过显式策略接通真实 Server 分段派发及 CLI／原生 App 验收；暂停、取消、回退、槽位释放和恢复全部通过后才默认启用并完成 M4，未验收平台继续禁用分段。 / Wire real Server segment dispatch through an explicit policy and validate CLI/native App consumers; enable by default and complete M4 only after pause, cancellation, fallback, slot release and recovery pass, leaving unvalidated platforms disabled. |
-| 5 | 完善 M5 Registry 能力路由与通用恢复，再依次推进 FTP/FTPS、BT/磁力及浏览器／系统集成。 / Complete M5 Registry capability routing and generic recovery, then FTP/FTPS, BT/magnet and browser/system integration. |
 
-macOS 首发准备可并行推进：PR #71 的大文件恢复就绪修复已交付，不重复实现；接下来补 VoiceOver、全新 OS 用户／异常中断／升级的最终验收，随后签名、公证、安装包和官网生产部署。首个 HTTP 版本不依赖 FTP/BT 全部完成；正式下载仍须以实际产物验收为准。以上是依赖顺序，不是日期承诺。
+macOS 原生与分发准备可与协议工作并行。PR #71 恢复就绪、#80 欢迎检测和 #82 旧提示退役及受控 HTTP 原生回归已交付。干净 OS 用户、VoiceOver 实际听读、真实安装升级及签名公证仍待完成。首发等待 FTP／torrent／Magnet 与实际产物验收；M4 多连接可继续关闭，FTP／BT 实际使用的文件发布与清理机制必须通过安全验证。以上为依赖顺序，不承诺日期。
 
-macOS launch preparation can proceed in parallel: PR #71 delivered the large-file recovery-readiness fix; do not repeat it. Next complete VoiceOver and final clean-OS-user/abnormal-interruption/upgrade acceptance, then signing, notarization, installers and website production deployment. The first HTTP release does not require complete FTP/BT; official downloads still depend on acceptance of the actual artifact. This is a dependency sequence, not a date commitment.
+macOS native and distribution preparation can run alongside protocol work. PR #71 recovery readiness, #80 welcome detection and #82 notice retirement with controlled HTTP native regression are delivered. Clean-OS-user, actual VoiceOver listening, real installation/upgrades and signing/notarization remain open. The first release waits for FTP/torrent/Magnet and actual-artifact acceptance. M4 multi-connection may remain disabled, while the publication and cleanup mechanisms used by FTP/BT must pass safety validation. This is a dependency order without a date commitment.
 
 近期兼容边界：沿用既有 RPC、TaskView 和 v1 完成凭证。启动只检查有界凭证元数据，摘要对账放到 Ready 后、不持有 Server 全局锁的可控 Worker；恢复任务对账前不得重新派发。PR #69 已实现 Add Sheet 原位重试排队（保留已创建 ID）、旧快照过期提示、唯一顶部添加入口、本地／远程说明及欢迎／升级提示的中英文，已合为 `6ad16f7`，其[合并后完整 CI](https://github.com/liveait/Nexum/actions/runs/41214993927) 通过；后续验收保留这些行为，不重新列为未实现功能。URL 校验已有实现；任务上下文菜单和移除确认留到后续体验工作，不新增为本轮首发门槛。每项工作独立 worktree／单问题 PR，按当前 SHA 记录验证与未验收项。
 
@@ -61,9 +73,9 @@ Near-term compatibility: retain existing RPC, TaskView and v1 completion receipt
 
 里程碑 / Milestones: [M0](#m0) · [M1](#m1) · [M2](#m2) · [M3](#m3) · [M4](#m4) · [M5](#m5) · [M6](#m6) · [M7](#m7) · [M8](#m8) · [M9](#m9)
 
-顺序表示依赖和优先级，不是时间表。M0–M3 是第一条可发布的 macOS HTTP 下载器路径；M4–M7 缩小与 Motrix 的核心功能差距；M8–M9 在前述能力稳定后推进。HTTP 引擎工作与分发准备可以并行，但 M3 的发布验收必须使用最终实际产物。
+M0–M3 保留原生体验、HTTP 质量及分发验收职责，M5／M6 的首发 FTP／torrent／Magnet 范围须在 M3 正式发布前通过。M4、M7 与 M8–M9 按各自依赖推进。协议工作与分发准备可以并行，M3 验收使用包含首发协议的最终实际产物。
 
-The order expresses dependencies and priority, not dates. M0–M3 form the first releasable macOS HTTP downloader path; M4–M7 close the core Motrix capability gaps; M8–M9 follow once those paths are stable. HTTP engine work and distribution preparation may overlap, but M3 release validation must use the final actual artifact.
+M0–M3 retain responsibility for native experience, HTTP quality and distribution acceptance. The first-release FTP/torrent/Magnet scope in M5/M6 must pass before official M3 publication. M4, M7 and M8–M9 follow their respective dependencies. Protocol work and distribution preparation may overlap, with M3 validation using the final actual artifact containing the required protocols.
 
 <a id="m0--validate-the-existing-release-app-natively"></a>
 <a id="m0--完成现有-release-app-的原生验收"></a>
@@ -165,9 +177,9 @@ PR #80 merged as `4038834f7460e9966e33b3d17a2a2a45535cc44a`, with all gates pass
 - **工作**：固定构建输入和版本，产出适合声明架构的安装包；完成 Developer ID 签名、公证、Staple、Gatekeeper、安装/升级/卸载与干净机器冒烟。发布工作流和更新策略须与实际支持范围一致。
 
   **Work:** Pin build inputs and versions, produce an installer for each claimed architecture, and complete Developer ID signing, notarization, stapling, Gatekeeper, install/upgrade/uninstall, and clean-machine smoke checks. Release workflow and update policy must match the actual support scope.
-- **验收**：用户从发布产物安装并双击启动，无需开发工具或终端，即可完成 M1–M2 的 HTTP 下载；系统验证签名和公证通过，升级保留任务数据。将版本、哈希、支持的 macOS/CPU 架构和未完成的 FTP/BT/扩展能力写入发布说明。操作步骤与证据留在[发布流程](RELEASE.md)。
+- **验收**：用户从发布产物安装并双击启动，无需开发工具或终端，即可完成 M1–M2 的 HTTP 下载及 M5／M6 首发范围的 FTP、torrent 和 Magnet 下载、控制与重启恢复；系统验证签名和公证通过，升级保留任务数据。发布说明记录版本、哈希、macOS／CPU 架构和明确的协议支持变体，首发必需协议通过后才发布。操作步骤与证据留在[发布流程](RELEASE.md)。
 
-  **Acceptance:** A user installs the release artifact and launches it by double-clicking, without development tools or a terminal, then completes M1–M2 HTTP downloads. System signing and notarization checks pass; upgrade preserves task data. Release notes state version, hashes, supported macOS/CPU architectures, and unfinished FTP/BT/extension capabilities. Keep procedures and evidence in the [Release Process](RELEASE.md).
+  **Acceptance:** A user installs the release artifact and launches it by double-clicking, without development tools or a terminal, then completes M1–M2 HTTP downloads and the first-release FTP, torrent and Magnet downloads, controls and restart recovery in M5/M6. System signing and notarization checks pass; upgrade preserves task data. Release notes record version, hashes, macOS/CPU architectures and explicitly supported protocol variants. Publication requires acceptance of the mandatory protocols. Keep procedures and evidence in the [Release Process](RELEASE.md).
 
 <a id="website-deployment--supporting-m3-work-package-planned"></a>
 <a id="官网部署--m3-配套工作包计划"></a>
@@ -259,7 +271,11 @@ PR #80 merged as `4038834f7460e9966e33b3d17a2a2a45535cc44a`, with all gates pass
 
 <a id="m5"></a>
 
-### M5 — 通用传输运行契约与 FTP / M5 — General transfer runtime contract and FTP
+### M5 — 首发通用传输契约与 FTP / M5 — First-release transfer contract and FTP
+
+- **首发范围**。匿名与用户名／密码 FTP 下载必须经真实 CLI／原生 Desktop 验收，涵盖凭据隔离、控制、有界失败重试、可信跨重启恢复和最终文件完整性。FTPS 模式、凭据 provider、依赖及版本化恢复格式在 FTP RFC 中确定，新增协议的文件安全独立验收。
+
+  **First-release scope.** Anonymous and username/password FTP downloads require real CLI/native Desktop acceptance covering credential isolation, controls, bounded retries, trustworthy restart recovery and final integrity. The FTP RFC defines FTPS modes, credential providers, dependencies and versioned recovery, with separate file-safety acceptance for each added protocol.
 
 - **先决设计**：为长期运行的 Engine 定义能力声明、异步启动/进度、暂停/取消、重试、恢复元数据、错误和 Server 派发契约。现有 `EngineAdapter::start` 同步返回，而实际 HTTP 控制位于 Server Worker；先让 HTTP 通过新契约并保持 M2–M4 行为，再增加新协议。明确 FTP/FTPS 与凭据的支持范围。
 
@@ -267,16 +283,20 @@ PR #80 merged as `4038834f7460e9966e33b3d17a2a2a45535cc44a`, with all gates pass
 - **验收**：真实 FTP 来源可通过 CLI 和 Desktop 创建、排队、下载、暂停、恢复、取消及重启恢复；服务端不支持续传时安全地从零开始。认证失败、网络断开和目标冲突有可见错误，完成文件可校验。HTTP 回归测试保持通过。
 
   **Acceptance:** A real FTP source can be created, queued, downloaded, paused, resumed, canceled, and recovered after restart from CLI and Desktop; restart safely from byte zero when the server does not support resume. Authentication failures, disconnects, and destination conflicts have visible errors; completed files can be verified. HTTP regression tests remain green.
-- **记录进度（契约与 HTTP 初步实现，待验收）**：[ADR 0008](decisions/0008-long-running-transfer-contract.md) 已记录长期传输契约：`EngineCapabilities` 新增 `supports_range`、`supports_retry`、`supported_protocols`、`max_concurrent_segments`，`TransferSession` 提供 `progress()`、`state()`、`error()`、`pause()`、`resume()`、`cancel()`、`wait()`，`ResumableEngine` 与 `ResumeMetadata` 已定义；同步 `EngineAdapter::start()` 弃用但保留给简单引擎。HTTP 会话和 Server 初步调用已存在。**缺口**：`ResumableEngine` 尚无可用实现；Server 仍直接选择 HTTP/HTTPS，没有按能力声明路由到 Engine Registry；PR #58 已修复并验证单连接会话控制、进度和完成恢复，多连接仍需单独验证；FTP/FTPS 及其凭据、续传、控制与重启恢复尚未实现。设计记录和类型声明不等于 M5 完成。
+- **F0 实现与本地验证**。[RFC 0003](RFC/0003-registry-transfer-sessions.md) 接通可选 session factory、Registry 协议匹配及真实 Server 的 HTTP 单连接消费者。同步 `EngineAdapter::start()` 保留兼容，源码未加 deprecated 标记。直接测试覆盖大小写、缺失／歧义工厂、开始前取消和错误收尾；Server 测试覆盖锁外启动、真实 HTTP、暂停唤醒、取消不重试、领取前失败及离线凭证绕过工厂。完整本地 Rust 门槛通过，workspace 440、额外 managed 11，含 Server unit／managed／persistence 44／11／57。固定 SHA 审查、真实 CLI 验证及合并前后 CI 按对应 PR 记录。**剩余缺口**。Server 的来源入口仍限 HTTP/HTTPS，`ResumableEngine` 尚无可用实现；FTP/FTPS 凭据、传输、控制和重启恢复、BT/torrent/Magnet 下载均待实现，M5／M6 继续开放。
 
-  **Recorded progress (contract and initial HTTP implementation, awaiting acceptance):** [ADR 0008](decisions/0008-long-running-transfer-contract.md) records the long-running contract: `EngineCapabilities` adds `supports_range`, `supports_retry`, `supported_protocols`, and `max_concurrent_segments`; `TransferSession` provides `progress()`, `state()`, `error()`, `pause()`, `resume()`, `cancel()`, and `wait()`; `ResumableEngine` and `ResumeMetadata` are defined. Synchronous `EngineAdapter::start()` is deprecated but retained for simple engines. Initial HTTP session and Server calls exist. **Gaps:** `ResumableEngine` has no usable implementation; the Server still directly selects HTTP/HTTPS without routing through Engine Registry capability declarations; PR #58 repaired and verified single-connection session controls, progress, and completion recovery; multi-connection execution still needs separate validation; FTP/FTPS credentials, resume, controls, and restart recovery are unimplemented. Recorded design and type declarations do not complete M5.
+  **F0 implementation and local verification.** [RFC 0003](RFC/0003-registry-transfer-sessions.md) wires optional session factories, Registry protocol selection and the real Server's single-connection HTTP consumer. Synchronous `EngineAdapter::start()` remains compatible without a source deprecation annotation. Direct tests cover case handling, missing/ambiguous factories, cancellation before start and failure cleanup. Server tests cover startup outside the lock, real HTTP, pause wakeup, cancellation without retry, failure before claim and offline receipts bypassing factories. Complete local Rust gates pass with 440 workspace and 11 separate managed tests, including Server unit/managed/persistence 44/11/57. The corresponding PR records fixed-SHA review, real CLI verification and pre/post-merge CI. **Remaining gaps.** Server source eligibility still covers HTTP/HTTPS only, and `ResumableEngine` has no usable implementation. FTP/FTPS credentials, transfers, controls and restart recovery, plus BT/torrent/Magnet downloads remain unimplemented. M5/M6 remain open.
 
 <a id="m6--torrent-and-magnet-downloads"></a>
 <a id="m6--bt-种子与磁力下载"></a>
 
 <a id="m6"></a>
 
-### M6 — BT 种子与磁力下载 / M6 — Torrent and magnet downloads
+### M6 — 首发 BT 种子与磁力下载 / M6 — First-release torrent and magnet downloads
+
+- **首发范围**。同一候选须通过 torrent 内容导入和 Magnet 真实下载、单／多文件选择、分片校验、暂停／取消及重启恢复。v1／hybrid／v2-only、发现方式和上传／做种策略由 BT RFC 明确，平台文件树发布与清理须验证。
+
+  **First-release scope.** The same candidate must pass torrent-content import and actual Magnet downloads, single/multi-file selection, piece verification, pause/cancel and restart recovery. The BT RFC defines v1/hybrid/v2-only, discovery and upload/seeding policy, with verified platform tree publication/cleanup.
 
 - **工作**：在 M5 契约上实现种子元数据、Magnet 元数据获取、文件选择、Tracker/Peer 管理、分片校验、任务持久化和恢复；明确做种、分享率和网络权限策略。
 
@@ -339,18 +359,22 @@ PR #80 merged as `4038834f7460e9966e33b3d17a2a2a45535cc44a`, with all gates pass
 
 Website deployment follows the M3 work package above: use the default GitHub Pages project address, fix the release metadata contract and build the bilingual website/preview-artifact flow. Official downloads go live after M3 acceptance passes; schedule an R2 mirror later according to actual traffic needs.
 
-Motrix 清单中的自动 Tracker 列表、UPnP/NAT-PMP、上传限速、登录时启动、统计 Dashboard 和远程/headless 控制仍需单独决定范围；本计划不把它们算作 M0–M7 的已承诺交付。Media/Automation、AI/MCP、远程设备、手动主题与强调色也不在首个 macOS 下载器发布门槛中。本地文件来源是否需要导入/传输路径另作产品决策。可靠事件回放、显式 CA/证书固定和更严格的协议兼容性检查按多客户端或远程连接的实际需求立项；当前事件断线后通过完整任务快照恢复，[ADR 0005](decisions/0005-tls-transport.md)记录已实现的 TLS 边界。以上项目不会借由已有数据模型或页面占位被标成可用功能。
+Motrix 清单中的自动 Tracker 列表、UPnP/NAT-PMP、上传限速、登录时启动、统计 Dashboard 和远程/headless 控制仍需单独决定范围；本计划不把它们算作 M0–M7 的已承诺交付。Media/Automation、AI/MCP、远程设备、手动主题与强调色也不在首个 macOS 下载器发布门槛中。首发需要有界 torrent 内容导入，远程连接应传输种子内容；通用本地文件传输另作产品决策。可靠事件回放、显式 CA/证书固定和更严格的协议兼容性检查按多客户端或远程连接的实际需求立项；当前事件断线后通过完整任务快照恢复，[ADR 0005](decisions/0005-tls-transport.md)记录已实现的 TLS 边界。以上项目不会借由已有数据模型或页面占位被标成可用功能。
 
-Motrix features such as automatic Tracker lists, UPnP/NAT-PMP, upload limits, launch at login, a statistics Dashboard, and remote/headless control need separate scope decisions; this plan does not count them as committed M0–M7 deliverables. Media/Automation, AI/MCP, remote devices, and manual themes/accent colors are also outside the first macOS downloader release gate. Whether local-file sources need an import/transfer path is a separate product decision. Durable event replay, explicit CA/certificate pinning, and stricter protocol compatibility checks should be scheduled for concrete multi-client or remote-connection needs. Clients currently recover from a disconnected event stream by refreshing a full task snapshot; [ADR 0005](decisions/0005-tls-transport.md) records the implemented TLS boundary. Existing data models or page placeholders alone do not make these features usable.
+Motrix features such as automatic Tracker lists, UPnP/NAT-PMP, upload limits, launch at login, a statistics Dashboard, and remote/headless control need separate scope decisions; this plan does not count them as committed M0–M7 deliverables. Media/Automation, AI/MCP, remote devices, and manual themes/accent colors are also outside the first macOS downloader release gate. The first release requires bounded torrent-content import, transferring the content for remote connections. General local-file transfer remains a separate product decision. Durable event replay, explicit CA/certificate pinning, and stricter protocol compatibility checks should be scheduled for concrete multi-client or remote-connection needs. Clients currently recover from a disconnected event stream by refreshing a full task snapshot; [ADR 0005](decisions/0005-tls-transport.md) records the implemented TLS boundary. Existing data models or page placeholders alone do not make these features usable.
 
-**契约工作包（部分实现、待验收）**：[ADR 0008](decisions/0008-long-running-transfer-contract.md) 已记录 `EngineCapabilities`、`TransferSession`、`ResumableEngine` 与 `ResumeMetadata`，但能力路由与完整恢复接线仍未完成，FTP/FTPS 未实现。状态以 M5 的缺口和验收为准，不能把文档和 trait 定义当成已交付协议。
+**契约工作包（F0 本地验证通过）**。可选工厂、Registry 协议选择和既有 HTTP 消费者已按 RFC 0003 接通，同步 Adapter 保留兼容。通用恢复和 FTP／BT 接线继续按 M5／M6 验收，方案与类型声明的范围见 [ADR 0008](decisions/0008-long-running-transfer-contract.md)。
 
-**Contract work package (partial, awaiting acceptance):** [ADR 0008](decisions/0008-long-running-transfer-contract.md) records `EngineCapabilities`, `TransferSession`, `ResumableEngine`, and `ResumeMetadata`; capability routing and complete recovery wiring remain unfinished, and FTP/FTPS is unimplemented. M5 gaps and acceptance criteria determine delivery; documentation and trait definitions do not establish a shipped protocol.
+**Contract work package (F0 locally verified).** Optional factories, Registry protocol selection and the existing HTTP consumer are wired under RFC 0003, retaining synchronous-adapter compatibility. General recovery and FTP/BT wiring retain their M5/M6 acceptance gates. [ADR 0008](decisions/0008-long-running-transfer-contract.md) records the design and type boundaries.
 
-**M5 HTTP 会话实现状态**：`HttpTransferSession` 在后台线程运行，回调更新进度，`HttpTransferControl` 提供控制，`wait(Box<Self>)` 等待终态。`f1817f4` 已修复会话传入完成上下文、整文件续传进度、具体失败原因及启动完成对账，并通过独立复核、完整门槛与合并后 CI。PR #61 已统一大文件和小文件的 Server 会话入口；能力路由、通用恢复实现及 FTP/FTPS 仍待完成。基线 `3768c3a` 的 40 项通过、11 项失败记录保留为历史，不再视为当前结果。
+**首发前待修 P2**。真实 CLI 检查发现暂停返回后 SQLite 进度短暂落后文件长度，约 0.1 秒后补齐，文件字节及摘要已稳定；同脚本在 `b9bb2d4` 复现。F0 的独立接受原因、原始失败边界和后续同步修复见 [RFC 0003](RFC/0003-registry-transfer-sessions.md#local-consumers-and-baseline-finding)。
 
-**M5 HTTP session implementation status:** `HttpTransferSession` runs in a background thread, callbacks update progress, `HttpTransferControl` provides controls, and `wait(Box<Self>)` waits for termination. `f1817f4` repaired completion-context wiring, whole-file resume progress, concrete failures, and startup completion reconciliation, passing independent review, full gates, and post-merge CI. PR #61 unified Server session routing for both large and small files. Capability routing, generic recovery implementations, and FTP/FTPS remain unfinished. The `3768c3a` record of 40 passes and 11 failures remains historical evidence, not the current result.
+**P2 to fix before the first release.** Real CLI checks find SQLite progress briefly trailing file length after pause, catching up after approximately 0.1 seconds while file bytes/digests remain stable. The same script reproduces this at `b9bb2d4`. [RFC 0003](RFC/0003-registry-transfer-sessions.md#local-consumers-and-baseline-finding) records independent F0 acceptance, the original failed assertion and the follow-up synchronization fix.
 
-**下一工作包**：升级记录修复已由 PR #79 交付；当前先修复首次启动欢迎检测并完成私有原生验证，随后核对新候选的异常中断恢复；用户已延期的干净 OS 用户及屏幕朗读检查不阻塞本修复的独立验证，但继续保留为 M0／M1 验收缺口。不重复实现 #66 完成协议、#71 恢复就绪或已实现的 #69 UI。最终候选仍需异常中断及真实安装升级验收，M3 的 Developer ID 身份稍后配置；正式下载继续等待签名、公证和分发验收，官网生产发布遵循 GitHub Pages 的精确 main-CI 屏障。M4 依据 RFC 0002 提案先取得可验证的平台身份安全机制，再实现竞态保护、有界回退、持久段恢复及真实 Server／CLI／App routing 验收，多连接在此前保持禁用。M5–M9 继续按上述依赖推进，不能因类型、模型、提案或页面占位而标为完成。
+**M5 HTTP 会话实现状态**。`HttpTransferSession` 沿用后台线程、进度和控制，F0 由 Registry 选择的工厂进入该会话。`f1817f4` 及 PR #61 已交付的单连接控制、整文件进度、完成恢复和统一入口继续回归验证。F0 保留原有下载 I/O 结束后的终态等待语义；后续 FTP／BT 的恢复格式和多 Worker 退出屏障单独设计。基线 `3768c3a` 的 40 项通过、11 项失败记录保留为历史。
 
-**Next work package:** PR #79 delivered upgrade-record repair. Repair first-run welcome detection with private native validation, then check abnormal-interruption recovery on the new candidate. The user-deferred clean-OS-user and screen-reader checks do not block independent validation of this repair, but remain M0/M1 acceptance gaps. Do not repeat #66 completion protocols, #71 recovery readiness or implemented #69 UI. The final candidate still needs abnormal-interruption and actual installation/upgrade acceptance, with the M3 Developer ID identity configured later. Official downloads wait for signing, notarization and distribution acceptance; website publication follows the GitHub Pages exact-main-CI barrier. For M4, obtain verifiable platform identity safety under the RFC 0002 proposal before race protection, bounded fallback, durable segment recovery and real Server/CLI/App routing acceptance; keep multi-connection disabled until then. M5–M9 follow the dependencies above; types, models, proposals and page placeholders do not complete them.
+**M5 HTTP session implementation status.** `HttpTransferSession` retains its background thread, progress and controls, entered through a Registry-selected factory in F0. Regression checks retain the single-connection controls, whole-file progress, completion recovery and unified entry delivered by `f1817f4` and PR #61. F0 retains the terminal wait after existing download I/O ends. Later FTP/BT recovery formats and multi-worker exit barriers require their respective designs. The `3768c3a` record of 40 passes and 11 failures remains historical.
+
+**下一工作包**。完成 F0 的独立审查和合并前后 CI 后，形成 FTP 凭据／恢复格式与 BT 存储／恢复 RFC，按首发优先顺序实现 FTP 与 torrent／Magnet。#66、#69、#71、#79、#80 和 #82 已交付的范围沿用既有记录。用户延期的干净 OS 用户和 VoiceOver 实际听读继续保留为 M0／M1 缺口，Developer ID 身份稍后配置。最终候选必须完成首发协议及签名、公证、安装升级验收，正式下载才上线。M4 按 RFC 0002 的平台身份安全依赖单独推进，多连接继续关闭。
+
+**Next work package.** After F0 independent review and pre/post-merge CI, form the FTP credential/recovery and BT storage/recovery RFCs, then implement FTP and torrent/Magnet in first-release priority order. Existing records retain the delivered scope of #66, #69, #71, #79, #80 and #82. User-deferred clean-OS-user and actual VoiceOver listening remain M0/M1 gaps, with the Developer ID identity configured later. Official downloads follow first-release protocol, signing, notarization and installation-upgrade acceptance in the final candidate. M4 follows RFC 0002 platform identity-safety dependencies separately, with multi-connection disabled.

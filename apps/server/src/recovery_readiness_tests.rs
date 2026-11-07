@@ -1,5 +1,6 @@
 use super::*;
 use nexum_core::nexum_domain::{Destination, DownloadSource};
+use nexum_core::nexum_engine::HttpEngine;
 use nexum_core::nexum_storage::TaskRepository;
 use nexum_core::nexum_task::DownloadTask;
 use serde_json::{Value, json};
@@ -627,4 +628,372 @@ fn fresh_completed_bytes_do_not_retry_when_completion_persistence_fails() {
 #[test]
 fn fresh_completed_bytes_keep_claim_snapshot_when_all_terminal_writes_fail() {
     assert_fresh_completed_response_is_not_retried(true);
+}
+
+mod session_routing {
+    use super::*;
+    use nexum_core::nexum_engine::{
+        EngineAdapter, EngineCapabilities, EngineRegistry, EngineTask, TransferSession,
+    };
+    use nexum_core::nexum_scheduler::{Priority, RetryPolicy};
+
+    struct FactoryAdapter(Arc<dyn TransferSessionFactory>);
+
+    impl EngineAdapter for FactoryAdapter {
+        fn name(&self) -> &str {
+            "test-session-factory"
+        }
+
+        fn capabilities(&self) -> EngineCapabilities {
+            EngineCapabilities {
+                supported_protocols: &["http", "https"],
+                ..EngineCapabilities::BASIC
+            }
+        }
+
+        fn session_factory(&self) -> Option<Arc<dyn TransferSessionFactory>> {
+            Some(Arc::clone(&self.0))
+        }
+
+        fn start(
+            &mut self,
+            _id: &TaskId,
+            _source: &str,
+            _destination: &str,
+        ) -> Result<EngineTask, EngineError> {
+            panic!("Server must use the registered session factory")
+        }
+
+        fn pause(&mut self, _task: &EngineTask) -> Result<(), EngineError> {
+            Err(EngineError::UnsupportedOperation("synchronous pause"))
+        }
+
+        fn resume(&mut self, _task: &EngineTask) -> Result<(), EngineError> {
+            Err(EngineError::UnsupportedOperation("synchronous resume"))
+        }
+
+        fn remove(&mut self, _task: &EngineTask) -> Result<(), EngineError> {
+            Err(EngineError::UnsupportedOperation("synchronous remove"))
+        }
+
+        fn progress(
+            &self,
+            task: &EngineTask,
+        ) -> Result<nexum_core::nexum_domain::Progress, EngineError> {
+            Err(EngineError::TaskNotFound(task.task_id.clone()))
+        }
+
+        fn state(&self, task: &EngineTask) -> Result<EngineTaskState, EngineError> {
+            Err(EngineError::TaskNotFound(task.task_id.clone()))
+        }
+    }
+
+    struct GatedFactory {
+        delegate: Option<Arc<dyn TransferSessionFactory>>,
+        entered: SyncSender<()>,
+        release: Mutex<Receiver<()>>,
+        calls: AtomicUsize,
+    }
+
+    impl TransferSessionFactory for GatedFactory {
+        fn start(
+            &self,
+            request: TransferSessionRequest,
+        ) -> Result<Box<dyn TransferSession>, EngineError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|error| EngineError::Failed(error.to_string()))?;
+            match &self.delegate {
+                Some(factory) => factory.start(request),
+                None => Err(EngineError::Failed("factory startup rejected".into())),
+            }
+        }
+    }
+
+    fn gated_factory(
+        delegate: Option<Arc<dyn TransferSessionFactory>>,
+    ) -> (Arc<GatedFactory>, Receiver<()>, SyncSender<()>) {
+        let (entered_tx, entered) = mpsc::sync_channel(1);
+        let (release, release_rx) = mpsc::sync_channel(1);
+        let factory = Arc::new(GatedFactory {
+            delegate,
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+            calls: AtomicUsize::new(0),
+        });
+        (factory, entered, release)
+    }
+
+    fn routing_state(fixture: &RecoveryFixture, source: &str, retries: u32) -> ServerState {
+        let mut core = Core::with_repository(
+            SchedulerConfig {
+                retry_policy: RetryPolicy {
+                    max_retries: retries,
+                },
+                ..SchedulerConfig::default()
+            },
+            SqliteRepository::open(fixture.data.join("routing.sqlite")).unwrap(),
+        )
+        .unwrap();
+        core.create_task(
+            "routed",
+            DownloadSource::new(source),
+            Destination::new(fixture.root.join("routed").to_string_lossy()),
+        )
+        .unwrap();
+        core.queue_task(&TaskId::from("routed"), Priority::NORMAL)
+            .unwrap();
+        state_for(
+            fixture,
+            OpenedCore {
+                core,
+                pending_completions: HashSet::new(),
+            },
+        )
+    }
+
+    fn wait_control(control: &HttpTransferControl, predicate: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !predicate() {
+            assert!(
+                Instant::now() < deadline,
+                "control boundary was not reached"
+            );
+            assert!(!control.is_finished());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn registered_factory_starts_outside_core_lock_and_downloads_real_http() {
+        let fixture = RecoveryFixture::new();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = format!("http://{}/routed", listener.local_addr().unwrap());
+        let origin = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("GET /routed "));
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nrouted bytes").unwrap();
+        });
+        let mut state = routing_state(&fixture, &source, 0);
+        let delegate = state
+            .core
+            .engines
+            .session_factory_for_protocol("http")
+            .unwrap();
+        let (factory, entered, release) = gated_factory(Some(delegate));
+        state.core.engines = EngineRegistry::new();
+        state
+            .core
+            .engines
+            .register(Box::new(FactoryAdapter(factory.clone())));
+        let transfer = claim_next_http_transfer(&mut state).unwrap().unwrap();
+        let state = Arc::new(Mutex::new(state));
+        let worker_state = Arc::clone(&state);
+        let worker = std::thread::spawn(move || run_http_transfer(worker_state, transfer));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The actual RPC dispatcher must remain available while start is gated.
+        let rpc_state = Arc::clone(&state);
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        let rpc = std::thread::spawn(move || {
+            response_tx
+                .send(dispatch_server_request(
+                    &rpc_state,
+                    &RpcRequest::new(1, "task.list", None),
+                ))
+                .unwrap();
+        });
+        let response = response_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("factory startup held the Core lock")
+            .unwrap();
+        rpc.join().unwrap();
+        assert!(response.error.is_none());
+        assert_eq!(response.result.unwrap().as_array().unwrap().len(), 1);
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        origin.join().unwrap();
+        let state = state.lock().unwrap();
+        let task = state.core.tasks.get(&TaskId::from("routed")).unwrap();
+        assert_eq!(task.state, TaskState::Completed);
+        assert_eq!(task.progress.downloaded_bytes, 12);
+        assert_eq!(task.progress.total_bytes, Some(12));
+        assert_eq!(
+            std::fs::read(fixture.root.join("routed")).unwrap(),
+            b"routed bytes"
+        );
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+        assert!(state.active_http.is_empty());
+        assert!(state.active_destinations.is_empty());
+        assert_eq!(state.core.scheduler.active_len(), 0);
+        assert!(
+            !completion_receipt_path(&CompletionContext::new("routed", &fixture.data)).exists()
+        );
+    }
+
+    #[test]
+    fn factory_start_failure_wakes_pending_pause_and_releases_claim() {
+        let fixture = RecoveryFixture::new();
+        let mut state = routing_state(&fixture, "http://127.0.0.1:1/unused", 0);
+        let (factory, entered, release) = gated_factory(None);
+        state.core.engines = EngineRegistry::new();
+        state
+            .core
+            .engines
+            .register(Box::new(FactoryAdapter(factory.clone())));
+        let transfer = claim_next_http_transfer(&mut state).unwrap().unwrap();
+        let control = transfer.control.clone();
+        let state = Arc::new(Mutex::new(state));
+        let worker_state = Arc::clone(&state);
+        let worker = std::thread::spawn(move || run_http_transfer(worker_state, transfer));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let pause_state = Arc::clone(&state);
+        let (paused_tx, paused) = mpsc::sync_channel(1);
+        let pause = std::thread::spawn(move || {
+            let request = RpcRequest::new(2, "task.pause", Some(json!({"id":"routed"})));
+            paused_tx
+                .send(dispatch_server_request(&pause_state, &request))
+                .unwrap();
+        });
+        wait_control(&control, || control.is_pause_requested());
+        release.send(()).unwrap();
+        assert!(
+            paused
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap()
+                .error
+                .is_some()
+        );
+        pause.join().unwrap();
+        worker.join().unwrap();
+        let state = state.lock().unwrap();
+        let task = state.core.tasks.get(&TaskId::from("routed")).unwrap();
+        assert_eq!(task.state, TaskState::Failed);
+        assert!(
+            task.last_error
+                .as_deref()
+                .unwrap()
+                .contains("factory startup rejected")
+        );
+        assert!(control.is_finished());
+        assert!(state.active_http.is_empty());
+        assert!(state.active_destinations.is_empty());
+        assert_eq!(state.core.scheduler.active_len(), 0);
+        assert!(!fixture.root.join("routed").exists());
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancelled_factory_start_failure_does_not_retry() {
+        let fixture = RecoveryFixture::new();
+        let mut state = routing_state(&fixture, "http://127.0.0.1:1/unused", 3);
+        let (factory, entered, release) = gated_factory(None);
+        state.core.engines = EngineRegistry::new();
+        state
+            .core
+            .engines
+            .register(Box::new(FactoryAdapter(factory.clone())));
+        let transfer = claim_next_http_transfer(&mut state).unwrap().unwrap();
+        let control = transfer.control.clone();
+        let state = Arc::new(Mutex::new(state));
+        let worker_state = Arc::clone(&state);
+        let worker = std::thread::spawn(move || run_http_transfer(worker_state, transfer));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let remove_state = Arc::clone(&state);
+        let remove = std::thread::spawn(move || {
+            let request = RpcRequest::new(3, "task.remove", Some(json!({"id":"routed"})));
+            dispatch_server_request(&remove_state, &request).unwrap()
+        });
+        wait_control(&control, || control.is_cancelled());
+        release.send(()).unwrap();
+        assert_eq!(remove.join().unwrap().result, Some(json!(true)));
+        worker.join().unwrap();
+        let state = state.lock().unwrap();
+        assert!(state.core.tasks.get(&TaskId::from("routed")).is_none());
+        assert!(state.core.scheduler.next_queued_task().is_none());
+        assert_eq!(state.core.scheduler.active_len(), 0);
+        assert!(state.active_http.is_empty());
+        assert!(state.active_destinations.is_empty());
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+        assert!(control.is_finished());
+        assert!(!fixture.root.join("routed").exists());
+    }
+
+    #[test]
+    fn factory_selection_errors_leave_task_unclaimed() {
+        for ambiguous in [false, true] {
+            let fixture = RecoveryFixture::new();
+            let mut state = routing_state(&fixture, "http://127.0.0.1:1/unused", 0);
+            state.core.engines = EngineRegistry::new();
+            if ambiguous {
+                state.core.engines.register(Box::new(HttpEngine::new()));
+                state.core.engines.register(Box::new(HttpEngine::new()));
+            }
+            assert!(claim_next_http_transfer(&mut state).is_err());
+            assert_eq!(
+                state.core.tasks.get(&TaskId::from("routed")).unwrap().state,
+                TaskState::Queued
+            );
+            assert_eq!(
+                state.core.scheduler.next_queued_task(),
+                Some(&TaskId::from("routed"))
+            );
+            assert_eq!(state.core.scheduler.active_len(), 0);
+            assert!(state.active_http.is_empty());
+            assert!(state.active_destinations.is_empty());
+            assert!(!fixture.root.join("routed").exists());
+        }
+    }
+
+    #[test]
+    fn offline_completion_bypasses_missing_and_ambiguous_factories() {
+        for ambiguous in [false, true] {
+            let fixture = RecoveryFixture::new();
+            let opened = open_core(&fixture.data, BandwidthPolicyKind::Unlimited).unwrap();
+            let mut state = state_for(&fixture, opened);
+            state.core.engines = EngineRegistry::new();
+            if ambiguous {
+                state.core.engines.register(Box::new(HttpEngine::new()));
+                state.core.engines.register(Box::new(HttpEngine::new()));
+            }
+            let transfer = claim_next_http_transfer(&mut state).unwrap().unwrap();
+            assert!(transfer.recovery_only);
+            assert!(transfer.session_factory.is_none());
+            let state = Arc::new(Mutex::new(state));
+            run_http_transfer(Arc::clone(&state), transfer);
+            let state = state.lock().unwrap();
+            assert_eq!(
+                state
+                    .core
+                    .tasks
+                    .get(&TaskId::from("recover"))
+                    .unwrap()
+                    .state,
+                TaskState::Completed
+            );
+            assert_eq!(
+                std::fs::read(&fixture.destination).unwrap(),
+                b"complete bytes"
+            );
+            assert!(state.active_http.is_empty());
+            assert_eq!(state.core.scheduler.active_len(), 0);
+        }
+    }
 }
