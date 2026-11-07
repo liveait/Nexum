@@ -9,9 +9,9 @@
 
 The first release supports BitTorrent v1 single/multi-file `.torrent` and `btih` Magnet, file selection, piece verification, progress, pause/cancel and restart recovery. Normalize 40-digit hex/32-character base32 btih to the same 20-byte value. Reject malformed/conflicting xt values and metainfo with a mismatched infohash. Claim hybrid compatibility only after v1 mapping/padding fixtures pass. Explicitly reject v2-only rather than inferring download support from parser acceptance.
 
-当前 `MagnetResolver` 只检查 btih 参数存在，Local 只代表 Server 文件系统中的路径；均无 BT 下载引擎。F0 工厂路由已实现，但来源入口仍限 HTTP(S)，请求仍为单文件，`active_destinations` 只防精确路径冲突。本 RFC 增加的是实施契约，尚无 BT 运行时或 M6 验收结论。保留 [RFC 0003](0003-registry-transfer-sessions.md) 和 [ADR 0007](../decisions/0007-http-completion-reconciliation.md) 的兼容、控制和原子完成语义。
+当前 `MagnetResolver` 只检查 btih 参数存在，Local 只代表 Server 文件系统中的路径；两者可经旧 Server 创建任务但均无 BT 下载引擎。F0 工厂路由已实现，网络传输派发仍限 HTTP(S)，请求仍为单文件，`active_destinations` 只防精确路径冲突。本 RFC 增加的是实施契约，尚无 BT 运行时或 M6 验收结论。保留 [RFC 0003](0003-registry-transfer-sessions.md) 和 [ADR 0007](../decisions/0007-http-completion-reconciliation.md) 的兼容、控制和原子完成语义。
 
-Current `MagnetResolver` checks only for a btih parameter, while Local denotes a Server filesystem path; neither has a BT engine. F0 factories exist, but source eligibility remains HTTP(S), requests remain single-file and `active_destinations` only detects exact-path conflicts. This RFC specifies implementation without establishing a BT runtime or M6 acceptance. Preserve RFC 0003 and ADR 0007 compatibility, controls and atomic completion semantics.
+Current `MagnetResolver` checks only for a btih parameter, while Local denotes a Server filesystem path. Both can create legacy Server tasks without a BT engine. F0 factories exist, but network dispatch remains HTTP(S), requests remain single-file and `active_destinations` only detects exact-path conflicts. This RFC specifies implementation without establishing a BT runtime or M6 acceptance. Preserve RFC 0003 and ADR 0007 compatibility, controls and atomic completion semantics.
 
 ## 固定候选与不可直接继承的保证 / Pinned candidate and guarantees to verify
 
@@ -36,6 +36,14 @@ Initial hard limits: raw metainfo 512 KiB, Magnet 8 KiB, 4096 files, 25000 piece
 采用 [RFC 0004](0004-ftp-credentials-and-recovery.md) 的版本化 `task.create_transfer`，BT 参数引用 inspection ID、所选文件索引及专属目标目录。空、重复、越界或 padding-only 选择拒绝；一次事务保存任务、受限原始 metainfo、来源摘要、映射和选择后才返回成功。任务 ID 保证重试幂等，inspection 结果保留到期以便重试确认；同 ID 不同绑定返回冲突。新能力协商防止旧 Server 静默忽略参数；旧 HTTP `task.create` 和 TaskView 保持原样。HTTP URL 即使以 `.torrent` 结尾也继续作为普通下载，BT 导入必须显式选择。
 
 Use RFC 0004's versioned `task.create_transfer`, referencing inspection ID, selected indices and a dedicated destination directory. Reject empty, duplicate, out-of-range or padding-only selection. Transactionally persist the task, bounded raw metainfo, source digest, mapping and selection before success. Task ID makes retries idempotent; inspection results remain until expiry for confirmation retries. Conflicting bindings fail. Negotiate capabilities to avoid silently ignored parameters on old Servers; retain legacy HTTP creation and TaskView. HTTP URLs ending in `.torrent` remain ordinary downloads unless explicitly imported as BT.
+
+B1 在调用库前做有界 bencode 验证：嵌套深度最多 64、节点最多 65536、单字符串及累计字节受 512 KiB 总输入限制，拒绝重复／未排序字典键、非规范整数／长度、尾随数据和溢出。v1 infohash 取原始输入中 info 字典的确切编码字节区间做 SHA-1，不通过解码后重编码计算。解析循环至少每 1024 节点及处理大字符串块时检查期限／取消；`timeout(spawn_blocking)` 不能停止 CPU 任务，不可用来证明预算／退出。若候选库无法配合，先用受控验证器或维护补丁；超时仍须等所属 worker 退出再释放 inspection 资源。
+
+Before invoking the library, B1 validates bounded bencode: depth at most 64, at most 65536 nodes, and individual/cumulative string bytes within the 512 KiB total-input cap. Reject duplicate/unsorted dictionary keys, noncanonical integers/lengths, trailing data and overflow. Compute v1 infohash from SHA-1 of the exact original encoded info-dictionary byte range, never decoded/re-encoded data. Check deadline/cancellation at least every 1024 nodes and during large string blocks. `timeout(spawn_blocking)` cannot stop CPU work or prove its budget/exit. Use a controlled validator or maintained patch if the candidate cannot cooperate; wait for worker exit before releasing timed-out inspection resources.
+
+旧入口保护沿用 RFC 0004：HTTP 调用保留，新非 HTTP 创建必须走类型化方法；旧 Magnet／Local 记录不能因新引擎注册而自动开始下载。任务领取前同时验证持久 metainfo／来源摘要／选择，缺少绑定即拒绝并要求显式重导入。
+
+Retain RFC 0004's legacy-entry guard: preserve HTTP calls, require typed creation for new non-HTTP tasks and do not auto-start old Magnet/Local records when registering an engine. Validate durable metainfo/source digest/selection before claims; missing bindings fail with explicit reimport required.
 
 新增只读 `task.transfer` 返回协议阶段（metadata／checking／transferring／publishing）、文件选择、可信进度、Tracker 状态和上传统计，不把库内部 initializing 扫描量当作下载量。TaskView 继续使用原任务状态；阶段不另起会与 Scheduler 冲突的状态机。新 RPC 方法、数据版本及错误代码在首个协议实现包定义并直接测试，本文的方法为实施目标而非当前 API。
 
