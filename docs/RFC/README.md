@@ -12,6 +12,8 @@ RFCs (Request for Comments) document major design changes that require public di
 - [0001：分段下载完成协议 / Segment completion protocol](0001-segment-completion-protocol.md)
 - [0002：分段文件发布与清理的身份边界（提案） / Identity boundaries for segment publication and cleanup (proposed)](0002-segment-file-ownership.md)
 - [0003：Registry 传输会话路由 / Registry transfer-session routing](0003-registry-transfer-sessions.md)
+- [0004：FTP 凭据、传输与恢复（提案） / FTP credentials, transfer and recovery (proposed)](0004-ftp-credentials-and-recovery.md)
+- [0005：BT 种子与 Magnet 的存储和恢复（提案） / Torrent and Magnet storage and recovery (proposed)](0005-bt-storage-and-recovery.md)
 
 <a id="scope"></a>
 <a id="适用范围"></a>
