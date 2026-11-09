@@ -1955,7 +1955,7 @@ fn handle_connection(mut stream: SharedStream, state: Arc<Mutex<ServerState>>) -
             BoundedLine::TooLarge => {
                 stream.set_write_timeout(REJECTION_WRITE_TIMEOUT)?;
                 let response = RpcResponse::error(
-                    None,
+                    Some(serde_json::Value::Null),
                     RpcErrorObject::invalid_request("request exceeds the 1 MiB limit"),
                 );
                 let encoded = serialize_response(&response)

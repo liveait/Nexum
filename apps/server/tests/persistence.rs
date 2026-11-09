@@ -2664,7 +2664,7 @@ fn assert_frame_limit_response<R: Read>(reader: &mut BufReader<R>) {
     assert!(line.len() < 256, "oversize errors must have bounded size");
     assert!(!line.contains("frame-secret-id"));
     let response: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response.get("id"), Some(&Value::Null));
     assert_eq!(response["error"]["code"], -32600);
     assert_eq!(
         response["error"]["message"],
@@ -2863,7 +2863,7 @@ fn rpc_ingress_uses_the_same_limit_over_tls() {
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     let response: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response.get("id"), Some(&Value::Null));
     assert_eq!(response["error"]["code"], -32600);
     assert!(line.len() < 256 && !line.contains("frame-secret-id"));
     // TLS currently closes the underlying socket without close_notify.
