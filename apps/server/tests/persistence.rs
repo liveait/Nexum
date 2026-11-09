@@ -2644,6 +2644,298 @@ fn require_auth_rejects_missing_and_invalid_credentials() {
     server.stop();
 }
 
+const RPC_REQUEST_LIMIT: usize = 1024 * 1024;
+
+fn padded_rpc_request(method: &str, length: usize) -> Vec<u8> {
+    let mut request = json!({
+        "jsonrpc": "2.0", "id": "frame-secret-id", "method": method,
+        "params": {"padding": ""}
+    });
+    let overhead = serde_json::to_vec(&request).unwrap().len();
+    request["params"]["padding"] = Value::String("x".repeat(length - overhead));
+    let encoded = serde_json::to_vec(&request).unwrap();
+    assert_eq!(encoded.len(), length);
+    encoded
+}
+
+fn assert_frame_limit_response<R: Read>(reader: &mut BufReader<R>) {
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.len() < 256, "oversize errors must have bounded size");
+    assert!(!line.contains("frame-secret-id"));
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response["error"]["code"], -32600);
+    assert_eq!(
+        response["error"]["message"],
+        "request exceeds the 1 MiB limit"
+    );
+    let mut byte = [0];
+    match reader.read(&mut byte) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        result => panic!("oversize connection must close without another frame: {result:?}"),
+    }
+}
+
+#[test]
+fn rpc_ingress_accepts_exact_limit_and_following_frames() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    for ending in [b"\n".as_slice(), b"\r\n".as_slice()] {
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .write_all(&padded_rpc_request("server.version", RPC_REQUEST_LIMIT))
+            .unwrap();
+        stream.write_all(ending).unwrap();
+        writeln!(
+            stream,
+            "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"server.version\"}}"
+        )
+        .unwrap();
+        let mut reader = BufReader::new(stream);
+        for id in [json!("frame-secret-id"), json!(2)] {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let response: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(response["id"], id);
+            assert_eq!(response["result"], "1");
+        }
+    }
+    server.stop();
+}
+
+#[test]
+fn rpc_ingress_rejects_unterminated_oversize_before_authentication() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_auth(dir.path(), "Bearer", "unused-auth-secret");
+    for method in [
+        "server.version",
+        "events.subscribe",
+        "torrent.inspect.begin",
+    ] {
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .write_all(&padded_rpc_request(method, RPC_REQUEST_LIMIT + 1))
+            .unwrap();
+        // Keep the write side open without a newline: rejection must not wait
+        // for EOF, parsing, authentication, or the remainder of the stream.
+        assert_frame_limit_response(&mut BufReader::new(stream));
+    }
+    assert_eq!(
+        server.call_with_credential(
+            "server.version",
+            None,
+            Credential::Bearer {
+                token: "unused-auth-secret".to_owned()
+            }
+        ),
+        "1"
+    );
+    server.stop();
+}
+
+#[test]
+fn rpc_ingress_rejects_unterminated_oversize_http_headers() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .write_all(b"POST /jsonrpc HTTP/1.1\r\nX-Secret: ")
+        .unwrap();
+    stream.write_all(&vec![b'x'; 16 * 1024]).unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut status = String::new();
+    reader.read_line(&mut status).unwrap();
+    assert_eq!(status, "HTTP/1.1 400 Bad Request\r\n");
+    let mut response = String::new();
+    reader.read_to_string(&mut response).unwrap();
+    assert!(response.len() < 512);
+    assert!(!response.contains("X-Secret"));
+    assert!(response.contains("HTTP headers are too large"));
+    assert_eq!(server.call("server.version", None), "1");
+    server.stop();
+}
+
+#[test]
+fn rpc_ingress_preserves_eof_frames_and_counts_utf8_bytes() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream
+        .write_all(&padded_rpc_request("server.version", RPC_REQUEST_LIMIT))
+        .unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["result"], "1");
+
+    let mut bytes = padded_rpc_request("server.version", RPC_REQUEST_LIMIT);
+    let padding = bytes.iter().position(|byte| *byte == b'x').unwrap();
+    bytes.splice(padding..=padding, "é".bytes());
+    assert_eq!(bytes.len(), RPC_REQUEST_LIMIT + 1);
+    assert_eq!(
+        std::str::from_utf8(&bytes).unwrap().chars().count(),
+        RPC_REQUEST_LIMIT
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream.write_all(&bytes).unwrap();
+    assert_frame_limit_response(&mut BufReader::new(stream));
+    server.stop();
+}
+
+#[test]
+fn rpc_ingress_rejects_oversize_after_a_valid_frame_without_creating_tasks() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    writeln!(
+        stream,
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server.version\"}}"
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["result"], "1");
+    let mut request = json!({
+        "jsonrpc": "2.0", "id": "frame-secret-id", "method": "task.create",
+        "params": {"id": "must-stay-absent", "source": "https://example.invalid/a",
+            "destination": dir.output_path("absent.bin"), "padding": ""}
+    });
+    let overhead = serde_json::to_vec(&request).unwrap().len();
+    request["params"]["padding"] = json!("x".repeat(RPC_REQUEST_LIMIT + 1 - overhead));
+    reader
+        .get_mut()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .unwrap();
+    assert_frame_limit_response(&mut reader);
+    assert_eq!(server.call("task.list", None), json!([]));
+    server.stop();
+}
+
+#[test]
+fn rpc_ingress_uses_the_same_limit_over_tls() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let (mut server, certificate_der) = ServerProcess::start_with_tls(dir.path(), &dir.root);
+    let mut stream = tls_client_stream(server.port, &certificate_der);
+    stream
+        .write_all(&padded_rpc_request("server.version", RPC_REQUEST_LIMIT))
+        .unwrap();
+    stream.write_all(b"\r\n").unwrap();
+    stream.flush().unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["result"], "1");
+    reader
+        .get_mut()
+        .write_all(&padded_rpc_request("server.version", RPC_REQUEST_LIMIT + 1))
+        .unwrap();
+    reader.get_mut().flush().unwrap();
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], Value::Null);
+    assert_eq!(response["error"]["code"], -32600);
+    assert!(line.len() < 256 && !line.contains("frame-secret-id"));
+    // TLS currently closes the underlying socket without close_notify.
+    let mut byte = [0];
+    match reader.read(&mut byte) {
+        Ok(0) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+            ) => {}
+        result => panic!("oversize TLS connection must close: {result:?}"),
+    }
+    assert_eq!(
+        tls_rpc_request(
+            server.port,
+            &certificate_der,
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "server.version"
+            })
+        )["result"],
+        "1"
+    );
+    server.stop();
+}
+
+#[test]
+fn rpc_ingress_preserves_http_header_and_body_boundaries() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let body = padded_rpc_request("server.version", RPC_REQUEST_LIMIT);
+    let prefix = format!(
+        "POST /jsonrpc HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Padding: ",
+        body.len()
+    );
+    let suffix = "\r\n\r\n";
+    let headers = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(16 * 1024 - prefix.len() - suffix.len())
+    );
+    assert_eq!(headers.len(), 16 * 1024);
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    stream.write_all(headers.as_bytes()).unwrap();
+    stream.write_all(&body).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(headers.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert_eq!(serde_json::from_str::<Value>(body).unwrap()["result"], "1");
+
+    // A rejected Content-Length must not wait to receive the oversized body.
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    write!(
+        stream,
+        "POST /jsonrpc HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        RPC_REQUEST_LIMIT + 1
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+    assert!(response.contains("HTTP request body is too large"));
+    server.stop();
+}
+
 #[test]
 fn http_jsonrpc_bridge_supports_cors_and_task_queueing() {
     let _test_guard = server_test_guard();

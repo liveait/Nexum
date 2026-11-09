@@ -253,6 +253,10 @@ cargo run -p nexum-cli -- auth clear
 
 ## RPC 限流 / RPC Rate Limiting
 
+逐行 TCP（含 TLS）在 UTF-8／JSON 解析、认证和方法派发前，对每帧请求施加 1 MiB 字节上限，不计 LF 或 CRLF；EOF 前没有换行的最后一帧也受同一上限约束。超限返回固定的 `-32600`、`id: null` 错误后关闭，不回显内容或排空剩余输入；拒绝响应设置一秒 socket 写超时。这会拒绝以前可进入解析的超大旧方法请求。正常多帧调用及事件订阅保留原语义。HTTP 保留 16 KiB 总 header 与 1 MiB body 上限，header 也在有界读取后才解析。
+
+Line-delimited TCP, including TLS, limits every request frame to 1 MiB of bytes before UTF-8/JSON parsing, authentication or method dispatch, excluding LF or CRLF. A final EOF-terminated frame has the same limit. Oversized input receives a fixed `-32600`, `id: null` error and connection closure, without echoing or draining input; rejection responses use a one-second socket write timeout. This rejects oversized legacy-method requests that previously reached parsing. Normal multiple-frame calls and event subscriptions retain their semantics. HTTP retains its 16 KiB total-header and 1 MiB body limits, with bounded header reads before parsing.
+
 限流默认关闭。要启用它，在 Server 的 key-value 配置文件中同时设置持续每秒请求数与令牌桶突发容量：
 
 Rate limiting is disabled by default. To enable it, set both the sustained requests per second and the token-bucket burst capacity in the server's key-value configuration file:
