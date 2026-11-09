@@ -4,6 +4,7 @@ use nexum_core::nexum_engine::HttpEngine;
 use nexum_core::nexum_storage::TaskRepository;
 use nexum_core::nexum_task::DownloadTask;
 use serde_json::{Value, json};
+use std::io::BufRead;
 use std::sync::atomic::AtomicU64;
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);

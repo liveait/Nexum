@@ -3,6 +3,7 @@
 mod managed;
 #[cfg(test)]
 mod recovery_readiness_tests;
+mod request_framing;
 
 use nexum_core::{
     Core,
@@ -24,10 +25,11 @@ use nexum_protocol::{
     Credential, EventBuffer, EventEnvelope, EventNotification, RateLimit, RpcDispatcher,
     RpcErrorObject, RpcRequest, RpcResponse, TlsConfig, parse_request, serialize_response,
 };
+use request_framing::{BoundedLine, read_bounded_line};
 use rustls::{ServerConnection, StreamOwned};
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -61,6 +63,17 @@ impl SharedStream {
             stream.conn.complete_io(&mut stream.sock)?;
         }
         Ok(())
+    }
+
+    fn set_write_timeout(&self, timeout: Duration) -> io::Result<()> {
+        let locked = self
+            .0
+            .lock()
+            .map_err(|_| io::Error::other("stream mutex poisoned"))?;
+        match &*locked {
+            Transport::Plain(stream) => stream.set_write_timeout(Some(timeout)),
+            Transport::Tls(stream) => stream.sock.set_write_timeout(Some(timeout)),
+        }
     }
 }
 
@@ -1511,7 +1524,9 @@ fn write_json_line(stream: &mut SharedStream, encoded: &str) -> io::Result<()> {
 }
 
 const HTTP_MAX_HEADER_BYTES: usize = 16 * 1024;
-const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
+const RPC_MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const HTTP_MAX_BODY_BYTES: usize = RPC_MAX_REQUEST_BYTES;
+const REJECTION_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 struct HttpRequest {
     method: String,
@@ -1671,17 +1686,25 @@ fn read_http_request(
     let mut content_length = None;
     let mut content_type = None;
     let mut origin = None;
-    let mut line = String::new();
     loop {
-        line.clear();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "HTTP headers ended unexpectedly",
-            ));
-        }
-        header_bytes = header_bytes.saturating_add(read);
+        let line = match read_bounded_line(reader, HTTP_MAX_HEADER_BYTES - header_bytes)? {
+            BoundedLine::Eof => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "HTTP headers ended unexpectedly",
+                ));
+            }
+            BoundedLine::TooLarge => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "HTTP headers are too large",
+                ));
+            }
+            BoundedLine::Data(bytes) => String::from_utf8(bytes).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "HTTP header is not UTF-8")
+            })?,
+        };
+        header_bytes = header_bytes.saturating_add(line.len());
         if header_bytes > HTTP_MAX_HEADER_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1769,6 +1792,7 @@ fn handle_http_connection(
     } = match parsed {
         Ok(request) => request,
         Err(error) => {
+            stream.set_write_timeout(REJECTION_WRITE_TIMEOUT)?;
             return http_error(&mut stream, "400 Bad Request", &error.to_string(), None);
         }
     };
@@ -1925,13 +1949,23 @@ fn handle_event_subscription(
 fn handle_connection(mut stream: SharedStream, state: Arc<Mutex<ServerState>>) -> io::Result<()> {
     let reader_stream = stream.clone();
     let mut reader = BufReader::new(reader_stream);
-    let mut first_line = String::new();
-
     loop {
-        first_line.clear();
-        if reader.read_line(&mut first_line)? == 0 {
-            break;
-        }
+        let first_line = match read_bounded_line(&mut reader, RPC_MAX_REQUEST_BYTES)? {
+            BoundedLine::Eof => break,
+            BoundedLine::TooLarge => {
+                stream.set_write_timeout(REJECTION_WRITE_TIMEOUT)?;
+                let response = RpcResponse::error(
+                    Some(serde_json::Value::Null),
+                    RpcErrorObject::invalid_request("request exceeds the 1 MiB limit"),
+                );
+                let encoded = serialize_response(&response)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                write_json_line(&mut stream, &encoded)?;
+                return Ok(());
+            }
+            BoundedLine::Data(bytes) => String::from_utf8(bytes)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "request is not UTF-8"))?,
+        };
         if first_line.trim().is_empty() {
             continue;
         }
