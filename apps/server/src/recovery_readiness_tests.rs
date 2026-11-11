@@ -432,6 +432,7 @@ fn state_for(fixture: &RecoveryFixture, opened: OpenedCore) -> ServerState {
             credential: None,
         },
         rate_limiter: None,
+        inspections: Arc::new(torrent_inspection::Inspector::new().unwrap()),
     }
 }
 

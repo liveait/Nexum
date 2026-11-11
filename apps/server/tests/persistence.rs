@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nexum_core::nexum_domain::TaskId;
 use nexum_core::nexum_domain::{Destination, DownloadSource, Progress};
 use nexum_core::nexum_engine::{
@@ -2640,6 +2641,269 @@ fn require_auth_rejects_missing_and_invalid_credentials() {
     assert_eq!(
         server.call_with_credential("server.auth", None, credential),
         json!(["ApiKey"])
+    );
+    server.stop();
+}
+
+fn inspection_info() -> Vec<u8> {
+    [
+        b"d6:lengthi3e4:name5:a.txt12:piece lengthi4e6:pieces20:".as_slice(),
+        &[0; 20],
+        b"e",
+    ]
+    .concat()
+}
+
+fn inspection_fixture() -> Vec<u8> {
+    let tracker = b"https://tracker.invalid/sentinel-passkey";
+    [
+        format!("d8:announce{}:", tracker.len()).into_bytes(),
+        tracker.to_vec(),
+        b"4:info".to_vec(),
+        inspection_info(),
+        b"e".to_vec(),
+    ]
+    .concat()
+}
+
+fn metainfo_params(bytes: &[u8]) -> Value {
+    json!({"metainfo_base64": STANDARD.encode(bytes)})
+}
+
+fn await_inspection(mut query: impl FnMut() -> Value) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = query();
+        if status["phase"] != "parsing" {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "inspection did not become terminal"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn torrent_inspection_round_trips_without_tasks_output_or_restart_reuse() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let caps = server.call("server.capabilities", None);
+    assert_eq!(caps["torrent_inspect"]["version"], 1);
+    assert_eq!(
+        caps["torrent_inspect"]["sources"],
+        json!(["metainfo_base64"])
+    );
+    let (status,_,begin) = server.http_request("POST","/jsonrpc",Some(json!({
+        "jsonrpc":"2.0","id":1,"method":"torrent.inspect.begin","params":metainfo_params(&inspection_fixture())
+    })));
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert!(begin.get("error").is_none());
+    let id = begin["result"]["inspection_id"].as_str().unwrap();
+    assert_eq!(id.len(), 32);
+    let result = await_inspection(|| {
+        server.call("torrent.inspect.status", Some(json!({"inspection_id":id})))
+    });
+    assert_eq!(result["phase"], "ready");
+    assert_eq!(result["result"]["files"][0]["path"], json!(["a.txt"]));
+    assert_eq!(result["result"]["files"][0]["length"], 3);
+    assert_eq!(result["result"]["total_bytes"], 3);
+    assert_eq!(result["result"]["info_hash"].as_str().unwrap().len(), 40);
+    assert!(!result.to_string().contains("sentinel-passkey"));
+    assert_eq!(server.call("task.list", None), json!([]));
+    assert_eq!(fs::read_dir(dir.root.join("downloads")).unwrap().count(), 0);
+    let db = rusqlite::Connection::open_with_flags(
+        dir.path().join("nexum.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(db);
+    server.stop();
+    let mut restarted = ServerProcess::start(dir.path());
+    assert_eq!(
+        restarted.request("torrent.inspect.status", Some(json!({"inspection_id":id})))["error"]["code"],
+        -32031
+    );
+    assert_eq!(restarted.call("task.list", None), json!([]));
+    restarted.stop();
+}
+
+#[test]
+fn torrent_inspection_rejects_unsupported_sources_and_redacts_parse_failures() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    for params in [
+        json!({"path":dir.path()}),
+        json!({"magnet":"magnet:?xt=urn:btih:sentinel-passkey"}),
+        json!({"metainfo_base64":"??"}),
+        json!({"metainfo_base64":"","extra":true}),
+    ] {
+        let response = server.request("torrent.inspect.begin", Some(params));
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(!response.to_string().contains("sentinel-passkey"));
+    }
+    let begin = server.call(
+        "torrent.inspect.begin",
+        Some(metainfo_params(b"sentinel-passkey")),
+    );
+    let id = begin["inspection_id"].as_str().unwrap();
+    let failed = await_inspection(|| {
+        server.call("torrent.inspect.status", Some(json!({"inspection_id":id})))
+    });
+    assert_eq!(failed["phase"], "failed");
+    assert_eq!(failed["error"]["code"], "invalid_bencode");
+    assert!(!failed.to_string().contains("sentinel-passkey"));
+    assert_eq!(
+        server.call("torrent.inspect.cancel", Some(json!({"inspection_id":id})))["cancelled"],
+        true
+    );
+    assert_eq!(
+        server.call("torrent.inspect.cancel", Some(json!({"inspection_id":id})))["cancelled"],
+        true
+    );
+    assert_eq!(
+        server.call("torrent.inspect.status", Some(json!({"inspection_id":id})))["phase"],
+        "cancelled"
+    );
+    server.stop();
+}
+
+#[test]
+fn torrent_inspection_requires_authentication_and_ignores_unverified_scope_fields() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start_with_auth(dir.path(), "Bearer", "inspection-token");
+    assert_unauthorized(&server.request(
+        "torrent.inspect.begin",
+        Some(metainfo_params(&inspection_fixture())),
+    ));
+    let credential = Credential::Bearer {
+        token: "inspection-token".into(),
+    };
+    let begin = server.call_with_credential(
+        "torrent.inspect.begin",
+        Some(metainfo_params(&inspection_fixture())),
+        credential.clone(),
+    );
+    let id = begin["inspection_id"].as_str().unwrap();
+    assert_unauthorized(&server.request_with_credential(
+        "torrent.inspect.status",
+        Some(json!({"inspection_id":id})),
+        Some(Credential::Bearer {
+            token: "wrong-token".into(),
+        }),
+    ));
+    assert_eq!(
+        await_inspection(|| server.call_with_credential(
+            "torrent.inspect.status",
+            Some(json!({"inspection_id":id})),
+            credential.clone()
+        ))["phase"],
+        "ready"
+    );
+    server.stop();
+    let mut anonymous = ServerProcess::start(dir.path());
+    let begin = anonymous.request_with_credential(
+        "torrent.inspect.begin",
+        Some(metainfo_params(&inspection_fixture())),
+        Some(Credential::Bearer {
+            token: "unverified".into(),
+        }),
+    );
+    let id = begin["result"]["inspection_id"].as_str().unwrap();
+    assert_eq!(
+        await_inspection(
+            || anonymous.call("torrent.inspect.status", Some(json!({"inspection_id":id})))
+        )["phase"],
+        "ready"
+    );
+    let cancelled = anonymous.request_with_credential(
+        "torrent.inspect.cancel",
+        Some(json!({"inspection_id":id})),
+        Some(Credential::ApiKey {
+            key: "another-unverified-field".into(),
+        }),
+    );
+    assert_eq!(cancelled["result"]["cancelled"], true);
+    anonymous.stop();
+}
+
+#[test]
+fn torrent_inspection_runs_through_https_and_verified_tls_rpc() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let (mut server, certificate) = ServerProcess::start_with_tls(dir.path(), &dir.root);
+    let (status, _, begin) = tls_http_request(
+        server.port,
+        &certificate,
+        "POST",
+        "/jsonrpc",
+        Some(json!({
+            "jsonrpc":"2.0","id":1,"method":"torrent.inspect.begin","params":metainfo_params(&inspection_fixture())
+        })),
+        None,
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    let id = begin["result"]["inspection_id"].as_str().unwrap();
+    let result = await_inspection(|| {
+        let reply = tls_rpc_request(
+            server.port,
+            &certificate,
+            json!({"jsonrpc":"2.0","id":2,"method":"torrent.inspect.status","params":{"inspection_id":id}}),
+        );
+        assert!(reply.get("error").is_none());
+        reply["result"].clone()
+    });
+    assert_eq!(result["phase"], "ready");
+    assert!(!result.to_string().contains("sentinel-passkey"));
+    let cancelled = tls_rpc_request(
+        server.port,
+        &certificate,
+        json!({"jsonrpc":"2.0","id":3,"method":"torrent.inspect.cancel","params":{"inspection_id":id}}),
+    );
+    assert_eq!(cancelled["result"]["cancelled"], true);
+    server.stop();
+}
+
+#[test]
+fn torrent_inspection_accepts_the_exact_raw_budget_and_rejects_decoded_overflow() {
+    let _test_guard = server_test_guard();
+    let dir = TestDir::new();
+    let mut server = ServerProcess::start(dir.path());
+    let limit = 512 * 1024;
+    let suffix = [b"4:info".as_slice(), &inspection_info(), b"e"].concat();
+    let prefix = b"d7:comment";
+    let length = limit - prefix.len() - 7 - suffix.len();
+    assert_eq!(length.to_string().len(), 6);
+    let raw = [
+        prefix.to_vec(),
+        format!("{length}:").into_bytes(),
+        vec![b'x'; length],
+        suffix,
+    ]
+    .concat();
+    assert_eq!(raw.len(), limit);
+    let begin = server.call("torrent.inspect.begin", Some(metainfo_params(&raw)));
+    let id = begin["inspection_id"].as_str().unwrap();
+    assert_eq!(
+        await_inspection(
+            || server.call("torrent.inspect.status", Some(json!({"inspection_id":id})))
+        )["phase"],
+        "ready"
+    );
+    let mut over = raw;
+    over.push(b'x');
+    assert_eq!(
+        server.request("torrent.inspect.begin", Some(metainfo_params(&over)))["error"]["code"],
+        -32602
     );
     server.stop();
 }

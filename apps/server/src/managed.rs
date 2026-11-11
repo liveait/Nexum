@@ -167,6 +167,8 @@ pub(super) fn run_with(
 
     let data_dir_lock = lock_data_dir(&config.data_dir)?;
     let opened = open_core(&config.data_dir, config.bandwidth_policy)?;
+    let inspections = Arc::new(crate::torrent_inspection::Inspector::new()?);
+    let _inspection_shutdown = inspections.shutdown_guard();
     let state = Arc::new(Mutex::new(ServerState {
         core: opened.core,
         pending_completions: opened.pending_completions,
@@ -178,6 +180,7 @@ pub(super) fn run_with(
         events: EventHub::default(),
         authentication,
         rate_limiter: None,
+        inspections,
     }));
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let endpoint = listener.local_addr()?;

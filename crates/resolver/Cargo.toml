@@ -6,3 +6,8 @@ license = "MIT"
 description = "Nexum resolver component"
 
 [dependencies]
+caseless = "=0.2.2"
+serde = { version = "1", features = ["derive"] }
+sha1 = "=0.10.7"
+sha2 = "0.10"
+unicode-normalization = "=0.1.26"
