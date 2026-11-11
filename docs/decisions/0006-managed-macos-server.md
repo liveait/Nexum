@@ -119,6 +119,16 @@ Rust validates the HTTP(S) URL, safe filename and folder, generates random IDs, 
 
 ## 验收与验证边界 / Acceptance and verification boundary
 
+### 版本 2 托管 TLS 身份 / Version-2 managed TLS identity
+
+2026-11-11 起，新 Desktop 使用私有 `start_tls` 协商控制版本 2。帧包含 `startup` 对象（控制／Server／RPC 版本及 Bearer）和每次启动的随机 `generation`。Server 生成临时自签名证书及私钥，证书含 `127.0.0.1` IP SAN，通过同一拥有句柄的 stdout 管道返回七字段就绪帧（原五字段加 `generation`、`certificate_der`）。完整管道帧仍限 4096 字节，Desktop 拒绝空证书或超过 1024 字节的 DER。证书和私钥只保存在内存。版本 1 的 `start`、五字段就绪帧和旧 HTTP 客户端保持兼容。
+
+Starting 2026-11-11, new Desktop negotiates control version 2 through private `start_tls`. Its frame contains a `startup` object with control/Server/RPC versions and bearer, plus a fresh random `generation`. The Server generates an ephemeral self-signed certificate/key with a `127.0.0.1` IP SAN, returning seven readiness fields through the same owned stdout pipe (the original five plus `generation` and `certificate_der`). Pipe frames remain capped at 4096 bytes. Desktop rejects empty certificates or DER over 1024 bytes. Certificates/private keys remain in memory. Version-1 `start`, five-field readiness and old HTTP clients remain compatible.
+
+新路由先验证 PID、版本、回环端点和 generation，再绑定完整证书。每次 RPC 和事件连接都使用 TLS 1.3，委托 WebPKI 校验名称、有效期和握手签名，并额外逐字节校验证书 pin。仅管道证书进入托管根集合，TLS 恢复及 early data 关闭。握手完成后才读取／发送 Bearer 和请求参数，失败显示错误，重连重新解析当前路由。外部模式的证书和凭据路径独立。认证 FTP 的密码入口及 Keychain／SQLite 协调仍待 F1 后续实现，见 [RFC 0004](../RFC/0004-ftp-credentials-and-recovery.md)。
+
+New routes validate PID, versions, loopback endpoint and generation before binding the complete certificate. Every RPC/event connection uses TLS 1.3, delegates name/time/handshake-signature validation to WebPKI and additionally checks the exact certificate bytes. Only the pipe-delivered certificate enters managed trust roots. TLS resumption and early data are disabled. Bearer and request parameters are loaded/sent after the handshake. Failures are visible, and reconnects resolve the current route. External-mode certificates and credentials use their separate path. F1 still requires authenticated FTP password input and Keychain/SQLite coordination under [RFC 0004](../RFC/0004-ftp-credentials-and-recovery.md).
+
 - 在全新 macOS 用户环境中，实际构建的 `.app` 启动随包 Server，将粘贴的 HTTP(S) URL 下载到不会覆盖同名文件的默认目标，不需要终端、Server 地址、手动任务 ID 或手动文件路径。退出／重开和 App 升级后，任务状态与已完成文件仍在。<br>
   In a fresh macOS account, the actual built `.app` starts its bundled Server and downloads a pasted HTTP(S) URL to a collision-safe default destination, without a terminal, Server address, manual task ID, or manual file path. Task state and completed bytes survive quit/relaunch and an App upgrade.
 - 测试覆盖随包 Server 可执行文件缺失或不兼容、启动超时、子进程退出及重启上限、重复启动 App、外部固定端口被占用，以及伪装成 `39100` Server 的进程；任何情形下 App 都不能连接或停止无关进程。托管 RPC、HTTP 桥接和事件流拒绝缺失或错误凭据。令牌不得出现在参数、环境变量、日志、设置或前端载荷中。<br>

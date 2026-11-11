@@ -205,6 +205,10 @@ cargo test --locked -p nexum-desktop --lib managed_server::tests
 
 The process tests create and clean their own temporary data/download directories without stopping an existing development Server.
 
+新 Desktop 请求控制版本 2 的 `start_tls`，使用从拥有句柄的管道取得的临时证书固定 TLS 1.3 RPC／事件连接。版本 1 原始帧继续由进程测试覆盖。`managed_tls::tests` 验证完整 DER 固定及 WebPKI 名称／时间检查，Desktop 测试还覆盖错误 pin、明文替代端点和重启旧路由。Supervisor 测试以独立临时 Cargo target 离线构建 TLS fixture，沿用仓库锁文件中的依赖版本。原生验收仍使用实际 `.app`。
+
+New Desktop requests control-version-2 `start_tls`, pinning TLS 1.3 RPC/event connections with the ephemeral certificate received through its owned pipe. Process tests retain raw version-1 coverage. `managed_tls::tests` verify exact DER pinning and WebPKI name/time checks, while Desktop tests cover wrong pins, plaintext replacements and stale routes after restart. Supervisor tests build a TLS fixture offline in a private temporary Cargo target using repository-locked dependency versions. Native acceptance still uses the actual `.app`.
+
 ### 种子内容检查 / Torrent-content inspection
 
 CLI 先读取本地普通种子内容并上传，Server 不读取客户端路径。`inspect` 等待解析并打印 v1 infohash、原始内容 SHA256、文件清单及 padding 标记；`inspect-begin` 立即返回临时 ID，随后可查询或取消。检查不会创建任务、输出文件或联系 tracker／peer；HTTP 下载的 `.torrent` 文件仍是普通下载。客户端先核对 `server.capabilities.torrent_inspect`，不向旧 Server 回退创建占位任务。

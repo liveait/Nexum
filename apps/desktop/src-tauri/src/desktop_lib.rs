@@ -4,6 +4,7 @@
 mod credential_store;
 #[path = "managed_server.rs"]
 pub mod managed_server;
+mod managed_tls;
 
 pub use credential_store::{clear_credential, credential_status, save_credential};
 
@@ -39,6 +40,10 @@ pub struct RpcRoute {
 enum RouteAuthentication {
     External,
     Managed(String),
+    ManagedTls {
+        token: String,
+        config: Arc<ClientConfig>,
+    },
 }
 
 impl RpcRoute {
@@ -65,12 +70,37 @@ impl RpcRoute {
         })
     }
 
+    pub fn managed_tls(
+        endpoint: String,
+        token: String,
+        certificate_der: Vec<u8>,
+    ) -> Result<Self, String> {
+        let mut route = Self::managed(endpoint, token.clone())?;
+        route.server = format!("tls://{}", route.server);
+        route.authentication = RouteAuthentication::ManagedTls {
+            token,
+            config: managed_tls::client_config(certificate_der)?,
+        };
+        Ok(route)
+    }
+
+    fn connect(&self, address: &str, timeout: Duration) -> Result<(ClientTransport, bool), String> {
+        match &self.authentication {
+            RouteAuthentication::ManagedTls { config, .. } => {
+                connect_transport_with_tls_config(address, timeout, || Ok(Arc::clone(config)))
+            }
+            _ => connect_transport(address, timeout),
+        }
+    }
+
     fn credential(&self) -> Result<Option<Credential>, String> {
         match &self.authentication {
             RouteAuthentication::External => credential_store::credential_for_request(&self.server),
-            RouteAuthentication::Managed(token) => Ok(Some(Credential::Bearer {
-                token: token.clone(),
-            })),
+            RouteAuthentication::Managed(token) | RouteAuthentication::ManagedTls { token, .. } => {
+                Ok(Some(Credential::Bearer {
+                    token: token.clone(),
+                }))
+            }
         }
     }
 
@@ -85,7 +115,7 @@ impl RpcRoute {
             method,
             params,
             timeout_ms,
-            connect_transport,
+            |address, timeout| self.connect(address, timeout),
             |_| self.credential(),
         )
         .into_result()
@@ -93,14 +123,21 @@ impl RpcRoute {
     }
 
     fn event_stream(&self, stop: &AtomicBool) -> Result<BufReader<ClientTransport>, String> {
-        connect_event_stream_with(&self.server, stop, connect_transport, |_| self.credential())
-            .map_err(|error| self.sanitize_error(error))
+        connect_event_stream_with(
+            &self.server,
+            stop,
+            |address, timeout| self.connect(address, timeout),
+            |_| self.credential(),
+        )
+        .map_err(|error| self.sanitize_error(error))
     }
 
     fn sanitize_error(&self, error: String) -> String {
         match &self.authentication {
             RouteAuthentication::External => error,
-            RouteAuthentication::Managed(token) => error.replace(token, "<redacted>"),
+            RouteAuthentication::Managed(token) | RouteAuthentication::ManagedTls { token, .. } => {
+                error.replace(token, "<redacted>")
+            }
         }
     }
 }
@@ -1188,6 +1225,89 @@ mod tests {
         assert!(result.error.unwrap().contains("TLS handshake failed"));
         assert!(!credential_loaded.get());
         assert!(server.finish().is_none());
+    }
+
+    #[test]
+    fn managed_pin_protects_rpc_and_each_event_connection() {
+        let token = "ab".repeat(32);
+        let rpc = TestTlsServer::start(
+            "127.0.0.1",
+            Some(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"1"})),
+        );
+        let endpoint = rpc.address.replace("tls://localhost:", "127.0.0.1:");
+        let route =
+            RpcRoute::managed_tls(endpoint, token.clone(), rpc.certificate.to_vec()).unwrap();
+        assert_eq!(route.call("server.version", None, 2000).unwrap(), "1");
+        assert_eq!(
+            rpc.finish().unwrap()["credential"]["Bearer"]["token"],
+            token
+        );
+        let events = TestTlsServer::start(
+            "127.0.0.1",
+            Some(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"subscribed":true}})),
+        );
+        let endpoint = events.address.replace("tls://localhost:", "127.0.0.1:");
+        let event_route =
+            RpcRoute::managed_tls(endpoint, token.clone(), events.certificate.to_vec()).unwrap();
+        assert!(event_route.event_stream(&AtomicBool::new(false)).is_ok());
+        assert_eq!(
+            events.finish().unwrap()["credential"]["Bearer"]["token"],
+            token
+        );
+        // A reconnect resolving a new endpoint must also use its new certificate.
+        let replacement = TestTlsServer::start("127.0.0.1", None);
+        let mut stale = route;
+        stale.server = replacement.address.replace("localhost", "127.0.0.1");
+        assert!(stale.event_stream(&AtomicBool::new(false)).is_err());
+        assert!(replacement.finish().is_none());
+    }
+
+    #[test]
+    fn wrong_managed_pin_fails_before_loading_or_sending_rpc_payload() {
+        let original = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let replacement = TestTlsServer::start("127.0.0.1", None);
+        let config = managed_tls::client_config(original.cert.der().to_vec()).unwrap();
+        let loaded = Cell::new(false);
+        let result = call_rpc_with(
+            &replacement.address.replace("localhost", "127.0.0.1"),
+            "future.secret.submission",
+            Some(serde_json::json!({"password":"origin-password-sentinel"})),
+            2000,
+            |address, timeout| connect_transport_with_tls_config(address, timeout, || Ok(config)),
+            |_| {
+                loaded.set(true);
+                Ok(Some(Credential::Bearer {
+                    token: "must-not-send".to_owned(),
+                }))
+            },
+        );
+        assert!(!result.success);
+        assert!(!loaded.get());
+        assert!(replacement.finish().is_none());
+    }
+
+    #[test]
+    fn managed_tls_never_falls_back_to_a_plaintext_replacement() {
+        let (address, received) = start_plain_server();
+        let original = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let token = "cd".repeat(32);
+        let route =
+            RpcRoute::managed_tls(address, token.clone(), original.cert.der().to_vec()).unwrap();
+        assert!(
+            route
+                .call(
+                    "future.secret.submission",
+                    Some(serde_json::json!({"password":"origin-password-sentinel"})),
+                    500
+                )
+                .is_err()
+        );
+        let bytes = received.join().unwrap();
+        assert!(!bytes.is_empty());
+        let captured = String::from_utf8_lossy(&bytes);
+        assert!(!captured.contains(&token));
+        assert!(!captured.contains("origin-password-sentinel"));
+        assert!(!captured.contains("future.secret.submission"));
     }
 
     #[test]

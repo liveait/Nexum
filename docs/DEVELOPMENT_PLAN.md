@@ -273,6 +273,10 @@ PR #80 merged as `4038834f7460e9966e33b3d17a2a2a45535cc44a`, with all gates pass
 
 ### M5 — 首发通用传输契约与 FTP / M5 — First-release transfer contract and FTP
 
+- **F1 托管身份切片**。基于 `4d59d020` 新增显式版本 2 管道协商、每次子进程专用的 TLS 证书、完整 DER pin 及同连接握手后发送凭据。旧版本 1 托管协议保留兼容。当前实现等待完整门槛、固定 SHA 独立审查和原生 App 验证，认证 FTP 来源凭据及传输仍待后续切片。
+
+  **F1 managed-identity slice.** From `4d59d020`, add explicit version-2 pipe negotiation, per-child TLS certificates, exact DER pins and credential transmission after the same connection's handshake. Preserve version-1 managed compatibility. Implementation awaits complete gates, fixed-SHA independent review and native App validation. Authenticated FTP origin credentials and transfers remain for subsequent slices.
+
 - **首发范围**。匿名与用户名／密码 FTP 下载必须经真实 CLI／原生 Desktop 验收，涵盖凭据隔离、控制、有界失败重试、可信跨重启恢复和最终文件完整性。FTPS 模式、凭据 provider、依赖及版本化恢复格式在 FTP RFC 中确定，新增协议的文件安全独立验收。
 
   **First-release scope.** Anonymous and username/password FTP downloads require real CLI/native Desktop acceptance covering credential isolation, controls, bounded retries, trustworthy restart recovery and final integrity. The FTP RFC defines FTPS modes, credential providers, dependencies and versioned recovery, with separate file-safety acceptance for each added protocol.

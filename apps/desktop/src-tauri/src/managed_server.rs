@@ -4,8 +4,8 @@
 use super::RpcRoute;
 use nexum_protocol::ProtocolVersion;
 use nexum_protocol::managed::{
-    MANAGED_CONTROL_VERSION, ManagedControl, ManagedReady, ManagedStartup, read_managed_frame,
-    write_managed_frame,
+    MANAGED_TLS_CONTROL_VERSION, ManagedControl, ManagedStartup, ManagedTlsReady,
+    ManagedTlsStartup, read_managed_frame, write_managed_frame,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -371,13 +371,14 @@ fn random_token() -> Result<String, String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn validate_ready(ready: &ManagedReady, child_id: u32) -> Result<(), String> {
-    if ready.control_version != MANAGED_CONTROL_VERSION
+fn validate_ready(ready: &ManagedTlsReady, child_id: u32, generation: &str) -> Result<(), String> {
+    if ready.control_version != MANAGED_TLS_CONTROL_VERSION
         || ready.server_version != env!("CARGO_PKG_VERSION")
         || ready.protocol_version != ProtocolVersion::CURRENT.as_str()
         || ready.process_id != child_id
         || ready.endpoint.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST)
         || ready.endpoint.port() == 0
+        || ready.generation != generation
     {
         return Err(
             "The bundled local service returned an incompatible startup response.".to_owned(),
@@ -398,7 +399,7 @@ impl OwnedChild {
             let _ = write_managed_frame(
                 &mut input,
                 &ManagedControl::Shutdown {
-                    control_version: MANAGED_CONTROL_VERSION,
+                    control_version: MANAGED_TLS_CONTROL_VERSION,
                 },
             );
         }
@@ -427,6 +428,7 @@ fn spawn_owned(
 ) -> Result<(OwnedChild, RpcRoute), String> {
     verify_binary(config)?;
     let token = random_token()?;
+    let generation = random_token()?;
     let child = Command::new(&config.binary)
         .arg("--managed")
         .arg("--data-dir")
@@ -455,11 +457,14 @@ fn spawn_owned(
         .ok_or_else(|| "Local service control pipe is unavailable.".to_owned())?;
     write_managed_frame(
         input,
-        &ManagedControl::Start(ManagedStartup {
-            control_version: MANAGED_CONTROL_VERSION,
-            server_version: env!("CARGO_PKG_VERSION").to_owned(),
-            protocol_version: ProtocolVersion::CURRENT.as_str().to_owned(),
-            bearer_token: token.clone(),
+        &ManagedControl::StartTls(ManagedTlsStartup {
+            startup: ManagedStartup {
+                control_version: MANAGED_TLS_CONTROL_VERSION,
+                server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                protocol_version: ProtocolVersion::CURRENT.as_str().to_owned(),
+                bearer_token: token.clone(),
+            },
+            generation: generation.clone(),
         }),
     )
     .map_err(|_| "Cannot initialize the bundled local service.".to_owned())?;
@@ -468,7 +473,7 @@ fn spawn_owned(
         .name("nexum-managed-ready".to_owned())
         .spawn(move || {
             let mut stdout = stdout;
-            let ready = read_managed_frame::<ManagedReady>(&mut stdout);
+            let ready = read_managed_frame::<ManagedTlsReady>(&mut stdout);
             let _ = sender.send((stdout, ready));
         })
         .map_err(|_| "Cannot read local service startup.".to_owned())?;
@@ -498,8 +503,8 @@ fn spawn_owned(
     }
     let _ = reader.join();
     let ready = response?;
-    validate_ready(&ready, owned.child.id())?;
-    let route = RpcRoute::managed(ready.endpoint.to_string(), token)?;
+    validate_ready(&ready, owned.child.id(), &generation)?;
+    let route = RpcRoute::managed_tls(ready.endpoint.to_string(), token, ready.certificate_der)?;
     if route.call("server.version", None, 1500)?.as_str() != Some(ProtocolVersion::CURRENT.as_str())
     {
         return Err("The bundled local service uses an incompatible RPC protocol.".to_owned());
@@ -572,19 +577,42 @@ mod tests {
                 let dir = std::env::temp_dir()
                     .join(format!("nexum-supervisor-child-{}", std::process::id()));
                 std::fs::create_dir_all(&dir).unwrap();
-                let source = dir.join("child.rs");
-                let binary = dir.join("child");
+                let source_dir = dir.join("src");
+                std::fs::create_dir_all(&source_dir).unwrap();
+                let source = source_dir.join("main.rs");
+                let binary = dir.join("target/debug/nexum-managed-test-child");
                 std::fs::write(
                     &source,
                     FIXTURE_SOURCE.replace("__VERSION__", env!("CARGO_PKG_VERSION")),
                 )
                 .unwrap();
+                std::fs::write(
+                    dir.join("Cargo.toml"),
+                    r#"
+[package]
+name = "nexum-managed-test-child"
+version = "0.0.0"
+edition = "2024"
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rcgen = "0.13"
+serde_json = "1"
+"#,
+                )
+                .unwrap();
+                // A private target avoids waiting for the workspace Cargo test lock.
+                std::fs::copy(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Cargo.lock"),
+                    dir.join("Cargo.lock"),
+                )
+                .unwrap();
                 let output =
-                    Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
-                        .arg("--edition=2024")
-                        .arg(&source)
-                        .arg("-o")
-                        .arg(&binary)
+                    Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+                        .arg("build")
+                        .arg("--offline")
+                        .arg("--manifest-path")
+                        .arg(dir.join("Cargo.toml"))
+                        .env("CARGO_TARGET_DIR", dir.join("target"))
                         .output()
                         .unwrap();
                 assert!(
@@ -597,56 +625,22 @@ mod tests {
             .clone()
     }
 
-    const FIXTURE_SOURCE: &str = r#"
-use std::{io::{self, Read, Write, BufRead, BufReader}, net::TcpListener, time::Duration};
-fn frame(input: &mut impl Read) -> Option<String> {
-    let mut header=[0u8;4]; input.read_exact(&mut header).ok()?;
-    let mut payload=vec![0u8;u32::from_be_bytes(header) as usize];
-    input.read_exact(&mut payload).ok()?; String::from_utf8(payload).ok()
-}
-fn main() {
-    let args:Vec<_>=std::env::args().collect();
-    assert_eq!(&args[1],"--managed"); assert_eq!(&args[2],"--data-dir");
-    let dir=std::path::PathBuf::from(&args[3]);
-    let mode=std::fs::read_to_string(dir.join("mode")).unwrap();
-    std::fs::write(dir.join("pid"),std::process::id().to_string()).unwrap();
-    let mut input=io::stdin(); let start=frame(&mut input).unwrap();
-    let token=start.split("\"bearer_token\":\"").nth(1).unwrap().split('"').next().unwrap().to_owned();
-    assert_eq!(token.len(),64);
-    if mode=="timeout" { std::thread::sleep(Duration::from_secs(30)); return; }
-    if mode=="exit" { return; }
-    let listener=TcpListener::bind("127.0.0.1:0").unwrap();
-    let pid=if mode=="wrong-pid" { std::process::id()+1 } else { std::process::id() };
-    let protocol=if mode=="wrong-version" { "99" } else { "1" };
-    let payload=format!("{{\"control_version\":1,\"server_version\":\"__VERSION__\",\"protocol_version\":\"{}\",\"process_id\":{},\"endpoint\":\"{}\"}}",protocol,pid,listener.local_addr().unwrap());
-    let mut output=io::stdout(); output.write_all(&(payload.len() as u32).to_be_bytes()).unwrap(); output.write_all(payload.as_bytes()).unwrap(); output.flush().unwrap();
-    let mode2=mode.clone();
-    std::thread::spawn(move|| {
-        for stream in listener.incoming() {
-            let mut stream=stream.unwrap(); let mut line=String::new();
-            BufReader::new(stream.try_clone().unwrap()).read_line(&mut line).unwrap();
-            assert!(line.contains(&token));
-            let reply=if mode2=="reject-auth" { format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{{\"code\":-32001,\"message\":\"{}\"}}}}\n",token) }
-            else { "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"1\"}\n".to_owned() };
-            stream.write_all(reply.as_bytes()).unwrap();
-            if mode2=="crash" { std::thread::sleep(Duration::from_millis(100)); std::process::exit(7); }
-        }
-    });
-    if mode=="stall-shutdown" { std::thread::sleep(Duration::from_secs(30)); return; }
-    frame(&mut input); // Shutdown or parent EOF both end the owned child.
-}
-"#;
+    const FIXTURE_SOURCE: &str = include_str!("../tests/fixtures/managed_child.rs");
     #[test]
     fn readiness_requires_child_identity_versions_and_ipv4_loopback() {
-        let valid = ManagedReady {
-            control_version: MANAGED_CONTROL_VERSION,
+        let generation = "a".repeat(64);
+        let valid = ManagedTlsReady {
+            control_version: MANAGED_TLS_CONTROL_VERSION,
             server_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol_version: "1".to_owned(),
             process_id: 42,
             endpoint: "127.0.0.1:12345".parse().unwrap(),
+            generation: generation.clone(),
+            certificate_der: Vec::new(),
         };
-        assert!(validate_ready(&valid, 42).is_ok());
-        assert!(validate_ready(&valid, 43).is_err());
+        assert!(validate_ready(&valid, 42, &generation).is_ok());
+        assert!(validate_ready(&valid, 43, &generation).is_err());
+        assert!(validate_ready(&valid, 42, &"b".repeat(64)).is_err());
         for endpoint in [
             "127.0.0.1:0",
             "127.0.0.2:12345",
@@ -655,17 +649,17 @@ fn main() {
         ] {
             let mut ready = valid.clone();
             ready.endpoint = endpoint.parse().unwrap();
-            assert!(validate_ready(&ready, 42).is_err());
+            assert!(validate_ready(&ready, 42, &generation).is_err());
         }
         let mut wrong = valid.clone();
         wrong.server_version = "other".to_owned();
-        assert!(validate_ready(&wrong, 42).is_err());
+        assert!(validate_ready(&wrong, 42, &generation).is_err());
         wrong = valid.clone();
         wrong.protocol_version = "other".to_owned();
-        assert!(validate_ready(&wrong, 42).is_err());
+        assert!(validate_ready(&wrong, 42, &generation).is_err());
         wrong = valid;
         wrong.control_version += 1;
-        assert!(validate_ready(&wrong, 42).is_err());
+        assert!(validate_ready(&wrong, 42, &generation).is_err());
     }
 
     #[test]
@@ -779,8 +773,40 @@ fn main() {
     }
 
     #[test]
+    fn restarting_rotates_identity_and_rejects_stale_routes() {
+        let fixture = FixtureDirectory::new("normal");
+        let server = fixture.supervisor();
+        server.enable().unwrap();
+        wait_state(&server, "running", Duration::from_secs(3));
+        let old_route = server.route().unwrap();
+        server.disable().unwrap();
+        assert!(old_route.call("server.version", None, 300).is_err());
+        server.enable().unwrap();
+        let status = wait_state(&server, "running", Duration::from_secs(3));
+        assert_eq!(status.generation, 2);
+        assert_eq!(
+            server
+                .route()
+                .unwrap()
+                .call("server.version", None, 1000)
+                .unwrap(),
+            "1"
+        );
+        // Applying a previous certificate even to the new endpoint fails.
+        let mut stale = old_route;
+        stale.server = server.route().unwrap().server;
+        assert!(stale.call("server.version", None, 1000).is_err());
+        server.shutdown().unwrap();
+    }
+
+    #[test]
     fn startup_rejects_wrong_identity_version_and_auth_without_leaking_secret() {
-        for mode in ["wrong-pid", "wrong-version", "reject-auth"] {
+        for mode in [
+            "wrong-pid",
+            "wrong-version",
+            "wrong-generation",
+            "reject-auth",
+        ] {
             let fixture = FixtureDirectory::new(mode);
             let server = fixture.supervisor();
             server.enable().unwrap();
