@@ -1,5 +1,6 @@
 //! Exercise the managed child as an independent parent, including its raw wire format.
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -16,6 +17,49 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 const OTHER_TOKEN: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 const PIPE_LIMIT: usize = 64 * 1024;
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn managed_metainfo_inspection_is_private_and_expires_on_process_restart() {
+    let dir = TestDir::new();
+    let mut child = ManagedChild::start(&dir.data);
+    let raw = [b"d7:comment16:sentinel-passkey4:infod6:lengthi3e4:name5:a.txt12:piece lengthi4e6:pieces20:".as_slice(), &[0;20], b"ee"].concat();
+    let params = json!({"metainfo_base64":STANDARD.encode(raw)});
+    assert!(
+        child
+            .rpc("torrent.inspect.begin", Some(params.clone()), None)
+            .get("error")
+            .is_some()
+    );
+    let begin = child.call("torrent.inspect.begin", Some(params));
+    let id = begin["inspection_id"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let status = child.call("torrent.inspect.status", Some(json!({"inspection_id":id})));
+        if status["phase"] != "parsing" {
+            assert_eq!(status["phase"], "ready");
+            assert!(!status.to_string().contains("sentinel-passkey"));
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(child.call("task.list", None), json!([]));
+    child.eof();
+    assert!(child.exit(Duration::from_secs(3)).success());
+    child.assert_one_ready_frame();
+    child.assert_private_output("sentinel-passkey");
+    let mut restarted = ManagedChild::start(&dir.data);
+    assert_eq!(
+        restarted.rpc(
+            "torrent.inspect.status",
+            Some(json!({"inspection_id":id})),
+            Some(TOKEN)
+        )["error"]["code"],
+        -32031
+    );
+    restarted.eof();
+    assert!(restarted.exit(Duration::from_secs(3)).success());
+}
 
 struct TestDir {
     root: PathBuf,

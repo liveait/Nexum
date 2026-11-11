@@ -1,5 +1,7 @@
 //! Input resolution boundaries for Nexum.
 
+pub mod torrent;
+
 use std::{fmt, path::Path, str::FromStr};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -6,6 +6,8 @@ license = "MIT"
 description = "Nexum local JSON-RPC server"
 
 [dependencies]
+base64 = "=0.22.1"
+getrandom = "=0.3.4"
 nexum-core = { path = "../../crates/core" }
 nexum-protocol = { path = "../../crates/protocol" }
 serde_json = "1"

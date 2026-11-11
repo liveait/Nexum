@@ -4,6 +4,7 @@ mod managed;
 #[cfg(test)]
 mod recovery_readiness_tests;
 mod request_framing;
+mod torrent_inspection;
 
 use nexum_core::{
     Core,
@@ -132,6 +133,7 @@ struct ServerState {
     events: EventHub,
     authentication: AuthenticationConfig,
     rate_limiter: Option<RateLimiter>,
+    inspections: Arc<torrent_inspection::Inspector>,
 }
 
 #[derive(Default)]
@@ -1438,6 +1440,9 @@ fn dispatch_server_request(
     state: &Arc<Mutex<ServerState>>,
     request: &RpcRequest,
 ) -> Option<RpcResponse> {
+    if request.method == "server.capabilities" || request.method.starts_with("torrent.inspect.") {
+        return dispatch_inspection_request(state, request);
+    }
     if request.method == "task.start" {
         return start_http_task(state, request);
     }
@@ -1497,6 +1502,59 @@ fn dispatch_server_request(
         dispatch_available_http_tasks(state);
     }
     response
+}
+
+fn dispatch_inspection_request(
+    state: &Arc<Mutex<ServerState>>,
+    request: &RpcRequest,
+) -> Option<RpcResponse> {
+    // Only verified authentication configuration determines scope. Optional,
+    // unverified credential fields never grant a separate principal.
+    let (inspections, principal) = {
+        let locked = state.lock().expect("server state mutex poisoned");
+        if let Err(error) = locked.authentication.authorize(request) {
+            return reply_error(request, error);
+        }
+        (
+            Arc::clone(&locked.inspections),
+            if locked.authentication.required {
+                torrent_inspection::Principal::Authenticated
+            } else {
+                torrent_inspection::Principal::Anonymous
+            },
+        )
+    };
+    let params = request.params.as_ref().unwrap_or(&serde_json::Value::Null);
+    let result = match request.method.as_str() {
+        "server.capabilities" => Ok(
+            serde_json::json!({"torrent_inspect": torrent_inspection::Inspector::capabilities()}),
+        ),
+        "torrent.inspect.begin" => inspections.begin(principal, params),
+        "torrent.inspect.status" | "torrent.inspect.cancel" => {
+            let id = params
+                .as_object()
+                .filter(|params| params.len() == 1)
+                .and_then(|params| params.get("inspection_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            match id {
+                Some(id) if request.method == "torrent.inspect.status" => {
+                    inspections.status(principal, id)
+                }
+                Some(id) => inspections.cancel(principal, id),
+                None => Err(RpcErrorObject::invalid_params(
+                    "expected only a valid inspection_id",
+                )),
+            }
+        }
+        _ => Err(RpcErrorObject::method_not_found(
+            "torrent inspection method",
+        )),
+    };
+    request.id.clone().map(|id| match result {
+        Ok(result) => RpcResponse::success(Some(id), result),
+        Err(error) => RpcResponse::error(Some(id), error),
+    })
 }
 
 const EVENT_PUMP_INTERVAL: Duration = Duration::from_millis(50);
@@ -2454,6 +2512,8 @@ fn main() -> io::Result<()> {
 
     let data_dir_lock = lock_data_dir(&config.data_dir)?;
     let opened = open_core(&config.data_dir, config.bandwidth_policy)?;
+    let inspections = Arc::new(torrent_inspection::Inspector::new()?);
+    let _inspection_shutdown = inspections.shutdown_guard();
     let state = Arc::new(Mutex::new(ServerState {
         core: opened.core,
         pending_completions: opened.pending_completions,
@@ -2468,6 +2528,7 @@ fn main() -> io::Result<()> {
             .rate_limit
             .clone()
             .map(|limit| RateLimiter::new(limit, Instant::now())),
+        inspections,
     }));
     let address = format!("127.0.0.1:{}", config.port);
     let listener = TcpListener::bind(&address)?;

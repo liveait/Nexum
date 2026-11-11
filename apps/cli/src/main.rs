@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nexum_protocol::{Credential, RpcRequest};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -329,6 +330,9 @@ impl JsonRpcClient {
         params: Option<Value>,
         credential: Option<Credential>,
     ) -> Result<Value, String> {
+        if method == "torrent.inspect.begin" && !self.credential_allowed {
+            return Err("metainfo requires a loopback server or verified TLS".into());
+        }
         if credential.is_some() && !self.credential_allowed {
             return Err(
                 "credentials can only be sent to a loopback plaintext server or a verified TLS server"
@@ -394,6 +398,11 @@ fn usage() {
     eprintln!("  nexum [--server ADDR] server ping");
     eprintln!("  nexum [--server ADDR] server version");
     eprintln!("  nexum [--server ADDR] server auth");
+    eprintln!("  nexum [--server ADDR] server capabilities");
+    eprintln!("  nexum [--server ADDR] torrent inspect FILE");
+    eprintln!("  nexum [--server ADDR] torrent inspect-begin FILE");
+    eprintln!("  nexum [--server ADDR] torrent inspect-status ID");
+    eprintln!("  nexum [--server ADDR] torrent inspect-cancel ID");
     eprintln!("  nexum --version");
     eprintln!("  nexum --help");
 }
@@ -430,7 +439,11 @@ fn main() {
     }
 
     if args.len() < 2
-        || (args[0] != "task" && args[0] != "config" && args[0] != "auth" && args[0] != "server")
+        || (args[0] != "task"
+            && args[0] != "config"
+            && args[0] != "auth"
+            && args[0] != "server"
+            && args[0] != "torrent")
     {
         usage();
         std::process::exit(2);
@@ -438,6 +451,7 @@ fn main() {
 
     // If connecting to a server, verify version on first connection
     let mut verify_version = true;
+    let mut wait_inspection = false;
 
     let (method, params) = match (args[0].as_str(), args[1].as_str()) {
         ("task", "list") if args.len() == 2 => ("task.list", None),
@@ -463,6 +477,26 @@ fn main() {
         }
         ("server", "version") if args.len() == 2 => ("server.version", None),
         ("server", "auth") if args.len() == 2 => ("server.auth", None),
+        ("server", "capabilities") if args.len() == 2 => ("server.capabilities", None),
+        ("torrent", "inspect" | "inspect-begin") if args.len() == 3 => {
+            let params = match torrent_params(&args[2]) {
+                Ok(params) => params,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            };
+            wait_inspection = args[1] == "inspect";
+            ("torrent.inspect.begin", Some(params))
+        }
+        ("torrent", "inspect-status" | "inspect-cancel") if args.len() == 3 => (
+            if args[1] == "inspect-status" {
+                "torrent.inspect.status"
+            } else {
+                "torrent.inspect.cancel"
+            },
+            Some(serde_json::json!({"inspection_id": args[2]})),
+        ),
         ("server", "ping") if args.len() == 2 => {
             // Ping queries both server.version and server.auth
             verify_version = false;
@@ -534,7 +568,32 @@ fn main() {
         }
     }
 
-    match client.call_with_credential(1, method, params, credential) {
+    if method.starts_with("torrent.inspect.") {
+        let supported = client
+            .call_with_credential(1, "server.capabilities", None, credential.clone())
+            .is_ok_and(|caps| {
+                caps["torrent_inspect"]["version"] == 1
+                    && caps["torrent_inspect"]["sources"]
+                        .as_array()
+                        .is_some_and(|sources| {
+                            sources.contains(&serde_json::json!("metainfo_base64"))
+                        })
+            });
+        if !supported {
+            eprintln!("server does not support metainfo inspection v1");
+            std::process::exit(1);
+        }
+    }
+    let result = client
+        .call_with_credential(2, method, params, credential.clone())
+        .and_then(|value| {
+            if wait_inspection {
+                wait_for_inspection(&mut client, value, credential)
+            } else {
+                Ok(value)
+            }
+        });
+    match result {
         Ok(value) => println!(
             "{}",
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
@@ -542,6 +601,69 @@ fn main() {
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);
+        }
+    }
+}
+
+fn torrent_params(path: &str) -> Result<Value, String> {
+    const LIMIT: usize = 512 * 1024;
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("could not open torrent file: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("could not read torrent file: {error}"))?;
+    if bytes.len() > LIMIT {
+        return Err("torrent file exceeds 512 KiB".into());
+    }
+    Ok(serde_json::json!({"metainfo_base64": STANDARD.encode(bytes)}))
+}
+
+fn wait_for_inspection(
+    client: &mut JsonRpcClient,
+    begin: Value,
+    credential: Option<Credential>,
+) -> Result<Value, String> {
+    let id = begin
+        .get("inspection_id")
+        .and_then(Value::as_str)
+        .ok_or("invalid inspection response")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(7);
+    loop {
+        let status = client.call_with_credential(
+            3,
+            "torrent.inspect.status",
+            Some(serde_json::json!({"inspection_id": id})),
+            credential.clone(),
+        )?;
+        match status["phase"].as_str() {
+            Some("ready") => {
+                return status
+                    .get("result")
+                    .cloned()
+                    .ok_or("missing inspection result".into());
+            }
+            Some("failed") => {
+                return Err(format!(
+                    "torrent inspection failed: {}",
+                    status["error"]["code"]
+                        .as_str()
+                        .unwrap_or("invalid_metainfo")
+                ));
+            }
+            Some("cancelled") => return Err("torrent inspection cancelled".into()),
+            Some("parsing") if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => {
+                let _ = client.call_with_credential(
+                    4,
+                    "torrent.inspect.cancel",
+                    Some(serde_json::json!({"inspection_id": id})),
+                    credential,
+                );
+                return Err("torrent inspection did not complete within its budget".into());
+            }
         }
     }
 }
@@ -554,6 +676,60 @@ mod tests {
     use rustls::{ServerConfig, ServerConnection};
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+
+    #[test]
+    fn torrent_upload_preserves_bytes_and_rejects_oversized_files() {
+        let (_, dir) = test_config();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("local-only.torrent");
+        let raw = b"d4:info0:e\xff\0";
+        std::fs::write(&file, raw).unwrap();
+        let params = torrent_params(file.to_str().unwrap()).unwrap();
+        assert_eq!(params.as_object().unwrap().len(), 1);
+        assert_eq!(
+            STANDARD
+                .decode(params["metainfo_base64"].as_str().unwrap())
+                .unwrap(),
+            raw
+        );
+        assert!(params.get("path").is_none());
+        assert_eq!(std::fs::read(&file).unwrap(), raw);
+        std::fs::write(&file, vec![0; 512 * 1024 + 1]).unwrap();
+        assert_eq!(
+            torrent_params(file.to_str().unwrap()).unwrap_err(),
+            "torrent file exceeds 512 KiB"
+        );
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 512 * 1024 + 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn metainfo_never_reaches_an_untrusted_plain_transport_without_rpc_credentials() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        // Inject the untrusted-transport classification produced by a real
+        // non-loopback plaintext connection, independent of RPC credentials.
+        let mut client = JsonRpcClient {
+            stream: ClientTransport::Plain(socket),
+            credential_allowed: false,
+        };
+        let error = client
+            .call_with_credential(
+                1,
+                "torrent.inspect.begin",
+                Some(serde_json::json!({"metainfo_base64":"sentinel-passkey"})),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error, "metainfo requires a loopback server or verified TLS");
+        drop(client);
+        let mut bytes = Vec::new();
+        peer.read_to_end(&mut bytes).unwrap();
+        assert!(bytes.is_empty());
+    }
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
 

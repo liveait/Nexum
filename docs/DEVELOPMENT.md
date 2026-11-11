@@ -164,9 +164,9 @@ cargo run -p nexum-cli -- task create task-1 https://example.com/ ./example.html
 cargo run -p nexum-cli -- task queue task-1
 ```
 
-编译出的可执行文件分别名为 `nexum-server` 和 `nexum-cli`。使用 `cargo run -p nexum-server -- --help` 和 `cargo run -p nexum-cli -- --help` 查看当前参数与命令。CLI 默认连接 `127.0.0.1:39100`；如需覆盖地址，将 `--server ADDR` 放在 `task` 或 `server` 前面。
+编译出的可执行文件分别名为 `nexum-server` 和 `nexum-cli`。使用 `cargo run -p nexum-server -- --help` 和 `cargo run -p nexum-cli -- --help` 查看当前参数与命令。CLI 默认连接 `127.0.0.1:39100`；如需覆盖地址，将 `--server ADDR` 放在 `task`、`server` 或 `torrent` 前面。
 
-The built binaries are named `nexum-server` and `nexum-cli`. Use `cargo run -p nexum-server -- --help` and `cargo run -p nexum-cli -- --help` for current flags and commands. The CLI defaults to `127.0.0.1:39100`; put `--server ADDR` before `task` or `server` to override it.
+The built binaries are named `nexum-server` and `nexum-cli`. Use `cargo run -p nexum-server -- --help` and `cargo run -p nexum-cli -- --help` for current flags and commands. The CLI defaults to `127.0.0.1:39100`; put `--server ADDR` before `task`, `server` or `torrent` to override it.
 
 Server 将任务元数据和进度保存到 `--data-dir` 下的 `nexum.sqlite`（默认 `./data`，相对于 Server 工作目录）。启动时会按需创建目录，并在退出前一直持有同目录下 `nexum.lock` 的锁，因此同一数据目录只能由一个 Server 使用。Server 在监听前打开数据库并恢复任务；目录、锁、数据库或恢复失败会阻止启动。显式传入的 `--config` 文件无法读取时也会阻止启动。重启后，原先下载中、暂停或重试中的任务会在内存和 SQLite 中变为排队状态。恢复完成并开始监听后，符合条件的排队 HTTP/HTTPS 任务会自动派发；不支持的来源或受阻的目标会继续排队。`--max-connections` 限制活动 TCP 连接处理器；超过上限的连接会在请求处理前立即关闭。认证默认关闭。要强制认证，需同时设置 `require_auth=true`、`auth_scheme=Bearer|ApiKey` 和非空 `auth_token`；`server.auth` 只返回当前 scheme，不返回 secret。认证配置不完整或不受支持时会阻止启动。
 要启用 Server TLS 监听器，请在 key-value 配置中同时设置 `tls_cert_path` 与 `tls_key_path`，或传入 `--tls-cert-path PATH --tls-key-path PATH`。Server 会在监听器接受连接前加载 PEM 证书和私钥。TLS 使用同一流承载 TCP JSON-RPC、`events.subscribe` 和 HTTP `/jsonrpc`；握手失败会关闭连接，绝不会降级到明文。CLI 和 Desktop 使用 `--server tls://host:port` 或保存的 `tls://host:port` 地址选择 TLS，加载平台根证书（也支持 `rustls-native-certs` 提供的 `SSL_CERT_FILE`/`SSL_CERT_DIR` 来源），校验 Server 名称，并且只在握手验证成功后发送凭据；Browser Extension 将 `tls://host:port` 映射到 `https://host:port/jsonrpc`，使用浏览器正常的信任库，TLS 请求失败时不会改用 HTTP 重试。
@@ -204,6 +204,24 @@ cargo test --locked -p nexum-desktop --lib managed_server::tests
 进程测试自动创建并清理临时数据和下载目录，不需要停止现有的开发 Server。
 
 The process tests create and clean their own temporary data/download directories without stopping an existing development Server.
+
+### 种子内容检查 / Torrent-content inspection
+
+CLI 先读取本地普通种子内容并上传，Server 不读取客户端路径。`inspect` 等待解析并打印 v1 infohash、原始内容 SHA256、文件清单及 padding 标记；`inspect-begin` 立即返回临时 ID，随后可查询或取消。检查不会创建任务、输出文件或联系 tracker／peer；HTTP 下载的 `.torrent` 文件仍是普通下载。客户端先核对 `server.capabilities.torrent_inspect`，不向旧 Server 回退创建占位任务。
+
+The CLI reads local metainfo and uploads its contents; the Server never reads a client path. `inspect` waits and prints v1 infohash, raw-content SHA256, file entries and padding flags. `inspect-begin` returns a temporary ID for status/cancellation. Inspection creates no task/output and contacts no tracker/peer; HTTP `.torrent` downloads remain ordinary downloads. Clients check the capability first without falling back to legacy placeholder creation.
+
+```bash
+cargo run -p nexum-cli -- server capabilities
+cargo run -p nexum-cli -- torrent inspect ./example.torrent
+cargo run -p nexum-cli -- torrent inspect-begin ./example.torrent
+cargo run -p nexum-cli -- torrent inspect-status INSPECTION_ID
+cargo run -p nexum-cli -- torrent inspect-cancel INSPECTION_ID
+```
+
+当前仅支持最多 512 KiB 的离线 v1 metainfo，不获取 Magnet 元数据，也不开始 BT 下载。每 Server 最多 2 个检查 Worker、16 个存活记录，解析预算 5 秒、结果 10 分钟过期，Server 重启后旧 ID 无效。取消及后台过期清理等待 Worker 真正退出。失败响应不含原始 metainfo／tracker passkey。CLI 上传要求连接后的实际 peer 为回环地址或已验证 TLS，匿名连接也受此限制；本地明文仍有同 UID 替代 listener 的局限，不等于 FTP 来源密码所需的托管 TLS 身份证明。完整协议及后续范围见 [RFC 0005](RFC/0005-bt-storage-and-recovery.md)。
+
+This slice accepts offline v1 metainfo up to 512 KiB, without Magnet fetching or BT transfers. Each Server permits two inspection workers and 16 live records, with a five-second parse budget and ten-minute expiry; restart invalidates old IDs. Cancellation/background expiry wait for actual worker exit. Errors omit raw metainfo/tracker passkeys. Even anonymous CLI uploads require an actual loopback peer or verified TLS. Local plaintext retains the same-UID replacement-listener limitation and does not establish the managed TLS identity required for FTP origin passwords. See RFC 0005 for the complete contract and later scope.
 
 <a id="authentication"></a>
 <a id="认证"></a>
