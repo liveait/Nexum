@@ -386,3 +386,7 @@ Motrix features such as automatic Tracker lists, UPnP/NAT-PMP, upload limits, la
 **B1 离线导入切片（基线 `aaa6c7a6`）**。实现有界严格 v1 metainfo 检查、临时异步 inspection、取消／过期／关闭退出屏障，以及真实 Server RPC／CLI 文件内容上传。可查询 infohash、文件清单和 padding，不接触 tracker／peer、不创建下载任务；Magnet 元数据、librqbit、BT 传输与文件选择创建仍待后续，B1／M6 不关闭。FTP 凭据／日志脱敏、暂停进度 P2 及平台文件发布门槛保留。固定 SHA 审查、直接和真实消费者验证、完整检查及合并前后 CI 在对应实现 PR 留证。
 
 **B1 offline-import slice (base `aaa6c7a6`).** Implement bounded strict v1 metainfo checking, temporary asynchronous inspection, cancel/expiry/shutdown joins and real Server RPC/CLI content upload. It returns infohash/files/padding without tracker/peer traffic or download tasks. Magnet metadata, librqbit, BT transfers and selected-file task creation remain later work; B1/M6 stay open. Retain FTP credentials/redaction, pause-progress P2 and platform-publication gates. The implementation PR binds fixed-SHA review, direct/real-consumer tests, full checks and CI before/after merge.
+
+该只读切片接受 Unicode 折叠表版本预检 P2，具体字符对及原因见 RFC 0005；B2 接线前必须同步表或验证目标文件系统拒绝，不把导入结果当作安全写入证明。
+
+The read-only slice accepts the Unicode-table precheck P2 documented in RFC 0005. Synchronize tables or verify target-filesystem rejection before B2 wiring; imported metadata is not safe-write proof.

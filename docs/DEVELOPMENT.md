@@ -223,6 +223,10 @@ cargo run -p nexum-cli -- torrent inspect-cancel INSPECTION_ID
 
 This slice accepts offline v1 metainfo up to 512 KiB, without Magnet fetching or BT transfers. Each Server permits two inspection workers and 16 live records, with a five-second parse budget and ten-minute expiry; restart invalidates old IDs. Cancellation/background expiry wait for actual worker exit. Errors omit raw metainfo/tracker passkeys. Even anonymous CLI uploads require an actual loopback peer or verified TLS. Local plaintext retains the same-UID replacement-listener limitation and does not establish the managed TLS identity required for FTP origin passwords. See RFC 0005 for the complete contract and later scope.
 
+路径预检仅按固定的 Unicode 16 完整折叠表和 Unicode 18 NFD 表检查已覆盖的别名；较新字符的折叠可能漏检。它不替代目标文件系统验证；[RFC 0005](RFC/0005-bt-storage-and-recovery.md) 记录了只读切片接受此 P2 的原因与 B2 接线前门槛。
+
+Path prechecks use pinned Unicode 16 full-folding and Unicode 18 NFD tables; newer folding aliases may be missed. They do not replace target-filesystem validation. RFC 0005 records the read-only slice's accepted P2 and the gate before B2 storage wiring.
+
 <a id="authentication"></a>
 <a id="认证"></a>
 

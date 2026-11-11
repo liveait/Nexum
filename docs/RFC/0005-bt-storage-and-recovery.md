@@ -127,6 +127,10 @@ registry 每进程／数据实例独立，使用 128-bit 随机 ID；认证开�
 
 Each process/data instance owns its registry and 128-bit random IDs. With authentication enabled, bind to the verified configured principal; otherwise share one anonymous principal, never partitioning by unverified credential input. Keep at most 16 live records, including two active workers. A background reaper cancels/joins expired work and removes results; managed shutdown explicitly joins the reaper and workers. Expired/restarted inspections cannot revive. B1 checks UTF-8, separators/control characters, depth/length, duplicates/prefixes and canonical full-casefold collisions. Actual target-filesystem aliases/identity and publication proofs remain B2/B3 responsibilities.
 
+已接受的只读预检 P2：上述完整折叠使用 caseless 0.2.2 的 Unicode 16 表，NFD 使用 unicode-normalization 0.1.26 的 Unicode 18 表，不声明覆盖较新的折叠映射。例如 Unicode 17 的 U+A7D2/U+A7D3、U+16EA0/U+16EBB 成对映射可能漏检。接受原因是本切片仅返回元数据，不创建任务或目标文件；B2 接线前必须同步表版本或通过实际目标文件系统的拒绝机制回归这些字符对，不能用此预检证明安全存储／发布。
+
+Accepted read-only precheck P2: full folding uses caseless 0.2.2's Unicode 16 tables while NFD uses unicode-normalization 0.1.26's Unicode 18 tables, without claiming newer folding coverage. Unicode 17 pairs U+A7D2/U+A7D3 and U+16EA0/U+16EBB can be missed. This is accepted only because inspection returns metadata without tasks or target files. Before B2 wiring, synchronize tables or regress actual target-filesystem rejection for these pairs; this precheck is not safe-storage/publication proof.
+
 本切片固定 `sha1 0.10.7`（仅作 BEP 3 的 v1 标识，沿用现有 digest 0.10 依赖线）、`caseless 0.2.2` 和 `unicode-normalization 0.1.26`，base64/getrandom/sha2/serde 复用既有锁定版本。纯 Rust 检查器不引入 librqbit／额外 TLS/runtime；librqbit 的固定依赖整合、MSRV／许可及 Peer／存储验收仍属于 B1 后续。SHA-1 不承担来源可信或安全认证，完整 raw 绑定另用 SHA256。
 
 This slice pins sha1 0.10.7 solely for BEP 3 identity on the existing digest 0.10 line, caseless 0.2.2 and unicode-normalization 0.1.26, reusing locked base64/getrandom/sha2/serde. The pure-Rust checker adds no librqbit/TLS/runtime. Librqbit integration, minimum-toolchain/license and peer/storage acceptance remain later B1 work. SHA-1 does not authenticate origins; SHA256 separately binds raw content.
