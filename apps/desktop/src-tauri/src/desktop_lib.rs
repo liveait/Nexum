@@ -1287,6 +1287,89 @@ mod tests {
     }
 
     #[test]
+    fn same_endpoint_certificate_rotation_rejects_old_rpc_and_event_routes() {
+        let first = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let next = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let first_der = first.cert.der().to_vec();
+        let next_der = next.cert.der().to_vec();
+        let configs: Vec<_> = [first, next]
+            .into_iter()
+            .map(|identity| {
+                Arc::new(
+                    ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                        .with_no_client_auth()
+                        .with_single_cert(
+                            vec![identity.cert.der().clone()],
+                            PrivatePkcs8KeyDer::from(identity.key_pair.serialize_der()).into(),
+                        )
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let requests = thread::spawn(move || {
+            let mut requests = Vec::new();
+            // The endpoint stays fixed while its serving identity changes.
+            for index in [0, 1, 1, 1, 1] {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut stream = StreamOwned::new(
+                    ServerConnection::new(configs[index].clone()).unwrap(),
+                    socket,
+                );
+                let mut line = String::new();
+                if BufReader::new(&mut stream).read_line(&mut line).is_err() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let result = if request["method"] == "events.subscribe" {
+                    serde_json::json!({"subscribed":true})
+                } else {
+                    serde_json::json!("1")
+                };
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({"jsonrpc":"2.0","id":1,"result":result})
+                )
+                .unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        let old = RpcRoute::managed_tls(endpoint.clone(), "aa".repeat(32), first_der).unwrap();
+        assert_eq!(old.call("server.version", None, 2000).unwrap(), "1");
+        assert!(
+            old.call(
+                "future.secret.submission",
+                Some(serde_json::json!({"password":"origin-password-sentinel"})),
+                2000
+            )
+            .is_err()
+        );
+        assert!(old.event_stream(&AtomicBool::new(false)).is_err());
+        let fresh = RpcRoute::managed_tls(endpoint, "bb".repeat(32), next_der).unwrap();
+        assert_eq!(fresh.call("server.version", None, 2000).unwrap(), "1");
+        assert!(fresh.event_stream(&AtomicBool::new(false)).is_ok());
+        let requests = requests.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[0]["credential"]["Bearer"]["token"],
+            "aa".repeat(32)
+        );
+        for request in &requests[1..] {
+            assert_eq!(request["credential"]["Bearer"]["token"], "bb".repeat(32));
+            assert!(!request.to_string().contains("origin-password-sentinel"));
+        }
+    }
+
+    #[test]
     fn managed_tls_never_falls_back_to_a_plaintext_replacement() {
         let (address, received) = start_plain_server();
         let original = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
