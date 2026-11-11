@@ -228,6 +228,22 @@ The two Server-crash cases use App SIGSTOP observation barriers of approximately
 
 The repository retains the [acceptance summary and file hashes](assets/native-macos/hint-retirement-2026-11-04/acceptance-summary.json), [actual HTTP log](assets/native-macos/hint-retirement-2026-11-04/origin.jsonl), [foreground completed progress](assets/native-macos/hint-retirement-2026-11-04/20b-foreground-completed-progress.jpg), [Remote isolation view](assets/native-macos/hint-retirement-2026-11-04/25-external-context.jpg), and [offline-reopen capture](assets/native-macos/hint-retirement-2026-11-04/28-offline-reopen.jpg). Complete private raw evidence, databases and the QA ZIP remain under `desktop-hints-20261104/followup-main-539ed170`, with the sealed-manifest hash recorded in the summary. Historical records at source `4038834` remain preserved. Acceptance covers this candidate's notice-layer retirement and controlled HTTP native regression, with remaining M0/M1/M3 gates recorded above.
 
+<a id="managed-tls-identity-native-qa"></a>
+
+#### 11 月 11 日托管 TLS 身份原生验证 / November 11 managed TLS identity native QA
+
+源码 `88bac20552da116683ad1bc1a99ea0c7d7216e15` 的 `Nexum TLS QA` 0.1.0 arm64 `.app` 通过本机临时签名、嵌套 Server 哈希及包校验。候选 ZIP SHA256 为 `3a875ca4191367ef5be29a74459374af63215c67e47dbd5ca8295a438ec96551`。使用独立 App 标识符、预置 QA 设置和私有数据／下载目录，实际 UI 完成两个 1 MiB HTTP 文件，均为 100%／Completed，文件 SHA256 均为 `fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83`。
+
+The `Nexum TLS QA` 0.1.0 arm64 `.app` from source `88bac20552da116683ad1bc1a99ea0c7d7216e15` passes local ad-hoc signing, nested Server hashing and bundle verification. Its candidate ZIP SHA256 is `3a875ca4191367ef5be29a74459374af63215c67e47dbd5ca8295a438ec96551`. Using a separate App identifier, seeded QA settings and private data/download directories, the actual UI completes two 1 MiB HTTP files at 100%/Completed. Both files have SHA256 `fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83`.
+
+异常终止该 QA 拥有的 Server 后，管理者自动启动新 PID，TLS 1.3 证书换代，界面重新连接并完成第二个任务。真实外部 Server 前的私有代理确认 `task.list`／`events.subscribe` 无托管凭据，远程列表为空，本地→远程→本地恢复原有两项任务。退出回收托管子进程，外部 fixture 继续运行；重开显示原 Completed 状态，来源日志无额外 GET。表单因 fixture 未实现 HEAD，各有一次 `Range bytes=0-0` 元数据探测和一次正文 GET，验收脚本已据实际调用链修正最初的请求计数断言，原失败保留。
+
+After abnormal termination of the owned QA Server, supervision starts a new PID with a rotated TLS 1.3 certificate. The UI reconnects and completes the second task. A private proxy before a real external Server confirms `task.list`/`events.subscribe` carry no managed credential. The external list is empty, and Local → External → Local restores both original tasks. Quit reclaims the managed child while the external fixture stays alive. Relaunch shows the original Completed states without additional origin GETs. Because the fixture does not implement HEAD, each Add Sheet makes one `Range bytes=0-0` metadata probe and one body GET. The acceptance script corrects its initial request-count assertion against that actual call path, preserving the original failure.
+
+完整构建、哈希、SQLite、来源／代理日志和原生观察记录保留于私有 `managed-tls-identity-20261111` 证据目录。[PR #88](https://github.com/liveait/Nexum/pull/88) 绑定后续仅测试／文档变更、最终候选、固定 SHA 审查和最新 CI。此记录验证托管身份及受控 HTTP 回归，预置 QA 设置的检查不覆盖全新 OS 用户。首发协议、实际 VoiceOver 朗读、真实安装升级、Developer ID 签名和公证继续按现有门槛验收。
+
+The private `managed-tls-identity-20261111` evidence directory retains builds, hashes, SQLite, origin/proxy logs and native observations. [PR #88](https://github.com/liveait/Nexum/pull/88) binds subsequent test/documentation changes, the final candidate, fixed-SHA review and latest CI. This record verifies managed identity and controlled HTTP regression with seeded QA settings. Clean-OS-user checks, first-release protocols, actual VoiceOver listening, real installation/upgrades, Developer ID signing and notarization retain their existing acceptance gates.
+
 <a id="native-macos-visual-evidence"></a>
 <a id="macos-原生界面截图留证"></a>
 

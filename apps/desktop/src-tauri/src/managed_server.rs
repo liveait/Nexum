@@ -819,10 +819,23 @@ serde_json = "1"
         ] {
             let fixture = FixtureDirectory::new(mode);
             let server = fixture.supervisor();
-            let before = Instant::now();
             server.enable().unwrap();
-            let status = wait_state(&server, "failed", STARTUP_TIMEOUT + Duration::from_secs(1));
-            assert!(before.elapsed() < STARTUP_TIMEOUT + Duration::from_secs(1));
+            let marker_deadline = Instant::now() + STARTUP_TIMEOUT;
+            while !fixture.0.join("probe-started").exists() {
+                assert!(Instant::now() < marker_deadline);
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            let probe_started = Instant::now();
+            let probe_limit = if mode == "late-probe" {
+                // Ready consumed 5.2 s, leaving about 0.8 s of the original budget.
+                // A fresh 1.5 s probe budget must fail this assertion.
+                Duration::from_millis(1200)
+            } else {
+                // Distinguish the 1.5 s probe cap from the six-second startup budget.
+                Duration::from_millis(2200)
+            };
+            let status = wait_state(&server, "failed", probe_limit);
+            assert!(probe_started.elapsed() < probe_limit);
             assert_eq!(status.generation, 0);
             assert!(server.route().is_err());
             assert!(fixture.0.join("probe-started").exists());
@@ -844,7 +857,8 @@ serde_json = "1"
             }
             let before = Instant::now();
             server.disable().unwrap();
-            assert!(before.elapsed() < SHUTDOWN_TIMEOUT + Duration::from_secs(1));
+            // Removing cancellation must fail before the natural 1.5 s timeout.
+            assert!(before.elapsed() < Duration::from_millis(750));
             assert_eq!(server.status().generation, 0);
             assert_eq!(server.status().state, "stopped");
             assert!(server.route().is_err());
