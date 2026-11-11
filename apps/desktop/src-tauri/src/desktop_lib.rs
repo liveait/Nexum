@@ -2,12 +2,14 @@
 
 #[path = "credential_store.rs"]
 mod credential_store;
+mod deadline_socket;
 #[path = "managed_server.rs"]
 pub mod managed_server;
 mod managed_tls;
 
 pub use credential_store::{clear_credential, credential_status, save_credential};
 
+use deadline_socket::DeadlineSocket;
 use nexum_protocol::{Credential, RpcRequest};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -20,12 +22,12 @@ use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 enum ClientTransport {
     Plain(TcpStream),
-    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+    Tls(Box<StreamOwned<ClientConnection, DeadlineSocket>>),
 }
 
 /// A backend-owned destination and authentication policy. Managed credentials
@@ -129,6 +131,30 @@ impl RpcRoute {
             |address, timeout| self.connect(address, timeout),
             |_| self.credential(),
         )
+        .map_err(|error| self.sanitize_error(error))
+    }
+
+    fn startup_probe(&self, timeout: Duration, enabled: Arc<AtomicBool>) -> Result<Value, String> {
+        let RouteAuthentication::ManagedTls { config, .. } = &self.authentication else {
+            return Err("Local service startup requires a pinned TLS route.".to_owned());
+        };
+        call_rpc_with(
+            &self.server,
+            "server.version",
+            None,
+            timeout.as_millis() as u64,
+            |address, timeout| {
+                connect_transport_with_tls_deadline(
+                    address,
+                    timeout,
+                    || Ok(Arc::clone(config)),
+                    Some(enabled),
+                    true,
+                )
+            },
+            |_| self.credential(),
+        )
+        .into_result()
         .map_err(|error| self.sanitize_error(error))
     }
 
@@ -318,6 +344,20 @@ fn connect_transport_with_tls_config<F>(
 where
     F: FnOnce() -> Result<StdArc<ClientConfig>, String>,
 {
+    connect_transport_with_tls_deadline(address, timeout, tls_config, None, false)
+}
+
+fn connect_transport_with_tls_deadline<F>(
+    address: &str,
+    timeout: Duration,
+    tls_config: F,
+    enabled: Option<Arc<AtomicBool>>,
+    retain_deadline: bool,
+) -> Result<(ClientTransport, bool), String>
+where
+    F: FnOnce() -> Result<StdArc<ClientConfig>, String>,
+{
+    let deadline = Instant::now() + timeout;
     let parsed = parse_transport_address(address)?;
     let (authority, server_name) = match parsed {
         TransportAddress::Plain { authority } => {
@@ -355,11 +395,25 @@ where
     };
     let connection = ClientConnection::new(tls_config()?, server_name)
         .map_err(|error| format!("cannot initialize TLS connection: {error}"))?;
-    let mut transport = StreamOwned::new(connection, stream);
+    let socket = DeadlineSocket::new(stream, deadline, enabled)
+        .map_err(|error| format!("TLS socket: {error}"))?;
+    let mut transport = StreamOwned::new(connection, socket);
+    while transport.conn.is_handshaking() {
+        transport
+            .conn
+            .complete_io(&mut transport.sock)
+            .map_err(|error| format!("TLS handshake failed: {error}"))?;
+    }
     transport
-        .conn
-        .complete_io(&mut transport.sock)
+        .sock
+        .check_budget()
         .map_err(|error| format!("TLS handshake failed: {error}"))?;
+    if !retain_deadline {
+        transport
+            .sock
+            .clear_budget()
+            .map_err(|error| format!("TLS socket: {error}"))?;
+    }
     Ok((ClientTransport::Tls(Box::new(transport)), true))
 }
 
@@ -1325,6 +1379,10 @@ mod tests {
                 );
                 let mut line = String::new();
                 if BufReader::new(&mut stream).read_line(&mut line).is_err() {
+                    assert!(
+                        line.is_empty(),
+                        "a rejected TLS connection yielded application bytes"
+                    );
                     continue;
                 }
                 let request: Value = serde_json::from_str(&line).unwrap();
@@ -1391,6 +1449,66 @@ mod tests {
         assert!(!captured.contains(&token));
         assert!(!captured.contains("origin-password-sentinel"));
         assert!(!captured.contains("future.secret.submission"));
+    }
+
+    #[test]
+    fn incomplete_and_trickling_tls_handshakes_do_not_load_credentials() {
+        for trickle in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = format!("tls://127.0.0.1:{}", listener.local_addr().unwrap().port());
+            let captured = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut bytes = [0; 4096];
+                let length = socket.read(&mut bytes).unwrap();
+                let mut captured = bytes[..length].to_vec();
+                socket.write_all(&[22, 3, 3, 16, 0, 2]).unwrap();
+                if trickle {
+                    for _ in 0..200 {
+                        if socket.write_all(&[0]).is_err() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                let _ = socket.read_to_end(&mut captured);
+                captured
+            });
+            let loaded = Cell::new(false);
+            let before = Instant::now();
+            let result = call_rpc_with(
+                &address,
+                "future.secret.submission",
+                Some(serde_json::json!({"password":"origin-password-sentinel"})),
+                100,
+                |address, timeout| {
+                    connect_transport_with_tls_config(address, timeout, || {
+                        Ok(client_config_with_root(None))
+                    })
+                },
+                |_| {
+                    loaded.set(true);
+                    Ok(Some(Credential::Bearer {
+                        token: "must-not-send".to_owned(),
+                    }))
+                },
+            );
+            assert!(!result.success);
+            assert!(
+                !loaded.get(),
+                "an incomplete handshake was classified as verified"
+            );
+            assert!(before.elapsed() < Duration::from_millis(800));
+            let captured = String::from_utf8_lossy(&captured.join().unwrap()).into_owned();
+            assert!(!captured.contains("origin-password-sentinel"));
+            assert!(!captured.contains("future.secret.submission"));
+            assert!(!captured.contains("must-not-send"));
+        }
     }
 
     #[test]

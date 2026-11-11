@@ -273,7 +273,7 @@ fn schedule_restart(state: &Mutex<SharedState>, restarts: &mut u32) -> Option<In
 fn launch(
     config: &Configuration,
     state: &Mutex<SharedState>,
-    enabled: &AtomicBool,
+    enabled: &Arc<AtomicBool>,
     child: &mut Option<OwnedChild>,
 ) -> bool {
     match spawn_owned(config, enabled) {
@@ -424,9 +424,10 @@ impl Drop for OwnedChild {
 
 fn spawn_owned(
     config: &Configuration,
-    enabled: &AtomicBool,
+    enabled: &Arc<AtomicBool>,
 ) -> Result<(OwnedChild, RpcRoute), String> {
     verify_binary(config)?;
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
     let token = random_token()?;
     let generation = random_token()?;
     let child = Command::new(&config.binary)
@@ -477,7 +478,6 @@ fn spawn_owned(
             let _ = sender.send((stdout, ready));
         })
         .map_err(|_| "Cannot read local service startup.".to_owned())?;
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
     let response = loop {
         if !enabled.load(Ordering::Acquire) {
             break Err("Local service startup was cancelled.".to_owned());
@@ -505,7 +505,17 @@ fn spawn_owned(
     let ready = response?;
     validate_ready(&ready, owned.child.id(), &generation)?;
     let route = RpcRoute::managed_tls(ready.endpoint.to_string(), token, ready.certificate_der)?;
-    if route.call("server.version", None, 1500)?.as_str() != Some(ProtocolVersion::CURRENT.as_str())
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err("Local service startup timed out. Open Settings and retry.".to_owned());
+    }
+    if route
+        .startup_probe(
+            remaining.min(Duration::from_millis(1500)),
+            Arc::clone(enabled),
+        )?
+        .as_str()
+        != Some(ProtocolVersion::CURRENT.as_str())
     {
         return Err("The bundled local service uses an incompatible RPC protocol.".to_owned());
     }
@@ -800,6 +810,61 @@ serde_json = "1"
     }
 
     #[test]
+    fn startup_probe_rejects_incomplete_tls_and_slow_responses_within_shared_budget() {
+        for mode in [
+            "stall-handshake",
+            "trickle-handshake",
+            "trickle-probe",
+            "late-probe",
+        ] {
+            let fixture = FixtureDirectory::new(mode);
+            let server = fixture.supervisor();
+            let before = Instant::now();
+            server.enable().unwrap();
+            let status = wait_state(&server, "failed", STARTUP_TIMEOUT + Duration::from_secs(1));
+            assert!(before.elapsed() < STARTUP_TIMEOUT + Duration::from_secs(1));
+            assert_eq!(status.generation, 0);
+            assert!(server.route().is_err());
+            assert!(fixture.0.join("probe-started").exists());
+            assert_fixture_exited(&fixture);
+            server.shutdown().unwrap();
+        }
+    }
+
+    #[test]
+    fn disabling_during_tls_or_probe_response_reclaims_only_owned_child() {
+        for mode in ["stall-handshake", "trickle-probe"] {
+            let fixture = FixtureDirectory::new(mode);
+            let server = fixture.supervisor();
+            server.enable().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !fixture.0.join("probe-started").exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            let before = Instant::now();
+            server.disable().unwrap();
+            assert!(before.elapsed() < SHUTDOWN_TIMEOUT + Duration::from_secs(1));
+            assert_eq!(server.status().generation, 0);
+            assert_eq!(server.status().state, "stopped");
+            assert!(server.route().is_err());
+            assert_fixture_exited(&fixture);
+        }
+    }
+
+    fn assert_fixture_exited(fixture: &FixtureDirectory) {
+        let pid = std::fs::read_to_string(fixture.0.join("pid")).unwrap();
+        let result = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .output()
+            .unwrap();
+        assert!(
+            !result.status.success(),
+            "owned fixture child was not reaped"
+        );
+    }
+
+    #[test]
     fn startup_rejects_wrong_identity_version_and_auth_without_leaking_secret() {
         for mode in [
             "wrong-pid",
@@ -849,7 +914,7 @@ serde_json = "1"
     fn stalled_shutdown_is_bounded_and_only_owned_child_is_terminated() {
         let unrelated = FixtureDirectory::new("normal");
         let (mut unrelated_child, unrelated_route) =
-            spawn_owned(&unrelated.config(), &AtomicBool::new(true)).unwrap();
+            spawn_owned(&unrelated.config(), &Arc::new(AtomicBool::new(true))).unwrap();
         let fixture = FixtureDirectory::new("stall-shutdown");
         let server = fixture.supervisor();
         server.enable().unwrap();

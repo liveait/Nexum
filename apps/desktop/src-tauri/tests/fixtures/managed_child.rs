@@ -34,6 +34,9 @@ fn main() {
     if mode == "exit" {
         return;
     }
+    if mode == "late-probe" {
+        std::thread::sleep(Duration::from_millis(5200));
+    }
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let pid = if mode == "wrong-pid" {
         std::process::id() + 1
@@ -74,7 +77,24 @@ fn main() {
     let mode2 = mode.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            let socket = stream.unwrap();
+            let mut socket = stream.unwrap();
+            if mode2 == "stall-handshake" || mode2 == "trickle-handshake" {
+                let mut hello = [0; 4096];
+                socket.read(&mut hello).unwrap();
+                std::fs::write(dir.join("probe-started"), "handshake").unwrap();
+                socket.write_all(&[22, 3, 3, 16, 0, 2]).unwrap();
+                if mode2 == "trickle-handshake" {
+                    for _ in 0..3000 {
+                        if socket.write_all(&[0]).is_err() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_secs(30));
+                }
+                continue;
+            }
             let mut stream = rustls::StreamOwned::new(
                 rustls::ServerConnection::new(config.clone()).unwrap(),
                 socket,
@@ -84,6 +104,20 @@ fn main() {
                 continue;
             }
             assert!(line.contains(&token));
+            if mode2 == "trickle-probe" || mode2 == "late-probe" {
+                std::fs::write(dir.join("probe-started"), "response").unwrap();
+                for byte in b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"1\"}\n" {
+                    if stream
+                        .write_all(&[*byte])
+                        .and_then(|_| stream.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(70));
+                }
+                continue;
+            }
             let reply = if mode2 == "reject-auth" {
                 format!(
                     "{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{{\"code\":-32001,\"message\":\"{}\"}}}}\n",
