@@ -569,16 +569,18 @@ fn main() {
     }
 
     if method.starts_with("torrent.inspect.") {
-        let supported = client
-            .call_with_credential(1, "server.capabilities", None, credential.clone())
-            .is_ok_and(|caps| {
-                caps["torrent_inspect"]["version"] == 1
-                    && caps["torrent_inspect"]["sources"]
-                        .as_array()
-                        .is_some_and(|sources| {
-                            sources.contains(&serde_json::json!("metainfo_base64"))
-                        })
-            });
+        let caps =
+            match client.call_with_credential(1, "server.capabilities", None, credential.clone()) {
+                Ok(caps) => caps,
+                Err(error) => {
+                    eprintln!("could not query inspection capabilities: {error}");
+                    std::process::exit(1);
+                }
+            };
+        let supported = caps["torrent_inspect"]["version"] == 1
+            && caps["torrent_inspect"]["sources"]
+                .as_array()
+                .is_some_and(|sources| sources.contains(&serde_json::json!("metainfo_base64")));
         if !supported {
             eprintln!("server does not support metainfo inspection v1");
             std::process::exit(1);
