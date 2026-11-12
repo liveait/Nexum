@@ -17,6 +17,10 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 const OTHER_TOKEN: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 const PIPE_LIMIT: usize = 64 * 1024;
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+// Darwin creates stdio pipes before setting CLOEXEC. Cover every process launch
+// in this test binary so a sibling cannot inherit a control-pipe writer in that
+// window. The children and their protocol/exit checks still run concurrently.
+static PROCESS_SPAWN: Mutex<()> = Mutex::new(());
 
 fn start_tls(child: &mut ManagedChild, generation: &str) -> Value {
     let mut config = startup(TOKEN);
@@ -293,15 +297,18 @@ struct ManagedChild {
 impl ManagedChild {
     fn spawn(data: &Path) -> Self {
         assert!(data.is_absolute());
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nexum-server"))
-            .arg("--managed")
-            .arg("--data-dir")
-            .arg(data)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = {
+            let _spawn = PROCESS_SPAWN.lock().unwrap();
+            Command::new(env!("CARGO_BIN_EXE_nexum-server"))
+                .arg("--managed")
+                .arg("--data-dir")
+                .arg(data)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
         let stdin = child.stdin.take();
         let stdout = PipeCapture::new(child.stdout.take().unwrap());
         let stderr = PipeCapture::new(child.stderr.take().unwrap());
@@ -574,16 +581,19 @@ fn managed_readiness_uses_a_private_ephemeral_authenticated_endpoint() {
     }
     #[cfg(target_os = "macos")]
     {
-        let command = Command::new("/bin/ps")
-            .args([
-                "eww",
-                "-p",
-                &server.child.id().to_string(),
-                "-o",
-                "command=",
-            ])
-            .output()
-            .unwrap();
+        let command = {
+            let _spawn = PROCESS_SPAWN.lock().unwrap();
+            Command::new("/bin/ps")
+                .args([
+                    "eww",
+                    "-p",
+                    &server.child.id().to_string(),
+                    "-o",
+                    "command=",
+                ])
+                .output()
+                .unwrap()
+        };
         assert!(command.status.success());
         assert!(!String::from_utf8_lossy(&command.stdout).contains(TOKEN));
     }
@@ -1042,4 +1052,36 @@ fn managed_ready_recovers_a_real_completion_receipt_without_the_origin() {
         .unwrap();
     assert_eq!(stored.state, TaskState::Completed);
     assert_eq!(stored.progress, progress);
+}
+
+#[test]
+fn concurrent_managed_children_keep_control_pipes_independent() {
+    for _ in 0..32 {
+        let first_dir = TestDir::new();
+        let second_dir = TestDir::new();
+        let (mut first, mut second) = thread::scope(|scope| {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let first_barrier = Arc::clone(&barrier);
+            let first_path = &first_dir.data;
+            let second_path = &second_dir.data;
+            let first = scope.spawn(move || {
+                first_barrier.wait();
+                ManagedChild::spawn(first_path)
+            });
+            let second = scope.spawn(move || {
+                barrier.wait();
+                ManagedChild::spawn(second_path)
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        first.frame(&startup(TOKEN));
+        first.ready();
+        first.eof();
+        assert!(first.exit(Duration::from_secs(3)).success());
+        // The uninitialized peer stays alive, retaining its own pipe, until this point.
+        assert!(second.child.try_wait().unwrap().is_none());
+        second.eof();
+        assert!(!second.exit(Duration::from_secs(3)).success());
+        second_dir.assert_no_storage();
+    }
 }

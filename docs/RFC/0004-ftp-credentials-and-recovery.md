@@ -73,6 +73,10 @@ The baseline is `4d59d02079f333d8fbda775cdc373842cb3bf1fc`. Retain control-versi
 
 The backend route binds this endpoint, generation and complete certificate. Every RPC/event connection requires TLS 1.3 and completes exact-certificate pinning, WebPKI name/time validation and handshake-signature verification on that connection before loading/sending the bearer. Disable TLS resumption and early data. Managed identity uses its pinned certificate as the sole trust root and has no plaintext fallback. Certificates/private keys/endpoints stay outside settings and frontend events. External mode retains independent system-root verification and address-scoped credentials.
 
+2026-11-12 的并行测试实证了 Darwin `pipe → CLOEXEC` 创建窗口中的跨子进程继承，测试 fixture 已协调自身所有进程创建。该修复的范围限测试。产品正常切换／退出会先发送显式 Shutdown；About 通过 `/usr/bin/open` 打开固定项目链接，可能与托管创建并发，目前未复现产品中的持久持有或泄漏。开放来源密码能力前，F1 还须封闭或验证这些原生 helper 并发创建时的私有 bootstrap FD 隔离及父进程异常退出后的 EOF 边界，不能从测试锁推导产品已具备原子管道保证。
+
+Parallel tests on 2026-11-12 demonstrate cross-child inheritance in Darwin's `pipe → CLOEXEC` creation window. The fixture coordinates all its process creation, within test scope. Normal product mode changes/quit send explicit Shutdown first. About opens fixed project links through `/usr/bin/open`, which can overlap managed startup, with no observed product persistent retention or leakage. Before enabling origin-password capability, F1 must close or verify private bootstrap FD isolation across these concurrent native helpers and EOF after abnormal parent exit. The test lock does not establish product-wide atomic pipe creation.
+
 验收包括旧版本 1 的原始帧兼容、新版本 RPC／HTTP／事件鉴权、错误证书及同端口替代 listener、重启换证／旧路由拒绝、事件重连和模式隔离，并从实际 `.app` 验证托管启动及 HTTP 下载。来源密码的输入、Keychain／SQLite 协调和认证 FTP 能力仍由后续 F1 切片交付。
 
 Acceptance covers raw version-1 compatibility, new-version RPC/HTTP/event authentication, wrong certificates and replacement listeners on the same port, certificate rotation/stale-route rejection, event reconnects and mode isolation, plus managed startup and HTTP download through the actual `.app`. Subsequent F1 slices deliver origin-password input, Keychain/SQLite coordination and authenticated FTP capability.

@@ -213,6 +213,10 @@ TLS 握手通过绝对 I/O 期限驱动，只有 `is_handshaking()` 为 false �
 
 TLS handshakes use absolute I/O deadlines and permit credential loading only after `is_handshaking()` becomes false. Partial TLS records and continuous fragments cannot reset the budget. Managed Ready and health probing share the six-second startup budget, with the probe limited to at most the remaining 1500 ms. Deadline/mode-cancellation checks remain active until the complete response. Normal RPC/event connections restore existing socket-timeout behavior after the handshake.
 
+2026-11-12 在默认并行 managed 测试中复现控制管道写端被兄弟进程继承，使 EOF 延迟。采样确认 Server 仍在监听／读取 stdin，尚未进入 Inspector shutdown。macOS 使用的固定 [Rust 1.98.1 管道实现](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/pipe/unix.rs) 先建 pipe 再设置 CLOEXEC。测试 fixture 因此对 Server 的创建／exec 和短暂的 `/bin/ps.output()` 使用同一锁，创建后各进程及测试继续并发。新增 32 对并发启动场景保留原有 3 秒退出断言，并确认另一未初始化子进程仍活着时 EOF 已独立生效。
+
+On 2026-11-12, default-parallel managed tests reproduce a sibling inheriting a control-pipe writer and delaying EOF. Sampling shows the Server still listening/reading stdin, before Inspector shutdown. The pinned [Rust 1.98.1 pipe implementation](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/pipe/unix.rs) creates pipes before setting CLOEXEC on macOS. The test fixture now shares a lock across Server creation/exec and its short `/bin/ps.output()` call. Processes/tests remain concurrent after creation. A new 32-pair concurrent-launch scenario retains the existing three-second exit assertion and proves independent EOF while the other uninitialized child remains alive.
+
 ### 种子内容检查 / Torrent-content inspection
 
 CLI 先读取本地普通种子内容并上传，Server 不读取客户端路径。`inspect` 等待解析并打印 v1 infohash、原始内容 SHA256、文件清单及 padding 标记；`inspect-begin` 立即返回临时 ID，随后可查询或取消。检查不会创建任务、输出文件或联系 tracker／peer；HTTP 下载的 `.torrent` 文件仍是普通下载。客户端先核对 `server.capabilities.torrent_inspect`，不向旧 Server 回退创建占位任务。
