@@ -17,6 +17,132 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 const OTHER_TOKEN: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 const PIPE_LIMIT: usize = 64 * 1024;
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+// Darwin creates stdio pipes before setting CLOEXEC. Cover every process launch
+// in this test binary so a sibling cannot inherit a control-pipe writer in that
+// window. The children and their protocol/exit checks still run concurrently.
+static PROCESS_SPAWN: Mutex<()> = Mutex::new(());
+
+fn start_tls(child: &mut ManagedChild, generation: &str) -> Value {
+    let mut config = startup(TOKEN);
+    config.as_object_mut().unwrap().remove("type");
+    config["control_version"] = json!(2);
+    child.frame(&json!({"type":"start_tls", "startup":config, "generation":generation}));
+    let ready = child.ready_version(2);
+    assert_eq!(ready["generation"], generation);
+    ready
+}
+
+fn tls_client(
+    child: &ManagedChild,
+    ready: &Value,
+) -> rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    let certificate: Vec<u8> = serde_json::from_value(ready["certificate_der"].clone()).unwrap();
+    assert!(!certificate.is_empty() && certificate.len() <= 1024);
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(certificate))
+        .unwrap();
+    let config = rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connection = rustls::ClientConnection::new(
+        Arc::new(config),
+        rustls::pki_types::ServerName::IpAddress(std::net::Ipv4Addr::LOCALHOST.into()),
+    )
+    .unwrap();
+    rustls::StreamOwned::new(connection, child.connect())
+}
+
+#[test]
+fn managed_tls_authenticates_rpc_http_events_and_rotates_ephemeral_certificates() {
+    let dir = TestDir::new();
+    let mut child = ManagedChild::spawn(&dir.data);
+    let ready = start_tls(&mut child, &"a".repeat(64));
+    for token in [None, Some(OTHER_TOKEN), Some(TOKEN)] {
+        let mut stream = tls_client(&child, &ready);
+        writeln!(stream, "{}", rpc_request("server.version", None, token)).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let result: Value = serde_json::from_str(&line).unwrap();
+        if token == Some(TOKEN) {
+            assert_eq!(result["result"], "1");
+        } else {
+            assert_eq!(result["error"]["code"], -32001);
+        }
+    }
+    let mut stream = tls_client(&child, &ready);
+    let body = rpc_request("server.version", None, Some(TOKEN)).to_string();
+    write!(
+        stream,
+        "POST /jsonrpc HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut headers = String::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        headers.push_str(&line);
+        if line == "\r\n" {
+            break;
+        }
+        assert!(!line.is_empty());
+    }
+    assert!(headers.starts_with("HTTP/1.1 200"), "{headers}");
+    let length: usize = headers
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length: ")
+                .map(str::to_owned)
+        })
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["result"],
+        "1"
+    );
+    for token in [None, Some(TOKEN)] {
+        let mut stream = tls_client(&child, &ready);
+        writeln!(stream, "{}", rpc_request("events.subscribe", None, token)).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let result: Value = serde_json::from_str(&line).unwrap();
+        if token.is_some() {
+            assert_eq!(result["result"]["subscribed"], true);
+        } else {
+            assert_eq!(result["error"]["code"], -32001);
+        }
+    }
+    // A TLS endpoint never treats a plaintext RPC line as a request.
+    let mut plain = child.connect();
+    writeln!(plain, "{}", rpc_request("server.version", None, None)).unwrap();
+    let mut bytes = [0u8; 512];
+    let count = plain.read(&mut bytes).unwrap_or(0);
+    assert!(!String::from_utf8_lossy(&bytes[..count]).contains("jsonrpc"));
+    child.frame(&json!({"type":"shutdown", "control_version":2}));
+    assert!(child.exit(Duration::from_secs(3)).success());
+    child.assert_private_output(TOKEN);
+    child.assert_private_output("PRIVATE KEY");
+    child.assert_one_ready_frame();
+    let mut restarted = ManagedChild::spawn(&dir.data);
+    let next = start_tls(&mut restarted, &"b".repeat(64));
+    assert_ne!(ready["certificate_der"], next["certificate_der"]);
+    let mut stale = tls_client(&restarted, &ready);
+    assert!(stale.conn.complete_io(&mut stale.sock).is_err());
+    let mut fresh = tls_client(&restarted, &next);
+    fresh.conn.complete_io(&mut fresh.sock).unwrap();
+    assert_eq!(
+        fresh.conn.protocol_version(),
+        Some(rustls::ProtocolVersion::TLSv1_3)
+    );
+    restarted.eof();
+    assert!(restarted.exit(Duration::from_secs(3)).success());
+}
 
 #[test]
 fn managed_metainfo_inspection_is_private_and_expires_on_process_restart() {
@@ -171,15 +297,18 @@ struct ManagedChild {
 impl ManagedChild {
     fn spawn(data: &Path) -> Self {
         assert!(data.is_absolute());
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nexum-server"))
-            .arg("--managed")
-            .arg("--data-dir")
-            .arg(data)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = {
+            let _spawn = PROCESS_SPAWN.lock().unwrap();
+            Command::new(env!("CARGO_BIN_EXE_nexum-server"))
+                .arg("--managed")
+                .arg("--data-dir")
+                .arg(data)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
         let stdin = child.stdin.take();
         let stdout = PipeCapture::new(child.stdout.take().unwrap());
         let stderr = PipeCapture::new(child.stderr.take().unwrap());
@@ -214,6 +343,10 @@ impl ManagedChild {
     }
 
     fn ready(&mut self) -> Value {
+        self.ready_version(1)
+    }
+
+    fn ready_version(&mut self, version: u32) -> Value {
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
             let bytes = self.stdout.snapshot();
@@ -223,7 +356,7 @@ impl ManagedChild {
                 if bytes.len() >= length + 4 {
                     assert_eq!(bytes.len(), length + 4, "stdout contains extra data");
                     let ready: Value = serde_json::from_slice(&bytes[4..]).unwrap();
-                    assert_eq!(ready["control_version"], 1);
+                    assert_eq!(ready["control_version"], version);
                     assert_eq!(ready["server_version"], env!("CARGO_PKG_VERSION"));
                     assert_eq!(ready["protocol_version"], "1");
                     assert_eq!(ready["process_id"], self.child.id());
@@ -231,7 +364,10 @@ impl ManagedChild {
                     let address: std::net::SocketAddr = endpoint.parse().unwrap();
                     assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
                     assert_ne!(address.port(), 0);
-                    assert_eq!(ready.as_object().unwrap().len(), 5);
+                    assert_eq!(
+                        ready.as_object().unwrap().len(),
+                        if version == 1 { 5 } else { 7 }
+                    );
                     assert!(ready.get("bearer_token").is_none());
                     self.endpoint = Some(endpoint.to_owned());
                     return ready;
@@ -445,16 +581,19 @@ fn managed_readiness_uses_a_private_ephemeral_authenticated_endpoint() {
     }
     #[cfg(target_os = "macos")]
     {
-        let command = Command::new("/bin/ps")
-            .args([
-                "eww",
-                "-p",
-                &server.child.id().to_string(),
-                "-o",
-                "command=",
-            ])
-            .output()
-            .unwrap();
+        let command = {
+            let _spawn = PROCESS_SPAWN.lock().unwrap();
+            Command::new("/bin/ps")
+                .args([
+                    "eww",
+                    "-p",
+                    &server.child.id().to_string(),
+                    "-o",
+                    "command=",
+                ])
+                .output()
+                .unwrap()
+        };
         assert!(command.status.success());
         assert!(!String::from_utf8_lossy(&command.stdout).contains(TOKEN));
     }
@@ -913,4 +1052,36 @@ fn managed_ready_recovers_a_real_completion_receipt_without_the_origin() {
         .unwrap();
     assert_eq!(stored.state, TaskState::Completed);
     assert_eq!(stored.progress, progress);
+}
+
+#[test]
+fn concurrent_managed_children_keep_control_pipes_independent() {
+    for _ in 0..32 {
+        let first_dir = TestDir::new();
+        let second_dir = TestDir::new();
+        let (mut first, mut second) = thread::scope(|scope| {
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let first_barrier = Arc::clone(&barrier);
+            let first_path = &first_dir.data;
+            let second_path = &second_dir.data;
+            let first = scope.spawn(move || {
+                first_barrier.wait();
+                ManagedChild::spawn(first_path)
+            });
+            let second = scope.spawn(move || {
+                barrier.wait();
+                ManagedChild::spawn(second_path)
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        first.frame(&startup(TOKEN));
+        first.ready();
+        first.eof();
+        assert!(first.exit(Duration::from_secs(3)).success());
+        // The uninitialized peer stays alive, retaining its own pipe, until this point.
+        assert!(second.child.try_wait().unwrap().is_none());
+        second.eof();
+        assert!(!second.exit(Duration::from_secs(3)).success());
+        second_dir.assert_no_storage();
+    }
 }

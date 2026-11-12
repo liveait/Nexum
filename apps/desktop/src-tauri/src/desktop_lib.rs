@@ -2,11 +2,14 @@
 
 #[path = "credential_store.rs"]
 mod credential_store;
+mod deadline_socket;
 #[path = "managed_server.rs"]
 pub mod managed_server;
+mod managed_tls;
 
 pub use credential_store::{clear_credential, credential_status, save_credential};
 
+use deadline_socket::DeadlineSocket;
 use nexum_protocol::{Credential, RpcRequest};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -19,12 +22,12 @@ use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 enum ClientTransport {
     Plain(TcpStream),
-    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
+    Tls(Box<StreamOwned<ClientConnection, DeadlineSocket>>),
 }
 
 /// A backend-owned destination and authentication policy. Managed credentials
@@ -39,6 +42,10 @@ pub struct RpcRoute {
 enum RouteAuthentication {
     External,
     Managed(String),
+    ManagedTls {
+        token: String,
+        config: Arc<ClientConfig>,
+    },
 }
 
 impl RpcRoute {
@@ -65,12 +72,37 @@ impl RpcRoute {
         })
     }
 
+    pub fn managed_tls(
+        endpoint: String,
+        token: String,
+        certificate_der: Vec<u8>,
+    ) -> Result<Self, String> {
+        let mut route = Self::managed(endpoint, token.clone())?;
+        route.server = format!("tls://{}", route.server);
+        route.authentication = RouteAuthentication::ManagedTls {
+            token,
+            config: managed_tls::client_config(certificate_der)?,
+        };
+        Ok(route)
+    }
+
+    fn connect(&self, address: &str, timeout: Duration) -> Result<(ClientTransport, bool), String> {
+        match &self.authentication {
+            RouteAuthentication::ManagedTls { config, .. } => {
+                connect_transport_with_tls_config(address, timeout, || Ok(Arc::clone(config)))
+            }
+            _ => connect_transport(address, timeout),
+        }
+    }
+
     fn credential(&self) -> Result<Option<Credential>, String> {
         match &self.authentication {
             RouteAuthentication::External => credential_store::credential_for_request(&self.server),
-            RouteAuthentication::Managed(token) => Ok(Some(Credential::Bearer {
-                token: token.clone(),
-            })),
+            RouteAuthentication::Managed(token) | RouteAuthentication::ManagedTls { token, .. } => {
+                Ok(Some(Credential::Bearer {
+                    token: token.clone(),
+                }))
+            }
         }
     }
 
@@ -85,7 +117,7 @@ impl RpcRoute {
             method,
             params,
             timeout_ms,
-            connect_transport,
+            |address, timeout| self.connect(address, timeout),
             |_| self.credential(),
         )
         .into_result()
@@ -93,14 +125,45 @@ impl RpcRoute {
     }
 
     fn event_stream(&self, stop: &AtomicBool) -> Result<BufReader<ClientTransport>, String> {
-        connect_event_stream_with(&self.server, stop, connect_transport, |_| self.credential())
-            .map_err(|error| self.sanitize_error(error))
+        connect_event_stream_with(
+            &self.server,
+            stop,
+            |address, timeout| self.connect(address, timeout),
+            |_| self.credential(),
+        )
+        .map_err(|error| self.sanitize_error(error))
+    }
+
+    fn startup_probe(&self, timeout: Duration, enabled: Arc<AtomicBool>) -> Result<Value, String> {
+        let RouteAuthentication::ManagedTls { config, .. } = &self.authentication else {
+            return Err("Local service startup requires a pinned TLS route.".to_owned());
+        };
+        call_rpc_with(
+            &self.server,
+            "server.version",
+            None,
+            timeout.as_millis() as u64,
+            |address, timeout| {
+                connect_transport_with_tls_deadline(
+                    address,
+                    timeout,
+                    || Ok(Arc::clone(config)),
+                    Some(enabled),
+                    true,
+                )
+            },
+            |_| self.credential(),
+        )
+        .into_result()
+        .map_err(|error| self.sanitize_error(error))
     }
 
     fn sanitize_error(&self, error: String) -> String {
         match &self.authentication {
             RouteAuthentication::External => error,
-            RouteAuthentication::Managed(token) => error.replace(token, "<redacted>"),
+            RouteAuthentication::Managed(token) | RouteAuthentication::ManagedTls { token, .. } => {
+                error.replace(token, "<redacted>")
+            }
         }
     }
 }
@@ -281,6 +344,20 @@ fn connect_transport_with_tls_config<F>(
 where
     F: FnOnce() -> Result<StdArc<ClientConfig>, String>,
 {
+    connect_transport_with_tls_deadline(address, timeout, tls_config, None, false)
+}
+
+fn connect_transport_with_tls_deadline<F>(
+    address: &str,
+    timeout: Duration,
+    tls_config: F,
+    enabled: Option<Arc<AtomicBool>>,
+    retain_deadline: bool,
+) -> Result<(ClientTransport, bool), String>
+where
+    F: FnOnce() -> Result<StdArc<ClientConfig>, String>,
+{
+    let deadline = Instant::now() + timeout;
     let parsed = parse_transport_address(address)?;
     let (authority, server_name) = match parsed {
         TransportAddress::Plain { authority } => {
@@ -318,11 +395,25 @@ where
     };
     let connection = ClientConnection::new(tls_config()?, server_name)
         .map_err(|error| format!("cannot initialize TLS connection: {error}"))?;
-    let mut transport = StreamOwned::new(connection, stream);
+    let socket = DeadlineSocket::new(stream, deadline, enabled)
+        .map_err(|error| format!("TLS socket: {error}"))?;
+    let mut transport = StreamOwned::new(connection, socket);
+    while transport.conn.is_handshaking() {
+        transport
+            .conn
+            .complete_io(&mut transport.sock)
+            .map_err(|error| format!("TLS handshake failed: {error}"))?;
+    }
     transport
-        .conn
-        .complete_io(&mut transport.sock)
+        .sock
+        .check_budget()
         .map_err(|error| format!("TLS handshake failed: {error}"))?;
+    if !retain_deadline {
+        transport
+            .sock
+            .clear_budget()
+            .map_err(|error| format!("TLS socket: {error}"))?;
+    }
     Ok((ClientTransport::Tls(Box::new(transport)), true))
 }
 
@@ -1188,6 +1279,236 @@ mod tests {
         assert!(result.error.unwrap().contains("TLS handshake failed"));
         assert!(!credential_loaded.get());
         assert!(server.finish().is_none());
+    }
+
+    #[test]
+    fn managed_pin_protects_rpc_and_each_event_connection() {
+        let token = "ab".repeat(32);
+        let rpc = TestTlsServer::start(
+            "127.0.0.1",
+            Some(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"1"})),
+        );
+        let endpoint = rpc.address.replace("tls://localhost:", "127.0.0.1:");
+        let route =
+            RpcRoute::managed_tls(endpoint, token.clone(), rpc.certificate.to_vec()).unwrap();
+        assert_eq!(route.call("server.version", None, 2000).unwrap(), "1");
+        assert_eq!(
+            rpc.finish().unwrap()["credential"]["Bearer"]["token"],
+            token
+        );
+        let events = TestTlsServer::start(
+            "127.0.0.1",
+            Some(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"subscribed":true}})),
+        );
+        let endpoint = events.address.replace("tls://localhost:", "127.0.0.1:");
+        let event_route =
+            RpcRoute::managed_tls(endpoint, token.clone(), events.certificate.to_vec()).unwrap();
+        assert!(event_route.event_stream(&AtomicBool::new(false)).is_ok());
+        assert_eq!(
+            events.finish().unwrap()["credential"]["Bearer"]["token"],
+            token
+        );
+        // A reconnect resolving a new endpoint must also use its new certificate.
+        let replacement = TestTlsServer::start("127.0.0.1", None);
+        let mut stale = route;
+        stale.server = replacement.address.replace("localhost", "127.0.0.1");
+        assert!(stale.event_stream(&AtomicBool::new(false)).is_err());
+        assert!(replacement.finish().is_none());
+    }
+
+    #[test]
+    fn wrong_managed_pin_fails_before_loading_or_sending_rpc_payload() {
+        let original = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let replacement = TestTlsServer::start("127.0.0.1", None);
+        let config = managed_tls::client_config(original.cert.der().to_vec()).unwrap();
+        let loaded = Cell::new(false);
+        let result = call_rpc_with(
+            &replacement.address.replace("localhost", "127.0.0.1"),
+            "future.secret.submission",
+            Some(serde_json::json!({"password":"origin-password-sentinel"})),
+            2000,
+            |address, timeout| connect_transport_with_tls_config(address, timeout, || Ok(config)),
+            |_| {
+                loaded.set(true);
+                Ok(Some(Credential::Bearer {
+                    token: "must-not-send".to_owned(),
+                }))
+            },
+        );
+        assert!(!result.success);
+        assert!(!loaded.get());
+        assert!(replacement.finish().is_none());
+    }
+
+    #[test]
+    fn same_endpoint_certificate_rotation_rejects_old_rpc_and_event_routes() {
+        let first = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let next = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let first_der = first.cert.der().to_vec();
+        let next_der = next.cert.der().to_vec();
+        let configs: Vec<_> = [first, next]
+            .into_iter()
+            .map(|identity| {
+                Arc::new(
+                    ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                        .with_no_client_auth()
+                        .with_single_cert(
+                            vec![identity.cert.der().clone()],
+                            PrivatePkcs8KeyDer::from(identity.key_pair.serialize_der()).into(),
+                        )
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let requests = thread::spawn(move || {
+            let mut requests = Vec::new();
+            // The endpoint stays fixed while its serving identity changes.
+            for index in [0, 1, 1, 1, 1] {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut stream = StreamOwned::new(
+                    ServerConnection::new(configs[index].clone()).unwrap(),
+                    socket,
+                );
+                let mut line = String::new();
+                if BufReader::new(&mut stream).read_line(&mut line).is_err() {
+                    assert!(
+                        line.is_empty(),
+                        "a rejected TLS connection yielded application bytes"
+                    );
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let result = if request["method"] == "events.subscribe" {
+                    serde_json::json!({"subscribed":true})
+                } else {
+                    serde_json::json!("1")
+                };
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({"jsonrpc":"2.0","id":1,"result":result})
+                )
+                .unwrap();
+                requests.push(request);
+            }
+            requests
+        });
+        let old = RpcRoute::managed_tls(endpoint.clone(), "aa".repeat(32), first_der).unwrap();
+        assert_eq!(old.call("server.version", None, 2000).unwrap(), "1");
+        assert!(
+            old.call(
+                "future.secret.submission",
+                Some(serde_json::json!({"password":"origin-password-sentinel"})),
+                2000
+            )
+            .is_err()
+        );
+        assert!(old.event_stream(&AtomicBool::new(false)).is_err());
+        let fresh = RpcRoute::managed_tls(endpoint, "bb".repeat(32), next_der).unwrap();
+        assert_eq!(fresh.call("server.version", None, 2000).unwrap(), "1");
+        assert!(fresh.event_stream(&AtomicBool::new(false)).is_ok());
+        let requests = requests.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests[0]["credential"]["Bearer"]["token"],
+            "aa".repeat(32)
+        );
+        for request in &requests[1..] {
+            assert_eq!(request["credential"]["Bearer"]["token"], "bb".repeat(32));
+            assert!(!request.to_string().contains("origin-password-sentinel"));
+        }
+    }
+
+    #[test]
+    fn managed_tls_never_falls_back_to_a_plaintext_replacement() {
+        let (address, received) = start_plain_server();
+        let original = generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let token = "cd".repeat(32);
+        let route =
+            RpcRoute::managed_tls(address, token.clone(), original.cert.der().to_vec()).unwrap();
+        assert!(
+            route
+                .call(
+                    "future.secret.submission",
+                    Some(serde_json::json!({"password":"origin-password-sentinel"})),
+                    500
+                )
+                .is_err()
+        );
+        let bytes = received.join().unwrap();
+        assert!(!bytes.is_empty());
+        let captured = String::from_utf8_lossy(&bytes);
+        assert!(!captured.contains(&token));
+        assert!(!captured.contains("origin-password-sentinel"));
+        assert!(!captured.contains("future.secret.submission"));
+    }
+
+    #[test]
+    fn incomplete_and_trickling_tls_handshakes_do_not_load_credentials() {
+        for trickle in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = format!("tls://127.0.0.1:{}", listener.local_addr().unwrap().port());
+            let captured = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut bytes = [0; 4096];
+                let length = socket.read(&mut bytes).unwrap();
+                let mut captured = bytes[..length].to_vec();
+                socket.write_all(&[22, 3, 3, 16, 0, 2]).unwrap();
+                if trickle {
+                    for _ in 0..200 {
+                        if socket.write_all(&[0]).is_err() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                let _ = socket.read_to_end(&mut captured);
+                captured
+            });
+            let loaded = Cell::new(false);
+            let before = Instant::now();
+            let result = call_rpc_with(
+                &address,
+                "future.secret.submission",
+                Some(serde_json::json!({"password":"origin-password-sentinel"})),
+                100,
+                |address, timeout| {
+                    connect_transport_with_tls_config(address, timeout, || {
+                        Ok(client_config_with_root(None))
+                    })
+                },
+                |_| {
+                    loaded.set(true);
+                    Ok(Some(Credential::Bearer {
+                        token: "must-not-send".to_owned(),
+                    }))
+                },
+            );
+            assert!(!result.success);
+            assert!(
+                !loaded.get(),
+                "an incomplete handshake was classified as verified"
+            );
+            assert!(before.elapsed() < Duration::from_millis(800));
+            let captured = String::from_utf8_lossy(&captured.join().unwrap()).into_owned();
+            assert!(!captured.contains("origin-password-sentinel"));
+            assert!(!captured.contains("future.secret.submission"));
+            assert!(!captured.contains("must-not-send"));
+        }
     }
 
     #[test]

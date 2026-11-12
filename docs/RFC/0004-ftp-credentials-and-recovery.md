@@ -63,6 +63,24 @@ Stop transfers before removal, and commit task deletion plus a provider cleanup 
 
 ## 会话、控制与错误 / Sessions, controls and errors
 
+### 托管 TLS 身份切片 / Managed TLS identity slice
+
+基线为 `4d59d02079f333d8fbda775cdc373842cb3bf1fc`。保留控制版本 1 的 `start`、五字段就绪帧及明文端点。新增显式 `start_tls` 和控制版本 2，携带原有版本／Bearer 字段及父进程每次启动随机生成的 32 字节十六进制 `generation`。Server 每次启动生成内存专用自签名证书与私钥，只通过拥有句柄的 stdout 管道返回版本、PID、端点、原样 generation 和有界 DER 证书。版本 2 的 shutdown 必须使用版本 2。新 Desktop 只请求版本 2，拒绝旧就绪帧、错误 generation 及无效证书。
+
+The baseline is `4d59d02079f333d8fbda775cdc373842cb3bf1fc`. Retain control-version-1 `start`, its five-field readiness frame and plaintext endpoint. Add explicit `start_tls` with control version 2, the existing version/bearer fields and a fresh parent-generated 32-byte hexadecimal `generation`. Each Server launch generates an in-memory self-signed certificate/private key. Its owned stdout pipe returns versions, PID, endpoint, the unchanged generation and bounded DER certificate. Version-2 shutdown requires version 2. New Desktop requests only version 2 and rejects old readiness, mismatched generations and invalid certificates.
+
+后端路由绑定该端点、代次与完整证书。每次 RPC／事件连接仅允许 TLS 1.3，在同一连接上完成完整证书固定、WebPKI 名称／有效期及握手签名校验后才加载并发送 Bearer。禁用 TLS 恢复和 early data，不信任系统根来扩展此托管身份，不回退明文。证书／私钥／端点不会进入设置或前端事件。外部模式沿用独立的系统证书验证和按地址凭据。
+
+The backend route binds this endpoint, generation and complete certificate. Every RPC/event connection requires TLS 1.3 and completes exact-certificate pinning, WebPKI name/time validation and handshake-signature verification on that connection before loading/sending the bearer. Disable TLS resumption and early data. Managed identity uses its pinned certificate as the sole trust root and has no plaintext fallback. Certificates/private keys/endpoints stay outside settings and frontend events. External mode retains independent system-root verification and address-scoped credentials.
+
+2026-11-12 的并行测试实证了 Darwin `pipe → CLOEXEC` 创建窗口中的跨子进程继承，测试 fixture 已协调自身所有进程创建。该修复的范围限测试。产品正常切换／退出会先发送显式 Shutdown；About 通过 `/usr/bin/open` 打开固定项目链接，可能与托管创建并发，目前未复现产品中的持久持有或泄漏。开放来源密码能力前，F1 还须封闭或验证这些原生 helper 并发创建时的私有 bootstrap FD 隔离及父进程异常退出后的 EOF 边界，不能从测试锁推导产品已具备原子管道保证。
+
+Parallel tests on 2026-11-12 demonstrate cross-child inheritance in Darwin's `pipe → CLOEXEC` creation window. The fixture coordinates all its process creation, within test scope. Normal product mode changes/quit send explicit Shutdown first. About opens fixed project links through `/usr/bin/open`, which can overlap managed startup, with no observed product persistent retention or leakage. Before enabling origin-password capability, F1 must close or verify private bootstrap FD isolation across these concurrent native helpers and EOF after abnormal parent exit. The test lock does not establish product-wide atomic pipe creation.
+
+验收包括旧版本 1 的原始帧兼容、新版本 RPC／HTTP／事件鉴权、错误证书及同端口替代 listener、重启换证／旧路由拒绝、事件重连和模式隔离，并从实际 `.app` 验证托管启动及 HTTP 下载。来源密码的输入、Keychain／SQLite 协调和认证 FTP 能力仍由后续 F1 切片交付。
+
+Acceptance covers raw version-1 compatibility, new-version RPC/HTTP/event authentication, wrong certificates and replacement listeners on the same port, certificate rotation/stale-route rejection, event reconnects and mode isolation, plus managed startup and HTTP download through the actual `.app`. Subsequent F1 slices deliver origin-password input, Keychain/SQLite coordination and authenticated FTP capability.
+
 新 FTP 工厂经 Registry 显式选择并在锁外返回受控 session。暂不改变旧 `TransferSessionRequest` 的公共 struct literal；新增类型化请求／扩展工厂方法时保留默认不支持实现，HTTP 仍使用旧入口。来源、认证、连接、读取和最终回复不持有 Core 锁。工厂早期失败也须终结控制；任何已创建 worker 必须在返回错误前停止并 join。
 
 Select the new FTP factory explicitly through Registry and return a controlled session outside the Core lock. Preserve existing public `TransferSessionRequest` struct literals: typed requests/extended factory methods need default unsupported implementations, while HTTP retains its entry. Resolve/authenticate/connect/read/finalize outside the Core lock. Early factory failure finishes controls, stopping and joining any created workers before returning an error.

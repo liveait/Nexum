@@ -7,9 +7,11 @@ use super::{
 };
 use nexum_protocol::RpcDispatcher;
 use nexum_protocol::managed::{
-    MANAGED_CONTROL_VERSION, ManagedControl, ManagedReady, ManagedStartup, read_managed_frame,
-    write_managed_frame,
+    MANAGED_CONTROL_VERSION, MANAGED_TLS_CONTROL_VERSION, ManagedControl, ManagedReady,
+    ManagedStartup, ManagedTlsReady, read_managed_frame, write_managed_frame,
 };
+use rustls::pki_types::PrivatePkcs8KeyDer;
+use rustls::{ServerConfig as TlsServerConfig, ServerConnection, StreamOwned};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{Shutdown, TcpListener};
@@ -107,9 +109,28 @@ fn start_control_reader() -> io::Result<Receiver<ControlEvent>> {
     Ok(receiver)
 }
 
-fn receive_start(receiver: &Receiver<ControlEvent>) -> io::Result<ManagedStartup> {
+#[derive(Debug)]
+struct Startup {
+    config: ManagedStartup,
+    generation: Option<String>,
+}
+
+fn receive_start(receiver: &Receiver<ControlEvent>) -> io::Result<Startup> {
     let startup = match receiver.recv_timeout(STARTUP_TIMEOUT) {
-        Ok(ControlEvent::Frame(ManagedControl::Start(startup))) => startup,
+        Ok(ControlEvent::Frame(ManagedControl::Start(startup))) => {
+            startup.validate(env!("CARGO_PKG_VERSION"), RpcDispatcher::version())?;
+            Startup {
+                config: startup,
+                generation: None,
+            }
+        }
+        Ok(ControlEvent::Frame(ManagedControl::StartTls(startup))) => {
+            startup.validate(env!("CARGO_PKG_VERSION"), RpcDispatcher::version())?;
+            Startup {
+                config: startup.startup,
+                generation: Some(startup.generation),
+            }
+        }
         Ok(ControlEvent::Closed) | Err(mpsc::RecvTimeoutError::Disconnected) => {
             return Err(input_error("managed control pipe closed before startup"));
         }
@@ -123,17 +144,14 @@ fn receive_start(receiver: &Receiver<ControlEvent>) -> io::Result<ManagedStartup
             return Err(input_error("managed startup frame is invalid"));
         }
     };
-    startup
-        .validate(env!("CARGO_PKG_VERSION"), RpcDispatcher::version())
-        .map_err(|_| input_error("managed startup version or credential is invalid"))?;
     Ok(startup)
 }
 
 /// EOF and an explicit Shutdown both end the child. All other post-start input fails closed.
-fn should_stop(receiver: &Receiver<ControlEvent>) -> io::Result<bool> {
+fn should_stop(receiver: &Receiver<ControlEvent>, version: u32) -> io::Result<bool> {
     match receiver.try_recv() {
         Ok(ControlEvent::Frame(ManagedControl::Shutdown { control_version }))
-            if control_version == MANAGED_CONTROL_VERSION =>
+            if control_version == version =>
         {
             Ok(true)
         }
@@ -143,6 +161,18 @@ fn should_stop(receiver: &Receiver<ControlEvent>) -> io::Result<bool> {
             Err(input_error("managed control frame is invalid"))
         }
     }
+}
+
+fn ephemeral_tls() -> io::Result<(Arc<TlsServerConfig>, Vec<u8>)> {
+    let certificate = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
+        .map_err(|_| input_error("cannot generate managed TLS identity"))?;
+    let der = certificate.cert.der().clone();
+    let key = PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der());
+    let config = TlsServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(vec![der.clone()], key.into())
+        .map_err(|_| input_error("cannot configure managed TLS identity"))?;
+    Ok((Arc::new(config), der.to_vec()))
 }
 
 pub(super) fn run(args: &[String]) -> io::Result<()> {
@@ -158,10 +188,16 @@ pub(super) fn run_with(
         parse_args(args).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let controls = start_control_reader()?;
     let startup = receive_start(&controls)?;
-    config.auth_token = Some(startup.bearer_token);
+    let control_version = startup.config.control_version;
+    let tls = startup
+        .generation
+        .as_ref()
+        .map(|_| ephemeral_tls())
+        .transpose()?;
+    config.auth_token = Some(startup.config.bearer_token);
     let authentication = AuthenticationConfig::from_server_config(&config)
         .map_err(|_| input_error("managed authentication configuration is invalid"))?;
-    if should_stop(&controls)? {
+    if should_stop(&controls, control_version)? {
         return Ok(());
     }
 
@@ -188,7 +224,7 @@ pub(super) fn run_with(
     let connection_limiter = ConnectionLimiter::new(config.max_connections);
 
     spawn_event_pump(Arc::clone(&state));
-    if should_stop(&controls)? {
+    if should_stop(&controls, control_version)? {
         return Ok(());
     }
     let ready = ManagedReady {
@@ -198,12 +234,25 @@ pub(super) fn run_with(
         process_id: std::process::id(),
         endpoint,
     };
-    write_managed_frame(ready_output, &ready)?;
+    if let Some((_, certificate_der)) = &tls {
+        let ready = ManagedTlsReady {
+            control_version: MANAGED_TLS_CONTROL_VERSION,
+            server_version: ready.server_version,
+            protocol_version: ready.protocol_version,
+            process_id: ready.process_id,
+            endpoint,
+            generation: startup.generation.expect("TLS startup has a generation"),
+            certificate_der: certificate_der.clone(),
+        };
+        write_managed_frame(ready_output, &ready)?;
+    } else {
+        write_managed_frame(ready_output, &ready)?;
+    }
     eprintln!("Nexum managed server is ready");
     dispatch_available_http_tasks(&state);
 
     loop {
-        if should_stop(&controls)? {
+        if should_stop(&controls, control_version)? {
             // Returning from main terminates all workers. Do not join network reads or
             // cancel/remove downloads; their persisted partials are recovered on restart.
             return Ok(());
@@ -217,11 +266,32 @@ pub(super) fn run_with(
                     continue;
                 };
                 let state = Arc::clone(&state);
+                let tls_config = tls.as_ref().map(|(config, _)| Arc::clone(config));
                 let result = std::thread::Builder::new()
                     .name("nexum-managed-rpc".to_owned())
                     .spawn(move || {
                         let _permit = permit;
-                        if let Err(error) = handle_connection(SharedStream::plain(stream), state) {
+                        let stream = match tls_config {
+                            Some(config) => {
+                                // A client that stalls before TLS must release its connection slot.
+                                if stream.set_read_timeout(Some(STARTUP_TIMEOUT)).is_err()
+                                    || stream.set_write_timeout(Some(STARTUP_TIMEOUT)).is_err()
+                                {
+                                    return;
+                                }
+                                let Ok(connection) = ServerConnection::new(config) else {
+                                    return;
+                                };
+                                let shared =
+                                    SharedStream::tls(StreamOwned::new(connection, stream));
+                                if shared.complete_handshake().is_err() {
+                                    return;
+                                }
+                                shared
+                            }
+                            None => SharedStream::plain(stream),
+                        };
+                        if let Err(error) = handle_connection(stream, state) {
                             eprintln!("managed connection error: {error}");
                         }
                     });
@@ -259,20 +329,20 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(2);
         read_controls(&mut Cursor::new(bytes), sender);
         receive_start(&receiver).unwrap();
-        assert!(should_stop(&receiver).unwrap());
+        assert!(should_stop(&receiver, MANAGED_CONTROL_VERSION).unwrap());
     }
 
     #[test]
     fn duplicate_start_and_version_mismatch_shutdown_fail_closed() {
         let (sender, receiver) = mpsc::sync_channel(2);
         sender.send(ControlEvent::Frame(start())).unwrap();
-        assert!(should_stop(&receiver).is_err());
+        assert!(should_stop(&receiver, MANAGED_CONTROL_VERSION).is_err());
         sender
             .send(ControlEvent::Frame(ManagedControl::Shutdown {
                 control_version: MANAGED_CONTROL_VERSION + 1,
             }))
             .unwrap();
-        assert!(should_stop(&receiver).is_err());
+        assert!(should_stop(&receiver, MANAGED_CONTROL_VERSION).is_err());
     }
 
     #[test]

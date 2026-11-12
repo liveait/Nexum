@@ -9,7 +9,9 @@ use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 
 pub const MANAGED_CONTROL_VERSION: u32 = 1;
+pub const MANAGED_TLS_CONTROL_VERSION: u32 = 2;
 pub const MANAGED_FRAME_MAX_BYTES: usize = 4096;
+pub const MANAGED_CERTIFICATE_MAX_BYTES: usize = 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,7 +40,20 @@ impl ManagedStartup {
         expected_server_version: &str,
         expected_protocol_version: &str,
     ) -> io::Result<()> {
-        let error = if self.control_version != MANAGED_CONTROL_VERSION {
+        self.validate_version(
+            expected_server_version,
+            expected_protocol_version,
+            MANAGED_CONTROL_VERSION,
+        )
+    }
+
+    fn validate_version(
+        &self,
+        expected_server_version: &str,
+        expected_protocol_version: &str,
+        control_version: u32,
+    ) -> io::Result<()> {
+        let error = if self.control_version != control_version {
             Some("unsupported managed control version")
         } else if self.server_version != expected_server_version {
             Some("managed server version mismatch")
@@ -61,10 +76,46 @@ impl ManagedStartup {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedTlsStartup {
+    pub startup: ManagedStartup,
+    pub generation: String,
+}
+
+impl fmt::Debug for ManagedTlsStartup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ManagedTlsStartup")
+            .field("startup", &self.startup)
+            .field("generation", &self.generation)
+            .finish()
+    }
+}
+
+impl ManagedTlsStartup {
+    pub fn validate(&self, server_version: &str, protocol_version: &str) -> io::Result<()> {
+        self.startup.validate_version(
+            server_version,
+            protocol_version,
+            MANAGED_TLS_CONTROL_VERSION,
+        )?;
+        if self.generation.len() != 64
+            || !self.generation.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid managed TLS generation",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ManagedControl {
     Start(ManagedStartup),
+    StartTls(ManagedTlsStartup),
     Shutdown { control_version: u32 },
 }
 
@@ -76,6 +127,19 @@ pub struct ManagedReady {
     pub protocol_version: String,
     pub process_id: u32,
     pub endpoint: SocketAddr,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedTlsReady {
+    pub control_version: u32,
+    pub server_version: String,
+    pub protocol_version: String,
+    pub process_id: u32,
+    pub endpoint: SocketAddr,
+    pub generation: String,
+    /// Public leaf certificate from the owned bootstrap pipe, never a private key.
+    pub certificate_der: Vec<u8>,
 }
 
 /// Read one bounded frame. `None` means EOF at a frame boundary; partial frames
@@ -157,6 +221,46 @@ mod tests {
         let debug = format!("{:?}", ManagedControl::Start(value));
         assert!(!debug.contains(&secret));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn tls_startup_requires_explicit_version_and_complete_generation() {
+        let mut tls = ManagedTlsStartup {
+            startup: startup(),
+            generation: "a".repeat(64),
+        };
+        assert!(tls.validate("0.1.0", "1").is_err());
+        tls.startup.control_version = MANAGED_TLS_CONTROL_VERSION;
+        assert!(tls.validate("0.1.0", "1").is_ok());
+        assert!(tls.startup.validate("0.1.0", "1").is_err());
+        assert!(tls.validate("other", "1").is_err());
+        assert!(tls.validate("0.1.0", "other").is_err());
+        for generation in ["".to_owned(), "g".repeat(64), "é".repeat(32)] {
+            tls.generation = generation;
+            assert!(tls.validate("0.1.0", "1").is_err());
+        }
+        let secret = tls.startup.bearer_token.clone();
+        assert!(!format!("{:?}", ManagedControl::StartTls(tls)).contains(&secret));
+    }
+
+    #[test]
+    fn tls_negotiation_cannot_be_parsed_as_legacy_readiness() {
+        let ready = ManagedTlsReady {
+            control_version: MANAGED_TLS_CONTROL_VERSION,
+            server_version: "0.1.0".to_owned(),
+            protocol_version: "1".to_owned(),
+            process_id: 42,
+            endpoint: "127.0.0.1:42".parse().unwrap(),
+            generation: "a".repeat(64),
+            certificate_der: vec![1, 2, 3],
+        };
+        let mut wire = Vec::new();
+        write_managed_frame(&mut wire, &ready).unwrap();
+        assert!(read_managed_frame::<ManagedReady>(&mut Cursor::new(&wire)).is_err());
+        let parsed = read_managed_frame::<ManagedTlsReady>(&mut Cursor::new(wire))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed, ready);
     }
 
     #[test]

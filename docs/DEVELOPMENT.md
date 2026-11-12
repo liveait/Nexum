@@ -205,6 +205,18 @@ cargo test --locked -p nexum-desktop --lib managed_server::tests
 
 The process tests create and clean their own temporary data/download directories without stopping an existing development Server.
 
+新 Desktop 请求控制版本 2 的 `start_tls`，使用从拥有句柄的管道取得的临时证书固定 TLS 1.3 RPC／事件连接。版本 1 原始帧继续由进程测试覆盖。`managed_tls::tests` 验证完整 DER 固定及 WebPKI 名称／时间检查，Desktop 测试还覆盖错误 pin、明文替代端点和重启旧路由。Supervisor 测试以独立临时 Cargo target 离线构建 TLS fixture，沿用仓库锁文件中的依赖版本。原生验收仍使用实际 `.app`。
+
+New Desktop requests control-version-2 `start_tls`, pinning TLS 1.3 RPC/event connections with the ephemeral certificate received through its owned pipe. Process tests retain raw version-1 coverage. `managed_tls::tests` verify exact DER pinning and WebPKI name/time checks, while Desktop tests cover wrong pins, plaintext replacements and stale routes after restart. Supervisor tests build a TLS fixture offline in a private temporary Cargo target using repository-locked dependency versions. Native acceptance still uses the actual `.app`.
+
+TLS 握手通过绝对 I/O 期限驱动，只有 `is_handshaking()` 为 false 才允许加载凭据。部分 TLS 记录或持续小片段不能重置预算。托管 Ready 等待和健康探测共用 6 秒启动预算，探测最多使用其中剩余的 1500 ms，直到完整响应前保留期限和模式切换取消检查。正常 RPC／事件在握手后恢复既有 socket timeout 行为。
+
+TLS handshakes use absolute I/O deadlines and permit credential loading only after `is_handshaking()` becomes false. Partial TLS records and continuous fragments cannot reset the budget. Managed Ready and health probing share the six-second startup budget, with the probe limited to at most the remaining 1500 ms. Deadline/mode-cancellation checks remain active until the complete response. Normal RPC/event connections restore existing socket-timeout behavior after the handshake.
+
+2026-11-12 在默认并行 managed 测试中复现控制管道写端被兄弟进程继承，使 EOF 延迟。采样确认 Server 仍在监听／读取 stdin，尚未进入 Inspector shutdown。macOS 使用的固定 [Rust 1.98.1 管道实现](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/pipe/unix.rs) 先建 pipe 再设置 CLOEXEC。测试 fixture 因此对 Server 的创建／exec 和短暂的 `/bin/ps.output()` 使用同一锁，创建后各进程及测试继续并发。新增 32 对并发启动场景保留原有 3 秒退出断言，并确认另一未初始化子进程仍活着时 EOF 已独立生效。
+
+On 2026-11-12, default-parallel managed tests reproduce a sibling inheriting a control-pipe writer and delaying EOF. Sampling shows the Server still listening/reading stdin, before Inspector shutdown. The pinned [Rust 1.98.1 pipe implementation](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/pipe/unix.rs) creates pipes before setting CLOEXEC on macOS. The test fixture now shares a lock across Server creation/exec and its short `/bin/ps.output()` call. Processes/tests remain concurrent after creation. A new 32-pair concurrent-launch scenario retains the existing three-second exit assertion and proves independent EOF while the other uninitialized child remains alive.
+
 ### 种子内容检查 / Torrent-content inspection
 
 CLI 先读取本地普通种子内容并上传，Server 不读取客户端路径。`inspect` 等待解析并打印 v1 infohash、原始内容 SHA256、文件清单及 padding 标记；`inspect-begin` 立即返回临时 ID，随后可查询或取消。检查不会创建任务、输出文件或联系 tracker／peer；HTTP 下载的 `.torrent` 文件仍是普通下载。客户端先核对 `server.capabilities.torrent_inspect`，不向旧 Server 回退创建占位任务。
