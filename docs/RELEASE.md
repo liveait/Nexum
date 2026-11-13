@@ -264,6 +264,10 @@ The same candidate's bundled Server starts through the real Desktop consumer con
 
 The private `native-process-pipe-isolation-20261112` evidence directory retains builds, process records, SQLite, origin logs, script corrections and acceptance results. The QA App, bundled Server, HTTP fixture and test browser tabs are closed, with artifacts and data retained. [PR #89](https://github.com/liveait/Nexum/pull/89) binds final head, fixed-SHA review and pre/post-merge CI. Origin passwords, FTP/BT transfers, clean-OS-user checks and distribution acceptance follow the existing plan.
 
+首次最终 head 的 Ubuntu CI 在严格 FD 断言中发现 pipe `142/145`，Rust 测试失败，macOS 打包通过。原始日志、精确 checkout 及 Rust 1.100.0／Cargo 来源保留于证据目录，两个 FD 的具体来源尚无直接记录。测试修正把已有句柄的 close-on-exec 初始化放在隔离父进程创建任何 bootstrap 管道之前，并记录原始及最终标志。受控注入一条已有管道的两个 FD 时，未初始化版本在原有严格断言处失败，初始化版本保持全部 pipe 断言并通过真实随包 Server 的退出／重启流程。最新完整门槛按 PR 最终 head 重新核对。
+
+The first final-head Ubuntu CI finds pipe FDs `142/145` in the strict FD assertion, failing Rust tests while macOS packaging passes. The evidence directory retains raw logs, the exact checkout and pinned Rust 1.100.0/Cargo sources. The two FDs lack direct provenance records. The fixture correction initializes close-on-exec for existing handles before the isolated parent creates any bootstrap pipe, recording original/final flags. With two preexisting pipe descriptors injected, the unprepared variant fails at the existing strict assertion. The prepared variant preserves the all-pipe assertion and passes the real bundled Server's exit/restart flow. Complete latest gates are rechecked against the final PR head.
+
 <a id="native-macos-visual-evidence"></a>
 <a id="macos-原生界面截图留证"></a>
 

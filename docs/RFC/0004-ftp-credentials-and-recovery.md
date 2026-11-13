@@ -91,6 +91,10 @@ The macOS About entry uses the locked opener's `/usr/bin/open -- URL` behavior a
 
 The controlled helper enumerates every `/dev/fd` entry and rejects any extra pipe, covering child read ends already closed by the parent. The real bundled Server verifies Ready, EOF exit after parent SIGKILL and same-directory restart while the helper remains alive. The native `.app` verifies all three fixed links, complete HTTP bytes, abnormal App exit and normal quit/relaunch. See the [release record](../RELEASE.md#native-process-isolation-native-qa).
 
+测试宿主可以向测试程序继承已有 FD。隔离测试父进程先枚举已有非 stdio 句柄，记录类型与原始标志，并为这些句柄设置 close-on-exec，然后才创建 bootstrap 管道、helper 和并发屏障。helper 继续对全部额外 pipe 执行严格断言。句柄枚举期间完成标志操作，读取或设置失败会使 fixture 失败。该边界通过受控注入一条已有管道的两个 FD 验证。
+
+The test host can pass existing FDs into the test executable. Before creating bootstrap pipes, helpers or the concurrency barrier, the isolated test parent enumerates its existing non-stdio handles, records types/original flags and marks them close-on-exec. The helper retains its strict assertion against every extra pipe. Flag operations occur while enumeration remains open, and inspection/update failures fail the fixture. Controlled injection of a preexisting pipe's two descriptors verifies this boundary.
+
 验收包括旧版本 1 的原始帧兼容、新版本 RPC／HTTP／事件鉴权、错误证书及同端口替代 listener、重启换证／旧路由拒绝、事件重连和模式隔离，并从实际 `.app` 验证托管启动及 HTTP 下载。来源密码的输入、Keychain／SQLite 协调和认证 FTP 能力仍由后续 F1 切片交付。
 
 Acceptance covers raw version-1 compatibility, new-version RPC/HTTP/event authentication, wrong certificates and replacement listeners on the same port, certificate rotation/stale-route rejection, event reconnects and mode isolation, plus managed startup and HTTP download through the actual `.app`. Subsequent F1 slices deliver origin-password input, Keychain/SQLite coordination and authenticated FTP capability.

@@ -102,12 +102,7 @@ fn wait_exit(pid: u32) {
     }
 }
 
-/// This role reports descriptor metadata only, then stays alive across parent death.
-#[test]
-fn native_helper_fixture() {
-    let Some(root) = std::env::var_os(HELPER_ROOT).map(PathBuf::from) else {
-        return;
-    };
+fn descriptor_report(mark_close_on_exec: bool) -> Vec<Value> {
     let mut descriptors = Vec::new();
     for entry in fs::read_dir("/dev/fd").unwrap() {
         let entry = entry.unwrap();
@@ -126,10 +121,33 @@ fn native_helper_fixture() {
             } else {
                 "other"
             };
-            descriptors.push(json!({"fd":fd,"kind":kind}));
+            let flags_before = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags_before >= 0, "cannot inspect descriptor {fd}");
+            if mark_close_on_exec {
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, flags_before | libc::FD_CLOEXEC) },
+                    0,
+                    "cannot mark inherited descriptor {fd} close-on-exec"
+                );
+            }
+            let flags_after = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags_after >= 0, "cannot recheck descriptor {fd}");
+            descriptors.push(
+                json!({"fd":fd,"kind":kind,"flags_before":flags_before,"flags_after":flags_after}),
+            );
         }
     }
     descriptors.sort_by_key(|descriptor| descriptor["fd"].as_i64().unwrap());
+    descriptors
+}
+
+/// This role reports descriptor metadata only, then stays alive across parent death.
+#[test]
+fn native_helper_fixture() {
+    let Some(root) = std::env::var_os(HELPER_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let descriptors = descriptor_report(false);
     publish(
         &root.join("helper-ready.json"),
         &serde_json::to_vec(&json!({"pid":std::process::id(),"descriptors":descriptors})).unwrap(),
@@ -156,6 +174,9 @@ fn native_bootstrap_parent_fixture() {
     let Some(root) = std::env::var_os(PARENT_ROOT).map(PathBuf::from) else {
         return;
     };
+    // This isolated harness can inherit the test runner's own descriptors.
+    // Normalize only handles present before any bootstrap/helper is created.
+    let inherited_descriptors = descriptor_report(true);
     let config = Configuration {
         binary: std::env::var_os(SERVER_BINARY).map(PathBuf::from).unwrap(),
         expected_digest: std::env::var(SERVER_DIGEST).unwrap(),
@@ -189,7 +210,7 @@ fn native_bootstrap_parent_fixture() {
         owned._stdout.as_ref().unwrap().as_raw_fd(),
     ];
     assert!(bootstrap_fds.iter().all(|fd| *fd >= 3));
-    let record = json!({"server_pid":owned.child.id(),"helper":helper_record,"bootstrap_fds":bootstrap_fds,"fd_probe":"all /dev/fd entries"});
+    let record = json!({"server_pid":owned.child.id(),"helper":helper_record,"bootstrap_fds":bootstrap_fds,"inherited_descriptors":inherited_descriptors,"fd_probe":"all /dev/fd entries"});
     publish(
         &root.join("parent-ready.json"),
         &serde_json::to_vec(&record).unwrap(),
