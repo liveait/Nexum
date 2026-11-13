@@ -244,6 +244,26 @@ After abnormal termination of the owned QA Server, supervision starts a new PID 
 
 The private `managed-tls-identity-20261111` evidence directory retains builds, hashes, SQLite, origin/proxy logs and native observations. [PR #88](https://github.com/liveait/Nexum/pull/88) binds subsequent test/documentation changes, the final candidate, fixed-SHA review and latest CI. This record verifies managed identity and controlled HTTP regression with seeded QA settings. Clean-OS-user checks, first-release protocols, actual VoiceOver listening, real installation/upgrades, Developer ID signing and notarization retain their existing acceptance gates.
 
+<a id="native-process-isolation-native-qa"></a>
+
+#### 11 月 13 日原生进程隔离验证 / November 13 native process isolation QA
+
+源码 `fa61edaef66d1a2c664c323208691d14c78919eb` 的 `Nexum Launch QA` 0.1.0 arm64 `.app` 在 macOS 27.2.1 上通过临时签名、随包 Server 哈希及包校验。ZIP SHA256 为 `56eee1aa551ed7f568a3da8730b3426387c55acd72fd2431826c9f161e51404a`。使用独立 App 标识符、预置 QA 设置和私有数据／下载目录，实际 About 的官网、源码、文档按钮均在系统浏览器打开正确固定地址。
+
+The `Nexum Launch QA` 0.1.0 arm64 `.app` from source `fa61edaef66d1a2c664c323208691d14c78919eb` passes ad-hoc signing, bundled Server hashing and bundle verification on macOS 27.2.1. Its ZIP SHA256 is `56eee1aa551ed7f568a3da8730b3426387c55acd72fd2431826c9f161e51404a`. With a separate App identifier, seeded QA settings and private data/download directories, the actual About website, source and documentation buttons open the correct fixed addresses in the system browser.
+
+实际 UI 下载 1 MiB 文件并显示已完成／100%，SQLite 保存 `completed`、完整字节数、零速率及空 ETA／错误。文件 SHA256 为 `fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83`。强制终止 App 后，随包 Server 本次在约 35 毫秒内收到 EOF 并退出。异常退出后重开、正常退出后重开均恢复同一完成任务，来源请求总数保持不变。表单按既有逻辑执行 HEAD、缺少 Content-Disposition 后的 `Range bytes=0-0` 探测及单次整文件 GET。验收脚本最初的状态大小写与 GET 总数假设已按存储编码和实际调用链修正，保留原失败及精确请求断言。
+
+The actual UI downloads a 1 MiB file and shows completed/100 percent. SQLite stores `completed`, complete byte counts, zero speed and absent ETA/error. The file SHA256 is `fbbab289f7f94b25736c58be46a994c441fd02552cc6022352e3d86d2fab7c83`. After App SIGKILL, the bundled Server observes EOF and exits in about 35 milliseconds in this run. Relaunch after abnormal and normal exit restores the same completed task without increasing origin requests. Existing filename probing performs HEAD, `Range bytes=0-0` after missing Content-Disposition and one whole-file GET. The acceptance script's initial state-case and total-GET assumptions are corrected against canonical storage encoding and the actual call path, retaining failures and exact request assertions.
+
+同一候选的随包 Server 经 Desktop 真实创建入口与长驻 About helper 并发启动。helper 枚举全部额外 FD，未持有 pipe，父进程 SIGKILL 后 Server 在 3 秒预算内退出，helper 持续响应且同数据目录可重新启动。独立审查发现原测试遗漏子端读句柄及固定扫描上限，已改为枚举全部 `/dev/fd` 并拒绝任何额外 pipe。完整 Rust 门槛通过 494 项 workspace、14 项额外 managed，Server unit／managed／persistence 为 55／14／69，前端 34 项通过。
+
+The same candidate's bundled Server starts through the real Desktop consumer concurrently with a long-lived About helper. The helper enumerates all extra FDs and holds no pipe. After parent SIGKILL, the Server exits within the three-second budget while the helper remains responsive and the same data directory supports restart. Independent review found the original test missed child read ends and used a fixed scan limit. It now enumerates all `/dev/fd` entries and rejects any extra pipe. Complete Rust gates pass 494 workspace tests and 14 separate managed tests, with Server unit/managed/persistence at 55/14/69 and 34 frontend tests passing.
+
+构建、进程记录、SQLite、来源日志、脚本修正及验收结果保留于私有 `native-process-pipe-isolation-20261112` 证据目录。QA App、随包 Server、HTTP fixture 及本轮浏览器标签页已结束，产物和数据保留。最终 head、固定 SHA 审查及合并前后 CI 由 [PR #89](https://github.com/liveait/Nexum/pull/89) 绑定。来源密码、FTP／BT 传输、干净 OS 用户及分发验收继续按已有计划推进。
+
+The private `native-process-pipe-isolation-20261112` evidence directory retains builds, process records, SQLite, origin logs, script corrections and acceptance results. The QA App, bundled Server, HTTP fixture and test browser tabs are closed, with artifacts and data retained. [PR #89](https://github.com/liveait/Nexum/pull/89) binds final head, fixed-SHA review and pre/post-merge CI. Origin passwords, FTP/BT transfers, clean-OS-user checks and distribution acceptance follow the existing plan.
+
 <a id="native-macos-visual-evidence"></a>
 <a id="macos-原生界面截图留证"></a>
 

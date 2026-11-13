@@ -73,9 +73,9 @@ The baseline is `4d59d02079f333d8fbda775cdc373842cb3bf1fc`. Retain control-versi
 
 The backend route binds this endpoint, generation and complete certificate. Every RPC/event connection requires TLS 1.3 and completes exact-certificate pinning, WebPKI name/time validation and handshake-signature verification on that connection before loading/sending the bearer. Disable TLS resumption and early data. Managed identity uses its pinned certificate as the sole trust root and has no plaintext fallback. Certificates/private keys/endpoints stay outside settings and frontend events. External mode retains independent system-root verification and address-scoped credentials.
 
-2026-11-12 的并行测试实证了 Darwin `pipe → CLOEXEC` 创建窗口中的跨子进程继承，测试 fixture 已协调自身所有进程创建。该修复的范围限测试。产品正常切换／退出会先发送显式 Shutdown；About 通过 `/usr/bin/open` 打开固定项目链接，可能与托管创建并发，目前未复现产品中的持久持有或泄漏。开放来源密码能力前，F1 还须封闭或验证这些原生 helper 并发创建时的私有 bootstrap FD 隔离及父进程异常退出后的 EOF 边界，不能从测试锁推导产品已具备原子管道保证。
+2026-11-12 的并行测试实证了 Darwin `pipe → CLOEXEC` 创建窗口中的跨子进程继承。基线 `853432e7` 的测试 fixture 已协调自身所有进程创建，产品 About 与托管创建仍可能重叠。以下切片将协调扩展至当前产品入口，并验证私有 bootstrap FD 隔离及父进程异常退出后的 EOF 边界。
 
-Parallel tests on 2026-11-12 demonstrate cross-child inheritance in Darwin's `pipe → CLOEXEC` creation window. The fixture coordinates all its process creation, within test scope. Normal product mode changes/quit send explicit Shutdown first. About opens fixed project links through `/usr/bin/open`, which can overlap managed startup, with no observed product persistent retention or leakage. Before enabling origin-password capability, F1 must close or verify private bootstrap FD isolation across these concurrent native helpers and EOF after abnormal parent exit. The test lock does not establish product-wide atomic pipe creation.
+Parallel tests on 2026-11-12 demonstrate cross-child inheritance in Darwin's `pipe → CLOEXEC` creation window. At baseline `853432e7`, the fixture coordinates its process creation, while production About can overlap managed startup. The following slice extends coordination to the current product entry points and verifies private bootstrap FD isolation and EOF after abnormal parent exit.
 
 #### 原生进程创建协调 / Native process launch coordination
 
@@ -86,6 +86,10 @@ This slice starts from `853432e747b0152f0f67930d8577483355fc8718`. The Desktop l
 macOS 的 About 入口使用与当前锁定 opener 相同的 `/usr/bin/open -- URL` 及 null stdio，创建后在锁外等待退出状态。其他平台沿用现有 opener 入口。测试辅助进程也通过同一创建函数，长时间的编译／helper 等待放在锁外。验证包含持锁时取消／超时且未创建子进程、长期 helper 不阻塞托管 Ready、helper 在 exec 后报告额外 FD 的类型、异常终止父进程后 Server 收到 EOF 退出，以及 helper 继续存活时同数据目录可重新启动。
 
 The macOS About entry uses the locked opener's `/usr/bin/open -- URL` behavior and null stdio, waiting for exit status outside the lock. Other platforms retain their existing opener entry. Test helpers use the same spawn function, with compilation/helper waits outside the lock. Verification covers cancellation/deadline expiry under contention without creating a child, managed Ready while a helper remains alive, post-exec helper reports of extra FD types, Server EOF exit after abnormal parent termination, and same-data-directory restart while that helper stays alive.
+
+受控 helper 枚举 `/dev/fd` 全部条目并拒绝任何额外 pipe，覆盖父进程已关闭的子端读句柄。真实随包 Server 已验证 helper 持续存活时的 Ready、父进程 SIGKILL 后 EOF 退出及同数据目录重启。原生 `.app` 验证三个固定链接、HTTP 完整文件、App 异常退出及正常退出／重开，见[发布记录](../RELEASE.md#native-process-isolation-native-qa)。
+
+The controlled helper enumerates every `/dev/fd` entry and rejects any extra pipe, covering child read ends already closed by the parent. The real bundled Server verifies Ready, EOF exit after parent SIGKILL and same-directory restart while the helper remains alive. The native `.app` verifies all three fixed links, complete HTTP bytes, abnormal App exit and normal quit/relaunch. See the [release record](../RELEASE.md#native-process-isolation-native-qa).
 
 验收包括旧版本 1 的原始帧兼容、新版本 RPC／HTTP／事件鉴权、错误证书及同端口替代 listener、重启换证／旧路由拒绝、事件重连和模式隔离，并从实际 `.app` 验证托管启动及 HTTP 下载。来源密码的输入、Keychain／SQLite 协调和认证 FTP 能力仍由后续 F1 切片交付。
 
