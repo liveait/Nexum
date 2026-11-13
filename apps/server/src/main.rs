@@ -1440,6 +1440,9 @@ fn dispatch_server_request(
     state: &Arc<Mutex<ServerState>>,
     request: &RpcRequest,
 ) -> Option<RpcResponse> {
+    if let Err(error) = RpcDispatcher::validate_legacy_task_create(request) {
+        return reply_error(request, error);
+    }
     if request.method == "server.capabilities" || request.method.starts_with("torrent.inspect.") {
         return dispatch_inspection_request(state, request);
     }

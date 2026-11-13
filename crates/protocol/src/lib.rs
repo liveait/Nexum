@@ -2,11 +2,15 @@
 
 pub mod managed;
 
+#[cfg(test)]
+mod legacy_source_tests;
+
 pub use nexum_security::{
     AuthenticationError, AuthenticationScheme, Credential, RateLimit, TlsConfig, TlsConfigError,
 };
 
 use nexum_core::Core;
+use nexum_core::nexum_resolver::{ResolveKind, ResolveRequest};
 use nexum_domain::{Destination, DownloadSource, TaskId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -225,22 +229,71 @@ pub struct TaskView {
 }
 impl From<&nexum_task::DownloadTask> for TaskView {
     fn from(task: &nexum_task::DownloadTask) -> Self {
+        let http_source = legacy_http_source(task.source.as_str());
         Self {
             id: task.id.to_string(),
-            source: task.source.as_str().to_owned(),
+            source: if http_source {
+                task.source.as_str().to_owned()
+            } else {
+                "[legacy non-HTTP source]".to_owned()
+            },
             destination: task.destination.as_str().to_owned(),
             state: format!("{:?}", task.state),
             downloaded_bytes: task.progress.downloaded_bytes,
             total_bytes: task.progress.total_bytes,
             speed_bytes_per_second: task.progress.speed_bytes_per_second,
             eta_seconds: task.progress.eta_seconds,
-            error: task.last_error.clone(),
+            error: if http_source {
+                task.last_error.clone()
+            } else {
+                task.last_error.as_ref().map(|_| {
+                    "Legacy source requires explicit reimport through a supported transfer entry."
+                        .to_owned()
+                })
+            },
         }
     }
 }
 
 pub struct RpcDispatcher;
+
+fn legacy_http_source(source: &str) -> bool {
+    matches!(
+        ResolveRequest::new(source).and_then(|request| request.kind()),
+        Ok(ResolveKind::Http | ResolveKind::Https)
+    )
+}
+
+fn legacy_create_parameters(params: &Value) -> Result<(&str, &str, &str), RpcErrorObject> {
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcErrorObject::invalid_params("missing id"))?;
+    let source = params
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcErrorObject::invalid_params("missing source"))?;
+    let destination = params
+        .get("destination")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcErrorObject::invalid_params("missing destination"))?;
+    if !legacy_http_source(source) {
+        return Err(RpcErrorObject::invalid_params(
+            "task.create supports HTTP/HTTPS only. Other sources require a supported typed transfer entry.",
+        ));
+    }
+    Ok((id, source, destination))
+}
+
 impl RpcDispatcher {
+    /// Check legacy creation before consumers perform receipt or storage work.
+    pub fn validate_legacy_task_create(request: &RpcRequest) -> Result<(), RpcErrorObject> {
+        if request.method == "task.create" {
+            legacy_create_parameters(request.params.as_ref().unwrap_or(&Value::Null))?;
+        }
+        Ok(())
+    }
+
     /// Returns the protocol version string supported by this server.
     pub fn version() -> &'static str {
         ProtocolVersion::CURRENT.as_str()
@@ -325,18 +378,8 @@ impl RpcDispatcher {
         core: &mut Core<R>,
         params: &Value,
     ) -> Result<Value, DispatchError> {
-        let id = params
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| DispatchError::InvalidParams("missing id".into()))?;
-        let source = params
-            .get("source")
-            .and_then(Value::as_str)
-            .ok_or_else(|| DispatchError::InvalidParams("missing source".into()))?;
-        let destination = params
-            .get("destination")
-            .and_then(Value::as_str)
-            .ok_or_else(|| DispatchError::InvalidParams("missing destination".into()))?;
+        let (id, source, destination) = legacy_create_parameters(params)
+            .map_err(|error| DispatchError::InvalidParams(error.message))?;
         let task = core
             .create_task(
                 TaskId::from(id),

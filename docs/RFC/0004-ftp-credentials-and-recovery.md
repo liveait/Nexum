@@ -33,6 +33,16 @@ The candidate's Tokio control implementation traces rendered commands. Library l
 
 ## 来源与凭据契约 / Source and credential contract
 
+### 旧来源入口保护切片 / Legacy source boundary slice
+
+本切片基线为 `c1bd721d828349e31b395056085ed41656db69d9`。旧 `task.create` 共用参数预检，检查 id、source、destination 的字符串参数，并按 Resolver 的两端空白与 ASCII 大小写规则只接受 HTTP／HTTPS scheme。Server 在清理完成凭证之前预检，通用 dispatcher 使用同一校验。非 HTTP 请求和通知在任务持久化及事件产生前返回固定错误。
+
+This slice starts from `c1bd721d828349e31b395056085ed41656db69d9`. Legacy `task.create` shares parameter validation for string id/source/destination values and permits HTTP/HTTPS schemes using the Resolver's trim and ASCII-case rules. The Server validates before completion-receipt cleanup, and the generic dispatcher uses the same check. Non-HTTP requests and notifications fail with fixed errors before task persistence or event creation.
+
+历史非 HTTP 任务的 get／list 通过 TaskView 输出固定来源占位文字，已有错误转换为显式重新导入提示。SQLite 保存原记录，公开状态、进度和目标字段继续提供实际任务信息。真实 Server 回归覆盖拒绝时保留完成 sidecar、通知、TLS RPC／HTTPS、历史记录重启及并行 HTTP 下载。此包先落实凭据接入所需的旧来源边界，后续 F1 接入版本化类型入口及 Keychain／SQLite pending 协调。
+
+TaskView get/list responses use a fixed source placeholder for historical non-HTTP tasks and convert existing errors into explicit reimport guidance. SQLite retains the original records, while public state/progress/destination fields describe the actual tasks. Real Server regressions cover preserved completion sidecars on rejection, notifications, TLS RPC/HTTPS, historical-record restarts and concurrent HTTP downloads. This package establishes the legacy-source boundary for credential ingestion. Subsequent F1 work adds the versioned typed entry and Keychain/SQLite pending coordination.
+
 新增能力协商及版本化 `task.create_transfer`，与 BT 共用显式类型化入口；旧 `task.create`、TaskView 和 HTTP 调用保留。旧 Server 对新方法返回 method-not-found，客户端不得退回会忽略新参数的旧创建方法。FTP 输入包含 `source_url`、安全模式、`path_mode` 和匿名／凭据输入；URL userinfo 在客户端入口拆出，Server 再次校验，持久来源只保留无 userinfo 的规范 URL。仅接受有效 UTF-8 路径，按 URL 组件解码一次并拒绝 CR、LF、NUL 及编码的分隔符。剥去 URL 语法的首个 `/` 后，默认 `login_relative`，`absolute` 则加回根 `/`；二者分别把 `ftp://host/pub/a.bin` 解释为 `pub/a.bin` 和 `/pub/a.bin`。将 path_mode 绑定恢复记录，拒绝旧 `%2F` 绝对路径缩写并提示使用显式模式，不猜测编码或本地路径。
 
 Add capability negotiation and versioned `task.create_transfer`, sharing an explicit typed entry with BT while retaining legacy `task.create`, TaskView and HTTP calls. Old Servers return method-not-found; clients must not fall back to an old method that ignores new arguments. FTP input includes `source_url`, security, `path_mode` and anonymous/credential input. Split userinfo at client ingestion and validate again on the Server; persist a canonical URL without userinfo. Require valid UTF-8, decode URL components once and reject CR/LF/NUL and encoded separators. Strip the URL's first syntax `/`: default `login_relative` maps `ftp://host/pub/a.bin` to `pub/a.bin`, while `absolute` prepends `/` to produce `/pub/a.bin`. Bind path_mode in recovery and reject legacy `%2F` absolute-path shorthand with guidance to use explicit mode, without guessing encodings or local paths.
