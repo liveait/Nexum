@@ -129,6 +129,10 @@ Starting 2026-11-11, new Desktop negotiates control version 2 through private `s
 
 New routes validate PID, versions, loopback endpoint and generation before binding the complete certificate. Every RPC/event connection uses TLS 1.3, delegates name/time/handshake-signature validation to WebPKI and additionally checks the exact certificate bytes. Only the pipe-delivered certificate enters managed trust roots. TLS resumption and early data are disabled. Bearer and request parameters are loaded/sent after the handshake. Failures are visible, and reconnects resolve the current route. External-mode certificates and credentials use their separate path. F1 still requires authenticated FTP password input and Keychain/SQLite coordination under [RFC 0004](../RFC/0004-ftp-credentials-and-recovery.md).
 
+Desktop 库统一协调托管 Server 和 macOS About 的进程创建，覆盖 stdio 管道创建至 exec 返回的窗口。托管等待锁时仍检查取消及共享启动期限。macOS About 以 null stdio 启动 `/usr/bin/open -- URL`，在释放锁后等待结果。控制帧、Ready、TLS 探活和子进程退出等待均在锁外执行。后续新增原生进程入口应使用同一协调入口，以维持当前调用链的 bootstrap FD 隔离。
+
+The Desktop library coordinates managed Server and macOS About process creation from stdio pipe creation through exec completion. Managed lock acquisition checks cancellation and the shared startup deadline. macOS About launches `/usr/bin/open -- URL` with null stdio, then waits after releasing the lock. Control frames, Ready, TLS probing and child-exit waits run outside the lock. Additional native process entry points should use this coordinator to preserve bootstrap FD isolation across these call paths.
+
 - 在全新 macOS 用户环境中，实际构建的 `.app` 启动随包 Server，将粘贴的 HTTP(S) URL 下载到不会覆盖同名文件的默认目标，不需要终端、Server 地址、手动任务 ID 或手动文件路径。退出／重开和 App 升级后，任务状态与已完成文件仍在。<br>
   In a fresh macOS account, the actual built `.app` starts its bundled Server and downloads a pasted HTTP(S) URL to a collision-safe default destination, without a terminal, Server address, manual task ID, or manual file path. Task state and completed bytes survive quit/relaunch and an App upgrade.
 - 测试覆盖随包 Server 可执行文件缺失或不兼容、启动超时、子进程退出及重启上限、重复启动 App、外部固定端口被占用，以及伪装成 `39100` Server 的进程；任何情形下 App 都不能连接或停止无关进程。托管 RPC、HTTP 桥接和事件流拒绝缺失或错误凭据。令牌不得出现在参数、环境变量、日志、设置或前端载荷中。<br>

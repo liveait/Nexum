@@ -77,6 +77,16 @@ The backend route binds this endpoint, generation and complete certificate. Ever
 
 Parallel tests on 2026-11-12 demonstrate cross-child inheritance in Darwin's `pipe → CLOEXEC` creation window. The fixture coordinates all its process creation, within test scope. Normal product mode changes/quit send explicit Shutdown first. About opens fixed project links through `/usr/bin/open`, which can overlap managed startup, with no observed product persistent retention or leakage. Before enabling origin-password capability, F1 must close or verify private bootstrap FD isolation across these concurrent native helpers and EOF after abnormal parent exit. The test lock does not establish product-wide atomic pipe creation.
 
+#### 原生进程创建协调 / Native process launch coordination
+
+本切片基线为 `853432e747b0152f0f67930d8577483355fc8718`。Desktop 库持有唯一的进程创建锁，当前托管 Server 和 macOS About 的三个固定项目 URL 均通过该库创建子进程。锁覆盖 stdio 创建、fork／spawn 和 exec 返回。托管启动在取得锁前后检查已有 enabled 取消标记及共享的 6 秒期限，等待超时或取消时直接结束启动。Start 帧、Ready、TLS 探活、子进程等待及重启退避在锁外执行。
+
+This slice starts from `853432e747b0152f0f67930d8577483355fc8718`. The Desktop library owns one process-launch lock, shared by managed Server creation and the three fixed macOS About project URLs. The lock covers stdio creation, fork/spawn and exec completion. Managed startup checks its existing enabled cancellation flag and shared six-second deadline before and after acquiring the lock, ending startup on timeout/cancellation. Start frames, Ready, TLS probing, child waits and restart backoff run outside the lock.
+
+macOS 的 About 入口使用与当前锁定 opener 相同的 `/usr/bin/open -- URL` 及 null stdio，创建后在锁外等待退出状态。其他平台沿用现有 opener 入口。测试辅助进程也通过同一创建函数，长时间的编译／helper 等待放在锁外。验证包含持锁时取消／超时且未创建子进程、长期 helper 不阻塞托管 Ready、helper 在 exec 后报告额外 FD 的类型、异常终止父进程后 Server 收到 EOF 退出，以及 helper 继续存活时同数据目录可重新启动。
+
+The macOS About entry uses the locked opener's `/usr/bin/open -- URL` behavior and null stdio, waiting for exit status outside the lock. Other platforms retain their existing opener entry. Test helpers use the same spawn function, with compilation/helper waits outside the lock. Verification covers cancellation/deadline expiry under contention without creating a child, managed Ready while a helper remains alive, post-exec helper reports of extra FD types, Server EOF exit after abnormal parent termination, and same-data-directory restart while that helper stays alive.
+
 验收包括旧版本 1 的原始帧兼容、新版本 RPC／HTTP／事件鉴权、错误证书及同端口替代 listener、重启换证／旧路由拒绝、事件重连和模式隔离，并从实际 `.app` 验证托管启动及 HTTP 下载。来源密码的输入、Keychain／SQLite 协调和认证 FTP 能力仍由后续 F1 切片交付。
 
 Acceptance covers raw version-1 compatibility, new-version RPC/HTTP/event authentication, wrong certificates and replacement listeners on the same port, certificate rotation/stale-route rejection, event reconnects and mode isolation, plus managed startup and HTTP download through the actual `.app`. Subsequent F1 slices deliver origin-password input, Keychain/SQLite coordination and authenticated FTP capability.

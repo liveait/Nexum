@@ -1,7 +1,7 @@
 //! Supervises only the bundled process owned by this App. Secrets and process
 //! handles remain here; status is the only value intended for the WebView.
 
-use super::RpcRoute;
+use super::{RpcRoute, process_launch};
 use nexum_protocol::ProtocolVersion;
 use nexum_protocol::managed::{
     MANAGED_TLS_CONTROL_VERSION, ManagedControl, ManagedStartup, ManagedTlsReady,
@@ -430,17 +430,24 @@ fn spawn_owned(
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let token = random_token()?;
     let generation = random_token()?;
-    let child = Command::new(&config.binary)
-        .arg("--managed")
-        .arg("--data-dir")
-        .arg(&config.data_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| {
-            "Cannot launch the bundled local service. Rebuild or reinstall Nexum.".to_owned()
-        })?;
+    let child = process_launch::spawn_managed(
+        Command::new(&config.binary)
+            .arg("--managed")
+            .arg("--data-dir")
+            .arg(&config.data_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+        deadline,
+        enabled,
+    )
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::ConnectionAborted => "Local service startup was cancelled.".to_owned(),
+        std::io::ErrorKind::TimedOut => {
+            "Local service startup timed out. Open Settings and retry.".to_owned()
+        }
+        _ => "Cannot launch the bundled local service. Rebuild or reinstall Nexum.".to_owned(),
+    })?;
     let mut owned = OwnedChild {
         child,
         stdin: None,
@@ -522,14 +529,18 @@ fn spawn_owned(
     Ok((owned, route))
 }
 
+#[cfg(all(test, unix))]
+#[path = "native_launch_tests.rs"]
+mod native_launch_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::OnceLock;
 
-    struct FixtureDirectory(PathBuf);
+    pub(super) struct FixtureDirectory(pub(super) PathBuf);
     impl FixtureDirectory {
-        fn new(mode: &str) -> Self {
+        pub(super) fn new(mode: &str) -> Self {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
                 "nexum-supervisor-{}-{}",
@@ -540,7 +551,7 @@ mod tests {
             std::fs::write(path.join("mode"), mode).unwrap();
             Self(path)
         }
-        fn config(&self) -> Configuration {
+        pub(super) fn config(&self) -> Configuration {
             let binary = fixture_binary();
             Configuration {
                 expected_digest: binary_digest(&binary).unwrap(),
@@ -616,15 +627,20 @@ serde_json = "1"
                     dir.join("Cargo.lock"),
                 )
                 .unwrap();
-                let output =
+                let output = process_launch::spawn(
                     Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
                         .arg("build")
                         .arg("--offline")
                         .arg("--manifest-path")
                         .arg(dir.join("Cargo.toml"))
                         .env("CARGO_TARGET_DIR", dir.join("target"))
-                        .output()
-                        .unwrap();
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped()),
+                )
+                .unwrap()
+                .wait_with_output()
+                .unwrap();
                 assert!(
                     output.status.success(),
                     "fixture compilation failed: {}",
@@ -731,9 +747,9 @@ serde_json = "1"
         let fixture = FixtureDirectory::new("normal");
         let fifo = fixture.0.join("fifo");
         assert!(
-            Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
+            process_launch::spawn(Command::new("mkfifo").arg(&fifo))
+                .unwrap()
+                .wait()
                 .unwrap()
                 .success()
         );
@@ -780,6 +796,19 @@ serde_json = "1"
         assert!(before.elapsed() < SHUTDOWN_TIMEOUT);
         assert_eq!(server.status().state, "stopped");
         assert!(server.route().is_err());
+    }
+
+    #[test]
+    fn cancelled_startup_does_not_create_a_child() {
+        let fixture = FixtureDirectory::new("normal");
+        let config = fixture.config();
+        let before = Instant::now();
+        let error = spawn_owned(&config, &Arc::new(AtomicBool::new(false)))
+            .err()
+            .expect("cancelled startup must fail");
+        assert!(error.contains("cancelled"));
+        assert!(before.elapsed() < Duration::from_millis(750));
+        assert!(!fixture.0.join("pid").exists());
     }
 
     #[test]
@@ -868,10 +897,16 @@ serde_json = "1"
 
     fn assert_fixture_exited(fixture: &FixtureDirectory) {
         let pid = std::fs::read_to_string(fixture.0.join("pid")).unwrap();
-        let result = Command::new("kill")
-            .args(["-0", pid.trim()])
-            .output()
-            .unwrap();
+        let result = process_launch::spawn(
+            Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
         assert!(
             !result.status.success(),
             "owned fixture child was not reaped"
