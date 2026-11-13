@@ -23,6 +23,9 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "support/legacy_sources.rs"]
+mod legacy_sources;
+
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 static SERVER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -1020,22 +1023,24 @@ fn tasks_survive_server_restart_and_active_states_requeue() {
             "task.create",
             Some(json!({
                 "id": id,
-                "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                "source": format!("https://example.invalid/{id}"),
                 "destination": dir.output_path(id).to_string_lossy(),
             })),
         );
     }
-    for id in ["downloading", "paused", "queued"] {
-        server.call("task.queue", Some(json!({"id": id})));
-    }
     server.stop();
 
+    // Simulate records written by a previous version before restarting.
     let mut repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
     for (id, state) in [
+        ("created", TaskState::Created),
+        ("queued", TaskState::Queued),
         ("downloading", TaskState::Downloading),
         ("paused", TaskState::Paused),
     ] {
         let mut task = repository.get(&TaskId::from(id)).unwrap().unwrap();
+        task.source =
+            DownloadSource::new("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567");
         task.state = state;
         repository.update(task).unwrap();
     }
@@ -2156,7 +2161,7 @@ fn task_remove_cleans_stable_http_partial_and_sidecar() {
         "task.create",
         Some(json!({
             "id": "remove-partial",
-            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "source": "https://example.invalid/remove-partial",
             "destination": destination.to_string_lossy(),
         })),
     );
@@ -2257,15 +2262,20 @@ fn http_download_persists_incremental_progress_for_rpc_reads() {
 fn unsupported_sources_stay_queued_and_http_errors_are_retried() {
     let _test_guard = server_test_guard();
     let dir = TestDir::new();
+    // Legacy records enter through recovery, with new creation tested separately.
+    let mut repository = SqliteRepository::open(dir.path().join("nexum.sqlite")).unwrap();
+    repository
+        .insert(
+            DownloadTask::new(
+                "magnet",
+                DownloadSource::new("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"),
+                Destination::new(dir.output_path("magnet").to_str().unwrap()),
+            )
+            .into(),
+        )
+        .unwrap();
+    drop(repository);
     let mut server = ServerProcess::start(dir.path());
-    server.call(
-        "task.create",
-        Some(json!({
-            "id": "magnet",
-            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-            "destination": dir.output_path("magnet").to_string_lossy(),
-        })),
-    );
     server.call("task.queue", Some(json!({"id": "magnet"})));
     assert!(server.request("task.start", None).get("error").is_some());
     assert_eq!(server.task_state("magnet"), "Queued");
@@ -3232,13 +3242,14 @@ fn http_jsonrpc_bridge_supports_cors_and_task_queueing() {
     assert_eq!(status, "HTTP/1.1 204 No Content");
     assert!(headers.contains("Access-Control-Allow-Origin: moz-extension://test-uuid"));
 
+    let fixture = HttpFixture::new(b"browser HTTP response");
     let task = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "task.create",
         "params": {
             "id": "browser-http",
-            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "source": fixture.source,
             "destination": dir.output_path("browser-http").to_string_lossy(),
         }
     });
@@ -3278,7 +3289,14 @@ fn http_jsonrpc_bridge_supports_cors_and_task_queueing() {
     });
     let (_, _, response) = server.http_request("POST", "/jsonrpc", Some(queue));
     assert_eq!(response["result"], true);
-    assert_eq!(server.task_state("browser-http"), "Queued");
+    fixture.wait_until_connected();
+    assert_eq!(server.task_state("browser-http"), "Downloading");
+    fixture.finish();
+    server.wait_for_state("browser-http", "Completed");
+    assert_eq!(
+        fs::read(dir.output_path("browser-http")).unwrap(),
+        b"browser HTTP response"
+    );
 
     let (status, _, response) = server.http_request("POST", "/unknown", Some(json!({})));
     assert_eq!(status, "HTTP/1.1 404 Not Found");
@@ -3297,7 +3315,7 @@ fn http_jsonrpc_bridge_rejects_web_page_origins_before_dispatch() {
         "method": "task.create",
         "params": {
             "id": "web-origin-task",
-            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "source": "https://example.invalid/web-origin-task",
             "destination": dir.output_path("web-origin-task").to_string_lossy(),
         }
     });
@@ -3355,11 +3373,12 @@ fn require_auth_applies_to_event_subscriptions() {
         server.subscribe_events_with_credential(Some(credential.clone()));
     assert_eq!(subscribed["result"]["subscribed"], true);
 
+    let fixture = HttpFixture::new(b"authenticated event response");
     server.call_with_credential(
         "task.create",
         Some(json!({
             "id": "authenticated-event",
-            "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "source": fixture.source,
             "destination": dir.output_path("authenticated-event").to_string_lossy(),
         })),
         credential.clone(),
@@ -3389,6 +3408,8 @@ fn require_auth_applies_to_event_subscriptions() {
         observed.iter().any(|event| event == "task.created"),
         "authenticated event subscription did not receive task.created: {observed:?}"
     );
+    fixture.wait_until_connected();
+    fixture.finish();
     drop(events);
     server.stop();
 }
@@ -3936,7 +3957,7 @@ fn tls_authenticated_event_subscription_receives_task_events() {
             "method": "task.create",
             "params": {
                 "id": "tls-event-task",
-                "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                "source": "https://example.invalid/tls-event-task",
                 "destination": dir.output_path("tls-event-task").to_string_lossy(),
             },
             "credential": {"ApiKey": {"key": "tls-event-secret"}}

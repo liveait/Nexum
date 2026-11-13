@@ -33,6 +33,24 @@ The candidate's Tokio control implementation traces rendered commands. Library l
 
 ## 来源与凭据契约 / Source and credential contract
 
+### 旧来源入口保护切片 / Legacy source boundary slice
+
+本切片基线为 `c1bd721d828349e31b395056085ed41656db69d9`。旧 `task.create` 共用参数预检，检查 id、source、destination 的字符串参数，并按 Resolver 的两端空白与 ASCII 大小写规则只接受 HTTP／HTTPS scheme。Server 在清理完成凭证之前预检，通用 dispatcher 使用同一校验。非 HTTP 请求在任务持久化及事件产生前返回固定错误，非 HTTP 通知在相同边界被拒绝并保持无响应。
+
+This slice starts from `c1bd721d828349e31b395056085ed41656db69d9`. Legacy `task.create` shares parameter validation for string id/source/destination values and permits HTTP/HTTPS schemes using the Resolver's trim and ASCII-case rules. The Server validates before completion-receipt cleanup, and the generic dispatcher uses the same check. Non-HTTP requests return fixed errors before task persistence or event creation. Non-HTTP notifications are rejected at the same boundary and produce no response.
+
+历史非 HTTP 任务的 get／list 通过 TaskView 输出固定来源占位文字，已有错误转换为显式重新导入提示。SQLite 保存原记录，公开状态、进度和目标字段继续提供实际任务信息。真实 Server 回归覆盖拒绝时保留完成 sidecar、通知、TLS RPC／HTTPS、历史记录重启及并行 HTTP 下载。此包先落实凭据接入所需的旧来源边界，后续 F1 接入版本化类型入口及 Keychain／SQLite pending 协调。
+
+TaskView get/list responses use a fixed source placeholder for historical non-HTTP tasks and convert existing errors into explicit reimport guidance. SQLite retains the original records, while public state/progress/destination fields describe the actual tasks. Real Server regressions cover preserved completion sidecars on rejection, notifications, TLS RPC/HTTPS, historical-record restarts and concurrent HTTP downloads. This package establishes the legacy-source boundary for credential ingestion. Subsequent F1 work adds the versioned typed entry and Keychain/SQLite pending coordination.
+
+完整门槛中两项既有 managed 用例通过 Magnet 占位任务验证鉴权／事件和 EOF 保存。按新的入口约定，改用未排队的 HTTP 任务，保留全部鉴权、事件、退出预算、锁释放及重开比对，并增加来源和 Created 状态断言。新增回归单独覆盖旧非 HTTP 请求的拒绝与历史记录保留。
+
+Two existing managed tests used Magnet placeholders to verify authentication/events and EOF persistence. Under the new ingestion contract they use unqueued HTTP tasks, retaining authentication, event, exit-budget, lock-release and relaunch comparisons while adding source/Created-state assertions. New regressions separately cover rejection of legacy non-HTTP requests and retention of historical records.
+
+Persistence 用例按同一约定迁移。历史状态恢复和不支持来源保持排队的用例从私有 SQLite 预置旧 Magnet 记录，经过真实 Server 启动与恢复。鉴权和清理用例使用有效 HTTP 来源，HTTP 桥接的排队检查改为受控响应的 Downloading → Completed 并核对文件字节，CORS 与认证断言继续执行。完整 72 项 persistence 测试通过，原先 6 项旧占位输入失败的日志保留。
+
+Persistence fixtures follow the same contract. Historical-state recovery and inert unsupported-source tests seed legacy Magnet records in private SQLite and exercise real Server startup/recovery. Authentication/cleanup fixtures use valid HTTP sources. The HTTP bridge queue check follows a controlled response through Downloading → Completed and verifies file bytes, retaining CORS/authentication assertions. All 72 persistence tests pass, with logs retained for the six former placeholder-input failures.
+
 新增能力协商及版本化 `task.create_transfer`，与 BT 共用显式类型化入口；旧 `task.create`、TaskView 和 HTTP 调用保留。旧 Server 对新方法返回 method-not-found，客户端不得退回会忽略新参数的旧创建方法。FTP 输入包含 `source_url`、安全模式、`path_mode` 和匿名／凭据输入；URL userinfo 在客户端入口拆出，Server 再次校验，持久来源只保留无 userinfo 的规范 URL。仅接受有效 UTF-8 路径，按 URL 组件解码一次并拒绝 CR、LF、NUL 及编码的分隔符。剥去 URL 语法的首个 `/` 后，默认 `login_relative`，`absolute` 则加回根 `/`；二者分别把 `ftp://host/pub/a.bin` 解释为 `pub/a.bin` 和 `/pub/a.bin`。将 path_mode 绑定恢复记录，拒绝旧 `%2F` 绝对路径缩写并提示使用显式模式，不猜测编码或本地路径。
 
 Add capability negotiation and versioned `task.create_transfer`, sharing an explicit typed entry with BT while retaining legacy `task.create`, TaskView and HTTP calls. Old Servers return method-not-found; clients must not fall back to an old method that ignores new arguments. FTP input includes `source_url`, security, `path_mode` and anonymous/credential input. Split userinfo at client ingestion and validate again on the Server; persist a canonical URL without userinfo. Require valid UTF-8, decode URL components once and reject CR/LF/NUL and encoded separators. Strip the URL's first syntax `/`: default `login_relative` maps `ftp://host/pub/a.bin` to `pub/a.bin`, while `absolute` prepends `/` to produce `/pub/a.bin`. Bind path_mode in recovery and reject legacy `%2F` absolute-path shorthand with guidance to use explicit mode, without guessing encodings or local paths.
