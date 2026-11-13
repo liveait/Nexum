@@ -560,15 +560,23 @@ fn managed_readiness_uses_a_private_ephemeral_authenticated_endpoint() {
     }
     let (mut events, accepted) = server.subscribe(Some(TOKEN));
     assert_eq!(accepted["result"]["subscribed"], true);
-    server.call("task.create", Some(json!({
-        "id": "private-event", "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-        "destination": dir.root.join("private-event").to_string_lossy()
-    })));
+    // Exercise authentication and events with a supported task, without queueing it.
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "private-event", "source": "https://example.invalid/private-event",
+            "destination": dir.root.join("private-event").to_string_lossy()
+        })),
+    );
     let mut line = String::new();
     events.read_line(&mut line).unwrap();
     let event: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(event["method"], "events.event");
     assert_eq!(event["params"]["event"], "task.created");
+    assert_eq!(event["params"]["data"]["task_id"], "private-event");
+    let task = server.call("task.get", Some(json!({"id":"private-event"})));
+    assert_eq!(task["source"], "https://example.invalid/private-event");
+    assert_eq!(task["state"], "Created");
     drop(events);
 
     // The actual process command remains independent of the private pipe secret.
@@ -613,11 +621,17 @@ fn managed_readiness_uses_a_private_ephemeral_authenticated_endpoint() {
 fn managed_eof_releases_the_data_lock_and_keeps_tasks() {
     let dir = TestDir::new();
     let mut server = ManagedChild::start(&dir.data);
-    server.call("task.create", Some(json!({
-        "id": "retained", "source": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-        "destination": dir.root.join("retained").to_string_lossy()
-    })));
+    server.call(
+        "task.create",
+        Some(json!({
+            "id": "retained", "source": "https://example.invalid/retained",
+            "destination": dir.root.join("retained").to_string_lossy()
+        })),
+    );
     let before = server.call("task.list", None);
+    assert_eq!(before.as_array().unwrap().len(), 1);
+    assert_eq!(before[0]["source"], "https://example.invalid/retained");
+    assert_eq!(before[0]["state"], "Created");
     server.eof();
     assert!(server.exit(Duration::from_secs(2)).success());
     server.assert_one_ready_frame();
