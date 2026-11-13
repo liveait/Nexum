@@ -16,7 +16,6 @@ const SERVER_BINARY: &str = "NEXUM_NATIVE_LAUNCH_SERVER_BINARY";
 const SERVER_DIGEST: &str = "NEXUM_NATIVE_LAUNCH_SERVER_DIGEST";
 const REAL_SERVER: &str = "NEXUM_NATIVE_LAUNCH_REAL_SERVER";
 const RESULT_FILE: &str = "NEXUM_NATIVE_LAUNCH_RESULT_FILE";
-const FD_PROBE_LIMIT: i32 = 512;
 
 struct TestProcess(Child);
 impl Drop for TestProcess {
@@ -110,8 +109,13 @@ fn native_helper_fixture() {
         return;
     };
     let mut descriptors = Vec::new();
-    for fd in 3..FD_PROBE_LIMIT {
-        if let Ok(metadata) = fs::metadata(format!("/dev/fd/{fd}")) {
+    for entry in fs::read_dir("/dev/fd").unwrap() {
+        let entry = entry.unwrap();
+        let fd: i32 = entry.file_name().to_str().unwrap().parse().unwrap();
+        if fd < 3 {
+            continue;
+        }
+        if let Ok(metadata) = fs::metadata(entry.path()) {
             let kind = metadata.file_type();
             let kind = if kind.is_fifo() {
                 "pipe"
@@ -125,6 +129,7 @@ fn native_helper_fixture() {
             descriptors.push(json!({"fd":fd,"kind":kind}));
         }
     }
+    descriptors.sort_by_key(|descriptor| descriptor["fd"].as_i64().unwrap());
     publish(
         &root.join("helper-ready.json"),
         &serde_json::to_vec(&json!({"pid":std::process::id(),"descriptors":descriptors})).unwrap(),
@@ -183,12 +188,8 @@ fn native_bootstrap_parent_fixture() {
         owned.stdin.as_ref().unwrap().as_raw_fd(),
         owned._stdout.as_ref().unwrap().as_raw_fd(),
     ];
-    assert!(
-        bootstrap_fds
-            .iter()
-            .all(|fd| *fd >= 3 && *fd < FD_PROBE_LIMIT)
-    );
-    let record = json!({"server_pid":owned.child.id(),"helper":helper_record,"bootstrap_fds":bootstrap_fds,"fd_probe_limit":FD_PROBE_LIMIT});
+    assert!(bootstrap_fds.iter().all(|fd| *fd >= 3));
+    let record = json!({"server_pid":owned.child.id(),"helper":helper_record,"bootstrap_fds":bootstrap_fds,"fd_probe":"all /dev/fd entries"});
     publish(
         &root.join("parent-ready.json"),
         &serde_json::to_vec(&record).unwrap(),
@@ -232,18 +233,13 @@ fn abnormal_parent_exit_closes_bootstrap_while_native_helper_stays_alive() {
     let record = wait_json(&fixture.0.join("parent-ready.json"), Duration::from_secs(9));
     let helper_pid = record["helper"]["pid"].as_u64().unwrap() as u32;
     let server_pid = record["server_pid"].as_u64().unwrap() as u32;
-    for descriptor in record["helper"]["descriptors"].as_array().unwrap() {
-        if record["bootstrap_fds"]
-            .as_array()
-            .unwrap()
-            .contains(&descriptor["fd"])
-        {
-            assert_ne!(
-                descriptor["kind"], "pipe",
-                "native helper inherited a bootstrap descriptor"
-            );
-        }
-    }
+    let descriptors = record["helper"]["descriptors"].as_array().unwrap();
+    assert!(
+        descriptors
+            .iter()
+            .all(|descriptor| descriptor["kind"] != "pipe"),
+        "native helper inherited an extra pipe: {descriptors:?}"
+    );
     ping_helper(&fixture.0, "before-parent-death");
     parent.0.kill().unwrap();
     assert!(!parent.0.wait().unwrap().success());
