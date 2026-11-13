@@ -26,6 +26,38 @@ pub fn open_project_link<E>(
     open(link.url()).map_err(|_| "Could not open project link".to_owned())
 }
 
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn open_project_link_command(
+    link: ProjectLink,
+    command_for_url: impl FnOnce(&str) -> std::process::Command,
+) -> Result<(), String> {
+    use std::io;
+    use std::process::Stdio;
+
+    open_project_link(link, |url| {
+        let mut command = command_for_url(url);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = crate::process_launch::spawn(&mut command)?;
+        if child.wait()?.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other("project link launcher failed"))
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub fn open_native_project_link(link: ProjectLink) -> Result<(), String> {
+    open_project_link_command(link, |url| {
+        let mut command = std::process::Command::new("/usr/bin/open");
+        command.arg("--").arg(url);
+        command
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +106,35 @@ mod tests {
             open_project_link(ProjectLink::Website, |_| Err("private path or OS error")),
             Err("Could not open project link".to_owned())
         );
+    }
+
+    #[test]
+    fn native_command_wait_results_are_reported_without_os_details() {
+        let executable = std::env::current_exe().unwrap();
+        assert!(
+            open_project_link_command(ProjectLink::Website, |_| {
+                let mut command = std::process::Command::new(&executable);
+                command.args([
+                    "--exact",
+                    "about_links::tests::project_ids_open_only_the_three_fixed_urls",
+                ]);
+                command
+            })
+            .is_ok()
+        );
+        for command in [
+            {
+                let mut command = std::process::Command::new(&executable);
+                command.arg("--invalid-test-harness-option");
+                command
+            },
+            std::process::Command::new(""),
+        ] {
+            assert_eq!(
+                open_project_link_command(ProjectLink::Website, |_| command),
+                Err("Could not open project link".to_owned()),
+            );
+        }
     }
 
     #[test]

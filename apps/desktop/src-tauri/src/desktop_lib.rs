@@ -1,11 +1,13 @@
 //! Nexum desktop commands — JSON-RPC client for server communication.
 
+pub mod about_links;
 #[path = "credential_store.rs"]
 mod credential_store;
 mod deadline_socket;
 #[path = "managed_server.rs"]
 pub mod managed_server;
 mod managed_tls;
+pub mod process_launch;
 
 pub use credential_store::{clear_credential, credential_status, save_credential};
 

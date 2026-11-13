@@ -1,17 +1,18 @@
 // Prevents additional console window on Windows in debug mode.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod about_links;
 mod download_metadata;
 mod download_target;
 
 use desktop_lib::RpcRoute;
+use desktop_lib::about_links;
 use desktop_lib::managed_server::ManagedServer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_opener::OpenerExt;
 
 const SETTINGS_FILE: &str = "settings.json";
@@ -532,9 +533,16 @@ async fn suggest_download_filename(source: String) -> Option<String> {
     download_metadata::suggest_download_filename(source).await
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn open_project_link(app: AppHandle, link: about_links::ProjectLink) -> Result<(), String> {
     about_links::open_project_link(link, |url| app.opener().open_url(url, None::<&str>))
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn open_project_link(link: about_links::ProjectLink) -> Result<(), String> {
+    about_links::open_native_project_link(link)
 }
 
 fn main() {
