@@ -1,9 +1,12 @@
 //! Nexum JSON-RPC 2.0 protocol primitives.
 
 pub mod managed;
+pub mod transfer;
 
 #[cfg(test)]
 mod legacy_source_tests;
+#[cfg(test)]
+mod transfer_tests;
 
 pub use nexum_security::{
     AuthenticationError, AuthenticationScheme, Credential, RateLimit, TlsConfig, TlsConfigError,
@@ -45,7 +48,7 @@ pub const ERR_UNAUTHORIZED: i32 = -32001;
 pub const ERR_RATE_LIMITED: i32 = -32002;
 pub const ERR_INTERNAL: i32 = -32603;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 pub struct RpcRequest {
     pub jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,6 +62,16 @@ pub struct RpcRequest {
     /// Optional credential attached to the request.
     #[serde(default)]
     pub credential: Option<Credential>,
+}
+impl fmt::Debug for RpcRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RpcRequest")
+            .field("method", &"[REDACTED]")
+            .field("params", &"[REDACTED]")
+            .field("credential", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 impl RpcRequest {
     pub fn new(id: impl Into<Value>, method: impl Into<String>, params: Option<Value>) -> Self {

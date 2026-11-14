@@ -1,6 +1,7 @@
 //! Nexum TCP server with configuration support.
 
 mod managed;
+mod origin_credentials;
 #[cfg(test)]
 mod recovery_readiness_tests;
 mod request_framing;
@@ -53,6 +54,13 @@ impl SharedStream {
 
     fn tls(stream: StreamOwned<ServerConnection, TcpStream>) -> Self {
         Self(Arc::new(Mutex::new(Transport::Tls(Box::new(stream)))))
+    }
+
+    fn is_tls(&self) -> bool {
+        matches!(
+            *self.0.lock().expect("stream mutex poisoned"),
+            Transport::Tls(_)
+        )
     }
 
     fn complete_handshake(&self) -> io::Result<()> {
@@ -123,6 +131,7 @@ const LOCK_FILE: &str = "nexum.lock";
 
 struct ServerState {
     core: ServerCore,
+    origins: Arc<origin_credentials::Coordinator>,
     // Workers retain the lock along with the database until process termination.
     _data_dir_lock: File,
     data_dir: PathBuf,
@@ -1352,6 +1361,26 @@ fn remove_active_http_task(
         if let Some(active) = locked.active_http.get(id).cloned() {
             Some(active)
         } else {
+            // A second removal may have deleted the legacy task while this
+            // request waited for its worker. Never clean a newly typed task's
+            // HTTP sidecars when its ID has been reused in the meantime.
+            match locked.core.repository.has_origin(id) {
+                Ok(true) => {
+                    return reply_error(
+                        request,
+                        RpcErrorObject::invalid_params(
+                            "task id now belongs to a typed transfer, retry removal",
+                        ),
+                    );
+                }
+                Err(_) => {
+                    return reply_error(
+                        request,
+                        RpcErrorObject::internal_error("origin storage operation failed"),
+                    );
+                }
+                Ok(false) => {}
+            }
             match locked.core.remove_task(id) {
                 Ok(task) => {
                     locked.pending_completions.remove(id);
@@ -1436,10 +1465,59 @@ fn remove_active_http_task(
     }
 }
 
+#[cfg(test)]
 fn dispatch_server_request(
     state: &Arc<Mutex<ServerState>>,
     request: &RpcRequest,
 ) -> Option<RpcResponse> {
+    dispatch_transport_request(state, request, false)
+}
+
+fn dispatch_transport_request(
+    state: &Arc<Mutex<ServerState>>,
+    request: &RpcRequest,
+    tls: bool,
+) -> Option<RpcResponse> {
+    if request.method == "task.create_transfer" {
+        let origins = Arc::clone(&state.lock().expect("server state mutex poisoned").origins);
+        let result = origins.create(
+            state,
+            request.params.as_ref().unwrap_or(&serde_json::Value::Null),
+            tls,
+        );
+        return request.id.clone().map(|id| match result {
+            Ok(value) => RpcResponse::success(Some(id), value),
+            Err(error) => RpcResponse::error(Some(id), error),
+        });
+    }
+    if request.method == "task.get" || request.method == "task.list" {
+        let locked = state.lock().expect("server state mutex poisoned");
+        let result = if request.method == "task.list" {
+            let mut tasks: Vec<_> = locked.core.tasks.list().collect();
+            tasks.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+            Ok(serde_json::Value::Array(
+                tasks
+                    .into_iter()
+                    .map(|task| origin_credentials::project(&locked, task))
+                    .collect(),
+            ))
+        } else {
+            request_task_id(request)
+                .ok_or_else(|| RpcErrorObject::invalid_params("missing id"))
+                .and_then(|id| {
+                    locked
+                        .core
+                        .tasks
+                        .get(&id)
+                        .map(|task| origin_credentials::project(&locked, task))
+                        .ok_or_else(|| RpcErrorObject::task_not_found("task not found"))
+                })
+        };
+        return request.id.clone().map(|id| match result {
+            Ok(value) => RpcResponse::success(Some(id), value),
+            Err(error) => RpcResponse::error(Some(id), error),
+        });
+    }
     if let Err(error) = RpcDispatcher::validate_legacy_task_create(request) {
         return reply_error(request, error);
     }
@@ -1463,9 +1541,9 @@ fn dispatch_server_request(
                 }
             }
             "task.remove" => {
-                if let Some(response) = remove_active_http_task(state, request, &id) {
-                    return Some(response);
-                }
+                let origins =
+                    Arc::clone(&state.lock().expect("server state mutex poisoned").origins);
+                return origins.remove(state, request, &id);
             }
             _ => {}
         }
@@ -1486,6 +1564,46 @@ fn dispatch_server_request(
 
     let response = {
         let mut locked = state.lock().expect("server state mutex poisoned");
+        if matches!(request.method.as_str(), "task.queue" | "task.resume")
+            && let Some(id) = request_task_id(request)
+        {
+            match locked.core.repository.active_origin(&id) {
+                Ok(Some(_)) => {
+                    return reply_error(
+                        request,
+                        RpcErrorObject::invalid_params(
+                            "FTP transfer unavailable. Metadata creation only",
+                        ),
+                    );
+                }
+                Err(_) => {
+                    return reply_error(
+                        request,
+                        RpcErrorObject::internal_error("origin storage operation failed"),
+                    );
+                }
+                Ok(None) => {}
+            }
+        }
+        if request.method == "task.create"
+            && let Some(id) = request_task_id(request)
+        {
+            match locked.core.repository.has_origin(&id) {
+                Ok(true) => {
+                    return reply_error(
+                        request,
+                        RpcErrorObject::invalid_params("task id reserved by transfer"),
+                    );
+                }
+                Err(_) => {
+                    return reply_error(
+                        request,
+                        RpcErrorObject::internal_error("origin storage operation failed"),
+                    );
+                }
+                Ok(false) => {}
+            }
+        }
         if request.method == "task.create"
             && let Some(id) = request_task_id(request)
             && locked.core.tasks.get(&id).is_none()
@@ -1529,9 +1647,11 @@ fn dispatch_inspection_request(
     };
     let params = request.params.as_ref().unwrap_or(&serde_json::Value::Null);
     let result = match request.method.as_str() {
-        "server.capabilities" => Ok(
-            serde_json::json!({"torrent_inspect": torrent_inspection::Inspector::capabilities()}),
-        ),
+        "server.capabilities" => {
+            let mut capabilities = origin_credentials::capabilities();
+            capabilities["torrent_inspect"] = torrent_inspection::Inspector::capabilities();
+            Ok(capabilities)
+        }
         "torrent.inspect.begin" => inspections.begin(principal, params),
         "torrent.inspect.status" | "torrent.inspect.cancel" => {
             let id = params
@@ -1939,11 +2059,8 @@ fn handle_http_connection(
             cors_origin,
         );
     }
-    write_http_jsonrpc_response(
-        &mut stream,
-        dispatch_server_request(&state, &request),
-        cors_origin,
-    )
+    let response = dispatch_transport_request(&state, &request, stream.is_tls());
+    write_http_jsonrpc_response(&mut stream, response, cors_origin)
 }
 
 fn handle_event_subscription(
@@ -2040,7 +2157,7 @@ fn handle_connection(mut stream: SharedStream, state: Arc<Mutex<ServerState>>) -
                 Ok(()) if request.method == "events.subscribe" => {
                     return handle_event_subscription(stream, state, request);
                 }
-                Ok(()) => dispatch_server_request(&state, &request),
+                Ok(()) => dispatch_transport_request(&state, &request, stream.is_tls()),
             },
             Err(error) => {
                 let response =
@@ -2301,6 +2418,12 @@ struct OpenedCore {
     pending_completions: HashSet<TaskId>,
 }
 
+fn is_http_source(source: &str) -> bool {
+    source.trim().split_once(':').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    })
+}
+
 fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Result<OpenedCore> {
     let database_path = data_dir.join(DATABASE_FILE);
     let repository = SqliteRepository::open(&database_path)
@@ -2314,6 +2437,9 @@ fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Resu
     )
     .map_err(|error| io::Error::other(error.to_string()))?;
     core.recover_with_pending_completion(|task| {
+        if !is_http_source(task.source.as_str()) {
+            return false;
+        }
         let context = CompletionContext::new(task.id.clone(), data_dir);
         let Ok(destination) = normalized_destination(task.destination.as_str(), data_dir) else {
             return false;
@@ -2345,6 +2471,9 @@ fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Resu
     let recovered_tasks: Vec<_> = core.tasks.list().cloned().collect();
     let mut pending_completions = HashSet::new();
     for task in recovered_tasks {
+        if !is_http_source(task.source.as_str()) {
+            continue;
+        }
         if task.state == TaskState::Completed {
             continue;
         }
@@ -2386,6 +2515,9 @@ fn open_core(data_dir: &Path, bandwidth_policy: BandwidthPolicyKind) -> io::Resu
     // These tasks already have a durable Completed snapshot. Cleanup compares
     // staging identity and only hashes a small validator sidecar at startup.
     for task in core.tasks.list() {
+        if !is_http_source(task.source.as_str()) {
+            continue;
+        }
         if task.state != TaskState::Completed {
             continue;
         }
@@ -2517,7 +2649,9 @@ fn main() -> io::Result<()> {
     let opened = open_core(&config.data_dir, config.bandwidth_policy)?;
     let inspections = Arc::new(torrent_inspection::Inspector::new()?);
     let _inspection_shutdown = inspections.shutdown_guard();
+    let origins = origin_credentials::Coordinator::production(&opened.core.repository)?;
     let state = Arc::new(Mutex::new(ServerState {
+        origins,
         core: opened.core,
         pending_completions: opened.pending_completions,
         _data_dir_lock: data_dir_lock,
@@ -2544,6 +2678,7 @@ fn main() -> io::Result<()> {
         config.max_connections, config.data_dir, config.rate_limit
     );
 
+    origin_credentials::spawn_recovery(&state);
     dispatch_available_http_tasks(&state);
 
     for connection in listener.incoming() {

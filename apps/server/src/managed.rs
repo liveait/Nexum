@@ -205,7 +205,9 @@ pub(super) fn run_with(
     let opened = open_core(&config.data_dir, config.bandwidth_policy)?;
     let inspections = Arc::new(crate::torrent_inspection::Inspector::new()?);
     let _inspection_shutdown = inspections.shutdown_guard();
+    let origins = crate::origin_credentials::Coordinator::production(&opened.core.repository)?;
     let state = Arc::new(Mutex::new(ServerState {
+        origins,
         core: opened.core,
         pending_completions: opened.pending_completions,
         _data_dir_lock: data_dir_lock,
@@ -249,6 +251,7 @@ pub(super) fn run_with(
         write_managed_frame(ready_output, &ready)?;
     }
     eprintln!("Nexum managed server is ready");
+    crate::origin_credentials::spawn_recovery(&state);
     dispatch_available_http_tasks(&state);
 
     loop {

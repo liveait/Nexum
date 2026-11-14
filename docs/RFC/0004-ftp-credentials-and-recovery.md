@@ -173,6 +173,16 @@ RFC 0002's same-UID directory-entry replacement model applies to the new path. R
 
 ## 实施与验收 / Implementation and acceptance
 
+### F1 来源凭据实现状态 / F1 origin-credential implementation status
+
+2026-11-14 基于 `f8b89c6` 实现 `task.create_transfer` v1、严格 FTP 路径、真实 CLI stdin 和 TCP／HTTP 的实际 TLS 校验。macOS provider 使用独立、非同步的 Keychain 项、原子 add-only 写入及非交互查询／删除。schema 3 保留随机数据实例、版本化来源、pending 与精确 cleanup tombstone，覆盖任务激活、失败补偿、删除和重启清理。provider 在 Core 锁外运行，恢复清理在 Ready 后启动。同 ID 重试比较输入及 provider 中的秘密，冲突拒绝改密。
+
+On 2026-11-14, implement `task.create_transfer` v1, strict FTP paths, actual CLI stdin and actual TCP/HTTP TLS assurance from `f8b89c6`. The macOS provider uses separate nonsynchronized Keychain items, atomic add-only writes and noninteractive queries/deletion. Schema 3 retains random data-instance identity, versioned origins, pending and exact cleanup tombstones for activation, compensation, removal and restart cleanup. Providers run outside Core and recovery starts after Ready. Same-ID retries compare input and provider secrets, rejecting changed passwords.
+
+本包声明元数据创建、macOS 持久凭据和 `transfer:false`。`required_explicit_tls` 在副作用前拒绝，FTP 排队／恢复也显式返回不可用。当前只创建 revision 1，秘密更新及在途 revision 退休留给传输实现。确定性测试覆盖真实 SQLite、真实匿名 Server／CLI 入口、并发重试、锁定／缺失／拒绝、激活补偿、删除回滚及 provider 等待时的 HTTP 控制。固定 SHA 的独立审查、实际 Keychain／随包 Server／CLI、原生候选和最新 CI 由本包交付记录补充。M5 及 F2／F3／F4 保持开放。
+
+This package advertises metadata creation, macOS durable credentials and `transfer:false`. Reject `required_explicit_tls` before side effects and explicitly return unavailable for FTP queue/resume. Create revision 1, with secret updates and in-flight retirement accompanying transfers. Deterministic tests cover real SQLite, real anonymous Server/CLI ingress, concurrent retries, locked/missing/denied providers, activation compensation, removal rollback and HTTP controls during provider waits. Delivery records add fixed-SHA independent review, actual Keychain/bundled Server/CLI, native candidates and latest CI. M5 and F2/F3/F4 remain open.
+
 2026-11-07 的隔离编译试验通过：在 macOS arm64、Rust 1.98.1 上对上述固定 FTP／BT 特性组合生成独立锁文件，再执行 `cargo check --locked` 成功；七个关键发布包源码与固定上游源码逐字节一致。产品 Cargo 文件未改变，未连接 FTP 或 peer；这不验证 MSRV、传递许可证、密码脱敏、运行行为或原生打包。
 
 The 2026-11-07 isolated compile probe passes on macOS arm64/Rust 1.98.1: generate a separate lockfile for the pinned FTP/BT feature combination, then run `cargo check --locked`. Seven critical published source files exactly match pinned upstream sources. Product Cargo files are unchanged and no FTP/peer connection occurred. MSRV, transitive licenses, redaction, runtime behavior and native packaging remain unverified.

@@ -1,5 +1,7 @@
 //! Persistence boundaries for Nexum task state.
 
+pub mod origin;
+
 use nexum_domain::{Destination, DownloadSource, Progress, TaskId};
 use nexum_task::{DownloadTask, TaskState};
 use std::{collections::HashMap, fmt};
@@ -9,6 +11,7 @@ pub enum StorageError {
     NotFound(TaskId),
     AlreadyExists(TaskId),
     Other(String),
+    Busy,
 }
 
 impl fmt::Display for StorageError {
@@ -16,6 +19,7 @@ impl fmt::Display for StorageError {
         match self {
             Self::NotFound(id) => write!(f, "task not found: {id}"),
             Self::AlreadyExists(id) => write!(f, "task already exists: {id}"),
+            Self::Busy => f.write_str("database busy, retry request"),
             Self::Other(message) => f.write_str(message),
         }
     }
@@ -219,7 +223,7 @@ impl SqliteRepository {
             })
             .map_err(|e| StorageError::Other(e.to_string()))?;
 
-        if version > 2 {
+        if version > 3 {
             return Err(StorageError::Other(format!(
                 "unsupported schema version: {version}"
             )));
@@ -266,6 +270,33 @@ impl SqliteRepository {
                 .map_err(|e| StorageError::Other(e.to_string()))?;
         }
 
+        self.migrate_origins()
+    }
+
+    fn insert_task(
+        connection: &rusqlite::Connection,
+        task: &StoredTask,
+    ) -> Result<(), StorageError> {
+        connection.execute(
+            "INSERT INTO tasks
+             (id, source, destination, state, downloaded_bytes, total_bytes, speed_bytes_per_second, eta_seconds, last_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                task.id.as_str(),
+                task.source.as_str(),
+                task.destination.as_str(),
+                Self::state_to_str(task.state),
+                task.progress.downloaded_bytes,
+                task.progress.total_bytes,
+                task.progress.speed_bytes_per_second,
+                task.progress.eta_seconds,
+                task.last_error.as_deref(),
+            ],
+        ).map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(ref error, _) if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+                StorageError::AlreadyExists(task.id.clone()),
+            other => StorageError::Other(other.to_string()),
+        })?;
         Ok(())
     }
 
@@ -320,27 +351,22 @@ impl SqliteRepository {
 
 impl TaskRepository for SqliteRepository {
     fn insert(&mut self, task: StoredTask) -> Result<(), StorageError> {
-        self.connection.execute(
-            "INSERT INTO tasks
-             (id, source, destination, state, downloaded_bytes, total_bytes, speed_bytes_per_second, eta_seconds, last_error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![
-                task.id.as_str(),
-                task.source.as_str(),
-                task.destination.as_str(),
-                Self::state_to_str(task.state),
-                task.progress.downloaded_bytes,
-                task.progress.total_bytes,
-                task.progress.speed_bytes_per_second,
-                task.progress.eta_seconds,
-                task.last_error,
-            ],
-        ).map_err(|e| match e {
-            rusqlite::Error::SqliteFailure(ref error, _) if error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
-                StorageError::AlreadyExists(task.id.clone()),
-            other => StorageError::Other(other.to_string()),
-        })?;
-        Ok(())
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(origin::database_error)?;
+        let reserved: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_origins WHERE task_id=?1)",
+                [task.id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(origin::database_error)?;
+        if reserved {
+            return Err(StorageError::AlreadyExists(task.id));
+        }
+        Self::insert_task(&transaction, &task)?;
+        transaction.commit().map_err(origin::database_error)
     }
 
     fn get(&self, id: &TaskId) -> Result<Option<StoredTask>, StorageError> {
@@ -400,16 +426,7 @@ impl TaskRepository for SqliteRepository {
     }
 
     fn remove(&mut self, id: &TaskId) -> Result<Option<StoredTask>, StorageError> {
-        let existing = self.get(id)?;
-        if existing.is_some() {
-            self.connection
-                .execute(
-                    "DELETE FROM tasks WHERE id = ?1",
-                    rusqlite::params![id.as_str()],
-                )
-                .map_err(|e| StorageError::Other(e.to_string()))?;
-        }
-        Ok(existing)
+        self.remove_with_origin(id)
     }
 }
 
@@ -460,7 +477,7 @@ mod sqlite_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -505,7 +522,7 @@ mod sqlite_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         drop(repository);
         let _ = std::fs::remove_file(path);
     }

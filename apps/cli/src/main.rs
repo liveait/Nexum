@@ -330,6 +330,15 @@ impl JsonRpcClient {
         params: Option<Value>,
         credential: Option<Credential>,
     ) -> Result<Value, String> {
+        if method == "task.create_transfer" {
+            let input = nexum_protocol::transfer::CreateTransferRequest::parse(
+                params.as_ref().unwrap_or(&Value::Null),
+            )
+            .map_err(|_| "invalid transfer v1 input".to_owned())?;
+            if input.secret.is_some() && !matches!(self.stream, ClientTransport::Tls(_)) {
+                return Err("password credentials require verified TLS".into());
+            }
+        }
         if method == "torrent.inspect.begin" && !self.credential_allowed {
             return Err("metainfo requires a loopback server or verified TLS".into());
         }
@@ -386,6 +395,7 @@ fn usage() {
     eprintln!("  nexum [--server ADDR] task list");
     eprintln!("  nexum [--server ADDR] task get ID");
     eprintln!("  nexum [--server ADDR] task create ID SOURCE DESTINATION");
+    eprintln!("  nexum [--server ADDR] task create-transfer < request.json");
     eprintln!("  nexum [--server ADDR] task queue ID");
     eprintln!("  nexum [--server ADDR] task start");
     eprintln!("  nexum [--server ADDR] task pause ID");
@@ -457,6 +467,28 @@ fn main() {
         ("task", "list") if args.len() == 2 => ("task.list", None),
         ("task", "get") if args.len() == 3 => {
             ("task.get", Some(serde_json::json!({"id": args[2]})))
+        }
+        ("task", "create-transfer") if args.len() == 2 => {
+            let input = transfer_stdin(&mut std::io::stdin().lock()).and_then(|value| {
+                let parsed = nexum_protocol::transfer::CreateTransferRequest::parse(&value)
+                    .map_err(|_| "invalid transfer v1 input".to_owned())?;
+                if parsed.secret.is_some()
+                    && !matches!(
+                        parse_transport_address(&address)?,
+                        TransportAddress::Tls { .. }
+                    )
+                {
+                    return Err("password credentials require verified TLS".into());
+                }
+                Ok(value)
+            });
+            match input {
+                Ok(value) => ("task.create_transfer", Some(value)),
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            }
         }
         ("task", "create") if args.len() == 5 => (
             "task.create",
@@ -568,6 +600,17 @@ fn main() {
         }
     }
 
+    if method == "task.create_transfer" {
+        let supported = client
+            .call_with_credential(1, "server.capabilities", None, credential.clone())
+            .and_then(|caps| {
+                transfer_capabilities(&caps, params.as_ref().expect("transfer input exists"))
+            });
+        if let Err(error) = supported {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
     if method.starts_with("torrent.inspect.") {
         let caps =
             match client.call_with_credential(1, "server.capabilities", None, credential.clone()) {
@@ -605,6 +648,37 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn transfer_stdin(reader: &mut impl Read) -> Result<Value, String> {
+    const LIMIT: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    reader
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "cannot read transfer input".to_owned())?;
+    if bytes.len() as u64 > LIMIT {
+        return Err("transfer input exceeds 1 MiB".into());
+    }
+    let value = serde_json::from_slice(&bytes).map_err(|_| "invalid transfer JSON".to_owned())?;
+    nexum_protocol::transfer::CreateTransferRequest::normalize_client(&value)
+        .map_err(|_| "invalid transfer v1 input".into())
+}
+
+fn transfer_capabilities(caps: &Value, input: &Value) -> Result<(), String> {
+    let supported = caps["create_transfer"]["versions"]
+        .as_array()
+        .is_some_and(|versions| versions.contains(&serde_json::json!(1)))
+        && caps["ftp"]["metadata_create"] == true;
+    if !supported {
+        return Err("server does not support FTP metadata creation v1".into());
+    }
+    if input["source"]["authentication"]["kind"] == "password"
+        && caps["ftp"]["durable_credentials"] != true
+    {
+        return Err("server does not support durable origin credentials".into());
+    }
+    Ok(())
 }
 
 fn torrent_params(path: &str) -> Result<Value, String> {

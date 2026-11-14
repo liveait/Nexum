@@ -419,6 +419,7 @@ fn a_receipt_removed_while_queued_never_turns_recovery_into_a_download() {
 
 fn state_for(fixture: &RecoveryFixture, opened: OpenedCore) -> ServerState {
     ServerState {
+        origins: origin_credentials::Coordinator::production(&opened.core.repository).unwrap(),
         core: opened.core,
         pending_completions: opened.pending_completions,
         _data_dir_lock: lock_data_dir(&fixture.data).unwrap(),

@@ -1,69 +1,72 @@
 # FTP 来源凭据实施计划 / FTP Origin Credentials Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> 代理按步骤执行本计划，使用 `superpowers:executing-plans` 或 `superpowers:subagent-driven-development`，由控制者安排固定 SHA 的独立审查。
+>
+> Agentic workers execute this plan with `superpowers:executing-plans` or `superpowers:subagent-driven-development`. The controller arranges independent review at a fixed SHA.
 
-**目标 / Goal** — 提供可由真实 CLI 调用的版本化 FTP 任务创建入口，完成 Server 所有的 Keychain／SQLite 创建、幂等、重启和删除协调。 / Provide versioned FTP task creation through the real CLI with Server-owned Keychain/SQLite creation, idempotency, restart and removal coordination.
+**目标 / Goal** — 为真实 CLI 提供版本化 FTP 元数据创建，完成 Server 所有的 Keychain／SQLite 创建、幂等、重启清理和删除协调。 / Provide versioned FTP metadata creation through the real CLI with Server-owned Keychain/SQLite creation, idempotency, restart cleanup and removal coordination.
 
-**架构 / Architecture** — 使用 RFC 0004 的 pending → provider 写入 → 任务及关联原子激活流程。数据库仅保存无秘密的版本化来源和引用。现有 HTTP 创建与调度继续使用既有入口。 / Use RFC 0004's pending → provider write → atomic task/association activation flow. Persist only versioned secret-free source/reference metadata. Existing HTTP creation and scheduling retain their entry points.
+**架构 / Architecture** — 持久 pending → provider 原子新增 → 任务及关联原子激活。SQLite 保存无秘密来源和引用。 / Durable pending → atomic provider add → atomic task/association activation. SQLite stores secret-free sources and references.
 
-**技术 / Tech Stack** — Rust 2024、现有 serde／serde_json、rusqlite、rustls、getrandom；macOS security-framework。 / Rust 2024, existing serde/serde_json, rusqlite, rustls, getrandom, and macOS security-framework.
+**技术 / Tech Stack** — Rust 2024、serde／serde_json、rusqlite、rustls、getrandom、macOS Security.framework 和 Core Foundation。 / Rust 2024, serde/serde_json, rusqlite, rustls, getrandom, macOS Security.framework and Core Foundation.
 
 **方案 / Spec** — [RFC 0004](../../RFC/0004-ftp-credentials-and-recovery.md)。基线 / Baseline `f8b89c6cee11ddadf4abecffb8745cfbee74052b`。
 
-## 全局约束 / Global Constraints
+## 全局约束 / Global constraints
 
-- 本包交付来源凭据协调，FTP 数据传输继续等待 F2／F3 的依赖和文件安全验收。能力协商分别描述创建、持久凭据和实际传输。 / Deliver origin-credential coordination here. FTP data transfer awaits F2/F3 dependency and file-safety acceptance. Advertise creation, persistent credentials and transfer separately.
-- 旧 `task.create`、TaskView 字段、HTTP 完成凭证和下载行为保持兼容。历史非 HTTP 来源继续脱敏，只有可信版本化关联可投影规范来源。 / Preserve legacy `task.create`, TaskView fields, HTTP receipts and download behavior. Historical non-HTTP sources stay redacted. Only validated versioned associations may project canonical sources.
-- 密码只通过验证 Server 身份的 TLS 输入，不提供密码命令行参数，不写入 SQLite、任务、事件、日志、Debug 或错误。 / Accept passwords only through identity-verified TLS. Provide no password arguments. Exclude secrets from SQLite, tasks, events, logs, Debug and errors.
-- Keychain 服务独立于 Desktop RPC 服务，account 绑定随机数据实例、origin、随机凭据 ID 和 revision；provider 必须避免静默覆盖现有秘密。 / Isolate the Keychain service from Desktop RPC credentials. Bind accounts to random data instance, origin, random credential ID and revision. Prevent implicit secret replacement.
-- provider 操作在 Core 锁外执行；恢复清理在 Ready 后进行，不让 Keychain 等待占用托管六秒预算。 / Run provider operations outside the Core lock and recovery cleanup after Ready, preserving the managed six-second budget.
-- 本包只创建 revision 1；已有任务的秘密修改接口与在途 revision 退休随实际传输阶段交付。冲突重试拒绝改密。 / This package creates revision 1. Secret updates and retirement of in-flight revisions accompany the transfer stage. Conflicting retries reject password changes.
-- 保留完整 Rust 门槛和真实 Server／CLI 消费者验证，独立审查固定 SHA，检查最新 base/head 与合并后 main CI。 / Preserve full Rust gates and real Server/CLI consumer checks, independent fixed-SHA review, latest base/head CI and post-merge main CI.
+- 本包实现来源凭据协调。能力分别报告元数据创建、持久凭据和传输。F2／F3 验收后才启用 FTP 传输。 / Implement origin-credential coordination. Advertise metadata creation, durable credentials and transfers separately. Enable FTP transfers after F2/F3 acceptance.
+- 兼容旧 `task.create` 的 HTTP(S)、TaskView 字段和 HTTP 下载。历史非 HTTP 来源保持脱敏，版本化关联须与任务和数据实例匹配才能公开规范来源。 / Preserve legacy HTTP(S) creation, TaskView fields and HTTP downloads. Historical non-HTTP sources stay redacted. Canonical projection requires an association matching the task and data instance.
+- 密码只经验证 Server 身份的 TLS 提交，通过 stdin 输入。SQLite、任务、事件、Debug、错误和日志保持无秘密。 / Submit passwords through identity-verified TLS using stdin. Keep SQLite, tasks, events, Debug, errors and logs secret-free.
+- 独立 Keychain 服务使用随机数据实例、origin、随机 credential ID 和 revision 组成精确 account。provider 原子新增禁止覆盖。 / Use a separate Keychain service with exact accounts binding random data instance, origin, random credential ID and revision. Atomic provider adds prevent replacement.
+- provider 调用在 Core 锁外，恢复清理在 Ready 后。保留六秒托管启动预算和 HTTP 控制响应性。 / Call providers outside Core and recover cleanup after Ready. Preserve the six-second managed readiness budget and responsive HTTP controls.
+- 只创建 revision 1。修改秘密和在途 revision 退休随后续传输实现。冲突重试拒绝改密。 / Create revision 1. Secret updates and in-flight revision retirement accompany later transfers. Conflicting retries reject secret changes.
+- 运行完整 Rust 门槛及真实消费者，固定 SHA 审查，核对最新 base/head 和实际 main push CI。 / Run complete Rust gates and real consumers, review a fixed SHA and verify latest base/head plus actual main push CI.
 
-## 审查重点 / Review Focus
+## 审查重点 / Review focus
 
-- pending task ID 与旧 HTTP 创建、并发重复输入发生冲突时，只能有一个归属。 / Pending IDs racing legacy HTTP creation or concurrent retries have one owner.
-- 在 pending、Keychain 写入、DB 激活、任务删除和 provider 清理之间中断，重启后可恢复且保留失败证据。 / Interruptions between pending, Keychain write, DB activation, task removal and provider cleanup recover with failure evidence retained.
-- 恶意编码、非法 UTF-8、userinfo、CR/LF/NUL 和错误版本不能污染存储或反射秘密。 / Hostile encoding, invalid UTF-8, userinfo, controls and unknown versions cannot pollute storage or reflect secrets.
-- 同 ID 相同请求幂等，不同来源／目标／认证或密码冲突不修改已有任务／秘密。 / Identical ID/request retries are idempotent. Conflicting source, destination, authentication or password cannot mutate existing tasks/secrets.
-- Keychain 锁定、拒绝访问、缺失、补偿失败不阻塞 HTTP 或 Ready，也不清理其他实例／任务项目。 / Locked, denied, missing and failed-compensation credentials preserve HTTP/Ready responsiveness and other instances/tasks.
+- pending ID、旧 HTTP 创建和并发重试只能有一个归属。 / Pending IDs, legacy HTTP creation and concurrent retries have one owner.
+- 覆盖 pending、provider 写入、激活、删除和清理之间的中断，保留失败证据。 / Cover interruptions between pending, provider writes, activation, deletion and cleanup, retaining failure evidence.
+- 非法编码、UTF-8、userinfo、控制字符、错误版本和未知字段返回固定错误。 / Return static errors for invalid encoding, UTF-8, userinfo, controls, versions and unknown fields.
+- 同 ID 相同请求幂等，来源、目标、认证或密码变化均冲突。 / Identical ID/input retries are idempotent. Changed source, destination, authentication or password conflicts.
+- provider 缺失、锁定、拒绝或补偿失败保持 HTTP／Ready 响应及实例隔离。 / Missing, locked, denied or failed-compensation credentials preserve HTTP/Ready responsiveness and instance isolation.
 
-### Task 1: 版本化创建、持久凭据与真实消费者 / Versioned creation, durable credentials and real consumers
+### Task 1 — 版本化创建、持久凭据与真实消费者 / Versioned creation, durable credentials and real consumers
 
 **文件 / Files**
 
-- Create `crates/protocol/src/transfer.rs` for the typed request, secret-redacted input and strict FTP parser.
-- Create `crates/storage/src/origin.rs` for versioned secret-free associations, pending reservations and cleanup tombstones.
-- Create `apps/server/src/origin_credentials.rs` for the provider boundary, macOS Keychain implementation and coordination.
-- Modify `crates/protocol/src/lib.rs`, `crates/storage/src/lib.rs`, `apps/server/src/main.rs`, `apps/cli/src/main.rs` and their Cargo files only as required by wiring.
-- Add focused unit/process tests next to these modules and `apps/server/tests/` using private directories. Update RFC 0004, Development Guide and Development Plan with actual scope and acceptance status.
+- `crates/protocol/src/transfer.rs` 实现严格类型输入及客户端规范化，`transfer_tests.rs` 验证路径和脱敏。 / Implement strict typed input and client normalization in `transfer.rs`, with path/redaction tests in `transfer_tests.rs`.
+- `crates/storage/src/origin.rs` 实现独立版本化关联、pending、原子激活及 cleanup tombstone。 / Implement independent versioned associations, pending, atomic activation and cleanup tombstones in `origin.rs`.
+- `apps/server/src/origin_credentials.rs` 协调创建／恢复／删除，`origin_keychain.rs` 实现生产 provider，`origin_credentials_tests.rs` 验证受控失败。 / Coordinate creation/recovery/removal in `origin_credentials.rs`, implement production storage in `origin_keychain.rs` and test controlled failures in `origin_credentials_tests.rs`.
+- 接通 Server 两种入口与托管 Ready、CLI stdin，更新相关 Cargo 文件和双语文档。 / Wire both Server ingresses, managed Ready and CLI stdin, updating applicable Cargo files and bilingual documentation.
+- 使用私有临时目录运行 storage、Server 进程和实际 CLI 测试。 / Use private temporary directories for storage, Server process and actual CLI tests.
 
 **接口 / Interfaces**
 
-- New method `task.create_transfer` takes `{version:1,id,destination,source:{kind:"ftp",source_url,security,path_mode,authentication}}`. `security` is `plain` or `required_explicit_tls`; `path_mode` defaults to `login_relative`, alternatively `absolute`; authentication is `{kind:"anonymous"}` or `{kind:"password",username,password}`. Reject unknown versions/fields and unsafe inputs with static errors. No implicit FTP dispatch follows creation.
-- `CreateTransferRequest::parse(&serde_json::Value) -> Result<Self, RpcErrorObject>` validates Server input. A separate client normalization entry splits URL userinfo before constructing the wire value. `Debug` redacts typed secrets and generic `RpcRequest` params that may hold them.
-- Storage exposes `OriginRecord`, exact credential references and pending/active/tombstone APIs on `SqliteRepository`. Migrations preserve old rows. Reserve pending IDs transactionally, atomically activate with task insert and atomically delete with tombstones. Legacy inserts honor reservations. Existing generic repository implementations retain compatibility through default methods where required.
-- Provider trait has add-only `put`, exact-reference `get` and idempotent exact-reference `remove`, returning structured missing/locked/denied/unavailable errors. Production uses macOS Keychain; test providers remain test-only. Account scope includes data-instance ID, origin, credential ID, revision. Secret equality checks support retry conflict detection without persisting secret fingerprints.
-- Server passes actual TLS transport assurance from line-RPC and HTTP ingress. Coordination validates transport before side effects, serializes origin mutations outside Core lock, persists pending, writes provider, atomically commits task+origin, then updates memory from a prepared candidate. Deletion uses the normal task-removal path with transactional tombstones and post-commit cleanup. Cleanup retries only exact persisted refs and handles stale startup snapshots safely.
-- `nexum-cli [--server ADDR] task create-transfer` reads a bounded JSON request from stdin, normalizes/validates before sending, checks capabilities and TLS assurance before credential submission, and invokes only the typed method. No fallback to `task.create`. Anonymous input may use plaintext. Existing command syntax remains supported.
-- Capabilities explicitly advertise request version, FTP metadata creation, macOS durable credential support and disabled FTP transfer. Get/list preserve TaskView shape and project canonical FTP source only after verifying the stored association matches the task.
+- `task.create_transfer` 接收 `{version:1,id,destination,source:{kind:"ftp",source_url,security,path_mode,authentication}}`。`path_mode` 默认 `login_relative`，支持 `absolute`。认证为 `{kind:"anonymous"}` 或 `{kind:"password",username,password}`。识别并在副作用前拒绝尚未实现的 `required_explicit_tls`，当前接受 `plain`。 / `task.create_transfer` accepts the stated version-1 shape. `path_mode` defaults to `login_relative` and supports `absolute`. Authentication uses the stated anonymous/password shapes. Recognize and reject unavailable `required_explicit_tls` before side effects. Accept `plain`.
+- `CreateTransferRequest::parse` 校验 Server 输入，`normalize_client` 先拆分 URL userinfo。typed secret 和通用 `RpcRequest` 的 Debug 均脱敏。 / Validate Server input with `CreateTransferRequest::parse` and split client URL userinfo with `normalize_client`. Redact typed secrets and generic `RpcRequest` Debug.
+- `SqliteRepository` 以 schema 3 保存 `OriginRecord`、精确凭据引用、随机实例及 cleanup。pending 与旧插入共用事务互斥。激活与任务新增、删除与 tombstone 分别原子提交。 / Schema 3 stores `OriginRecord`, exact references, random instance identity and cleanup in `SqliteRepository`. Fence pending and legacy inserts transactionally. Atomically activate with task insertion and delete with tombstone creation.
+- provider 的 `put` 为失败时不改变已有项目的原子新增，`get` 和幂等 `remove` 只访问精确引用。macOS 使用非交互 Keychain，其他平台拒绝持久认证输入。 / Provider `put` atomically adds without modifying existing items on failure. `get` and idempotent `remove` access exact references. Use noninteractive Keychain on macOS and reject durable authenticated input on other platforms.
+- TCP／HTTP 从实际 Transport 传入 TLS 状态。创建在 origin 互斥下持久 pending、锁外调用 provider、原子激活，再更新已准备的内存候选。删除保留 normal Core 删除语义，并在提交后清理。 / Derive TLS from actual TCP/HTTP Transport. Under the origin mutex, persist pending, call the provider outside Core, atomically activate and install the prepared memory candidate. Preserve normal Core removal and clean the provider after commit.
+- abandoned pending 原子转为持久 tombstone 后清理。失败保留精确清理证据，启动恢复在获取互斥后读取当前记录，防止过期快照删除已激活项目。 / Atomically turn abandoned pending into durable tombstones before cleanup. Retain exact evidence on failure and read current records after acquiring the recovery mutex, preventing stale snapshots from deleting activated items.
+- `nexum-cli [--server ADDR] task create-transfer` 从 stdin 有界读取，先校验输入，再查询 capabilities，仅调用类型化方法。来源密码必须使用通过身份校验的 TLS。 / Read bounded stdin with the stated CLI command, validate input, query capabilities and invoke the typed method. Origin passwords require identity-verified TLS.
+- capabilities 分别报告 v1、FTP 元数据创建、macOS 持久凭据、`transfer:false`。get/list 保持 TaskView 形状。FTP `task.queue`／`task.resume` 显式拒绝，任务保持 Created。 / Capabilities report v1, FTP metadata creation, macOS durable credentials and `transfer:false`. Preserve TaskView shape. Explicitly reject FTP `task.queue`/`task.resume`, keeping metadata tasks Created.
 
-- [ ] **Step 1 — 编写并运行失败用例 / Write and observe failing cases**
+- [x] **Step 1 — 失败用例与证据 / Failing cases and evidence**
 
-  Cover typed input parsing and secret sentinels, atomic DB boundaries and old-schema migration, idempotent/conflicting retry, legacy/pending ID collision, both ingress transport checks, cleanup after crash/delete/compensation failure and responsiveness while provider waits. Record each observed baseline failure before implementing its behavior. Use literal expected sources/path semantics and real SQLite. Use a precise provider double only for controlled failures.
+  记录严格输入、真实入口、实际 CLI、路径绕过、重复 provider 新增及 HTTP 删除等待的失败，再验证修复。使用真实 SQLite 和精确故障 double。初次测试 helper 的编译错误单独记录。 / Record strict input, real ingress, actual CLI, path bypass, duplicate provider add and blocked HTTP removal failures before verifying fixes. Use real SQLite and precise fault doubles. Record initial helper compilation mistakes separately.
 
-- [ ] **Step 2 — 实现来源模型及 SQLite 协调 / Implement source model and SQLite coordination**
+- [x] **Step 2 — 来源模型和 SQLite / Source model and SQLite**
 
-  Implement the interfaces above. Use schema-versioned independent origin records, a durable random instance identity and exact cleanup intents surviving task deletion. Keep old tasks and public TaskView fields compatible. Verify focused protocol/storage cases pass.
+  实现实例隔离、pending 归属、激活／删除原子性、重开和失败回滚。schema 断言随 v3 更新，保留旧行和错误字段迁移覆盖。 / Implement instance isolation, pending ownership, atomic activation/removal, reopen and failure rollback. Update schema assertions for v3 while retaining old-row/error migration coverage.
 
-- [ ] **Step 3 — 实现 provider、Server 接线和 CLI / Implement provider, Server wiring and CLI**
+- [x] **Step 3 — Provider、Server 和 CLI / Provider, Server and CLI**
 
-  Add noninteractive macOS Keychain operations with safe structured errors. Keep provider calls outside Core lock and Ready. Recover abandoned pending records by cleaning their exact provider item before removing pending evidence. Retain failed cleanup records for retry. Verify actual TLS and plaintext ingress, notification semantics, concurrent HTTP operations and typed get/list after restart.
+  实现非交互 add-only Keychain、锁外 provider、Ready 后恢复、两种实际 TLS 入口、可信投影、无 HTTP sidecar 的 typed 删除，以及 stdin 和 capabilities。 / Implement noninteractive add-only Keychain, provider calls outside Core, post-Ready recovery, both actual TLS ingresses, trusted projection, typed removal independent of HTTP sidecars, stdin and capabilities.
 
-- [ ] **Step 4 — 运行完整门槛与实际消费者 / Run full gates and real consumers**
+- [ ] **Step 4 — 完整门槛与真实消费者 / Complete gates and real consumers**
 
-  Run `cargo fmt --all -- --check`, `cargo check --locked --workspace --all-targets`, `cargo test --locked --workspace -- --test-threads=1`, `cargo test --locked -p nexum-server --test managed`, `cargo clippy --locked --workspace --all-targets -- -D warnings`. Run actual Server plus actual CLI with a private TLS trust root and synthetic credentials, confirming Keychain/SQLite separation, retry, restart and removal. Scan stdout/stderr/DB/WAL/SHM for the sentinel. Record native/provider and other-platform gaps accurately.
+  执行 Development Guide 的五项 Rust 门槛。控制者对固定提交运行实际 CLI／随包 Server／Keychain、私有 TLS 根、重启、删除、实例隔离与秘密扫描，并执行原生候选验收。平台缺口按实际结果记录。 / Run the Development Guide's five Rust gates. At the fixed commit, the controller exercises actual CLI/bundled Server/Keychain with private TLS trust, restart, removal, instance isolation and secret scanning, plus native candidate acceptance. Record actual platform gaps.
 
-- [ ] **Step 5 — 自审、文档和提交 / Self-review, document and commit**
+- [x] **Step 5 — 自审、文档和提交 / Self-review, documentation and commit**
 
-  Read all touched call paths. Record observed commands, failures and acceptance in the external task report. Update bilingual durable docs with implemented/verified boundaries, retaining FTP/BT first-release requirements and unverified FTP transfer gates. Commit the cohesive implementation. Independent reviewers and controller then verify the fixed SHA, latest CI and authorized delivery.
+  自审调用链、更新双语文档并提交本包。控制者随后安排独立审查、最新 CI 和已授权交付。实现报告位于 `.superpowers/sdd/2026-11-13-ftp-origin-credentials/task-1-report.md`。 / Review call paths, update bilingual docs and commit this package. The controller then arranges independent review, latest CI and authorized delivery. The implementation report is at the stated path.

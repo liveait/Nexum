@@ -25,6 +25,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[path = "support/legacy_sources.rs"]
 mod legacy_sources;
+#[path = "support/origin_credentials.rs"]
+mod origin_credentials;
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 static SERVER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

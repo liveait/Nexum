@@ -217,6 +217,24 @@ TLS handshakes use absolute I/O deadlines and permit credential loading only aft
 
 On 2026-11-12, default-parallel managed tests reproduce a sibling inheriting a control-pipe writer and delaying EOF. Sampling shows the Server still listening/reading stdin, before Inspector shutdown. The pinned [Rust 1.98.1 pipe implementation](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/pipe/unix.rs) creates pipes before setting CLOEXEC on macOS. The test fixture now shares a lock across Server creation/exec and its short `/bin/ps.output()` call. Processes/tests remain concurrent after creation. A new 32-pair concurrent-launch scenario retains the existing three-second exit assertion and proves independent EOF while the other uninitialized child remains alive.
 
+### FTP 来源元数据与凭据 / FTP origin metadata and credentials
+
+F1 提供 `task.create_transfer` v1 元数据创建。CLI 从 stdin 接收最多 1 MiB 的 JSON，先验证输入和 Server 能力，再提交类型化请求。匿名请求可以使用明文连接。密码请求必须选择 `tls://host:port`，通过证书链和名称验证后才发送。客户端入口可拆分 URL userinfo，Server 输入须为无 userinfo 的 URL。`path_mode` 默认 `login_relative`，显式 `absolute` 绑定根路径。当前安全模式为 `plain`，`required_explicit_tls` 在任何存储副作用前返回不可用。
+
+F1 provides `task.create_transfer` v1 metadata creation. The CLI reads at most 1 MiB of JSON from stdin, validates input and Server capabilities, then submits the typed request. Anonymous input permits plaintext. Password input requires `tls://host:port` with verified certificate chain and server name before transmission. Client ingestion can split URL userinfo. Server input requires a URL without userinfo. Default `login_relative` and explicit `absolute` bind path semantics. The current security mode is `plain`. `required_explicit_tls` returns unavailable before storage effects.
+
+```bash
+printf '%s\n' '{"version":1,"id":"ftp-metadata","destination":"./a.bin","source":{"kind":"ftp","source_url":"ftp://example.com/pub/a.bin","security":"plain","authentication":{"kind":"anonymous"}}}' | cargo run --locked -p nexum-cli -- task create-transfer
+```
+
+macOS Server 将用户名／密码保存到独立 Keychain 服务 `com.nexum.server.origin-credentials.v1`。本地、非同步项目的 account 绑定随机数据实例、origin、随机 credential ID 和 revision 1。新增禁止覆盖，所有操作禁止交互提示。SQLite schema 3 只保存无秘密的关联与精确引用。同 ID 相同请求幂等，改变密码、认证、来源或目标返回冲突。provider 缺失、锁定或拒绝访问返回固定可操作错误。其他平台仍支持匿名元数据和 HTTP 功能，持久认证能力报告为 false。
+
+The macOS Server stores usernames/passwords in the separate Keychain service `com.nexum.server.origin-credentials.v1`. Accounts for local, nonsynchronized items bind random data instance, origin, random credential ID and revision 1. Adds prevent replacement and all operations disable interactive prompts. SQLite schema 3 stores secret-free associations and exact references. Identical ID/input retries are idempotent. Changed passwords, authentication, source or destination conflict. Missing, locked or denied providers return static actionable errors. Other platforms support anonymous metadata and HTTP, with durable authenticated capability false.
+
+创建先保留 pending，再新增 provider 项，最后原子创建任务及激活关联。激活失败通过持久 tombstone 补偿。删除任务与保存 tombstone 在同一事务，提交后清理 Keychain。失败证据在重启后的 Ready 后 Worker 继续处理。provider 操作均在 Core 锁外。get/list 校验关联后公开规范 FTP 来源，typed 删除独立于 HTTP 完成凭证。`server.capabilities` 报告 `create_transfer.versions:[1]`、`ftp.metadata_create:true`、`ftp.durable_credentials` 和 `ftp.transfer:false`。FTP 排队／恢复命令返回不可用，元数据任务保持 Created。F2／F3 的传输、控制、文件安全和恢复仍按 RFC 0004 验收。
+
+Creation reserves pending, adds the provider item, then atomically creates the task and activates its association. Activation failure compensates through durable tombstones. Task deletion and tombstone creation share a transaction, followed by Keychain cleanup. After restart, post-Ready workers process retained cleanup evidence. Provider calls run outside Core. Get/list validate associations before projecting canonical FTP sources. Typed deletion operates independently of HTTP receipts. `server.capabilities` reports `create_transfer.versions:[1]`, `ftp.metadata_create:true`, `ftp.durable_credentials` and `ftp.transfer:false`. FTP queue/resume commands return unavailable and metadata tasks remain Created. F2/F3 transfers, controls, file safety and recovery still require RFC 0004 acceptance.
+
 ### 种子内容检查 / Torrent-content inspection
 
 CLI 先读取本地普通种子内容并上传，Server 不读取客户端路径。`inspect` 等待解析并打印 v1 infohash、原始内容 SHA256、文件清单及 padding 标记；`inspect-begin` 立即返回临时 ID，随后可查询或取消。检查不会创建任务、输出文件或联系 tracker／peer；HTTP 下载的 `.torrent` 文件仍是普通下载。客户端先核对 `server.capabilities.torrent_inspect`，不向旧 Server 回退创建占位任务。
