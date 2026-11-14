@@ -16,6 +16,7 @@ use security_framework_sys::{
 unsafe extern "C" {
     static kSecUseAuthenticationUIFail: CFStringRef;
     static kSecMatchLimitOne: CFStringRef;
+    static kSecAttrGeneric: CFStringRef;
 }
 const SERVICE: &str = "com.nexum.server.origin-credentials.v1";
 fn status(value: i32) -> Result<(), ProviderError> {
@@ -28,7 +29,7 @@ fn status(value: i32) -> Result<(), ProviderError> {
         _ => Err(ProviderError::Unavailable),
     }
 }
-fn query(reference: &CredentialRef) -> Vec<(CFString, CFType)> {
+fn query(reference: &CredentialRef, owner: &str) -> Vec<(CFString, CFType)> {
     // Structured array encoding prevents ambiguous account components.
     let account = json!([
         reference.instance_id,
@@ -52,6 +53,10 @@ fn query(reference: &CredentialRef) -> Vec<(CFString, CFType)> {
                 CFString::new(&account).into_CFType(),
             ),
             (
+                CFString::wrap_under_get_rule(kSecAttrGeneric),
+                CFData::from_buffer(owner.as_bytes()).into_CFType(),
+            ),
+            (
                 CFString::wrap_under_get_rule(kSecAttrSynchronizable),
                 CFBoolean::false_value().into_CFType(),
             ),
@@ -66,10 +71,15 @@ impl CredentialProvider for SystemProvider {
     fn durable(&self) -> bool {
         true
     }
-    fn put(&self, reference: &CredentialRef, secret: &OriginSecret) -> Result<(), ProviderError> {
+    fn put(
+        &self,
+        reference: &CredentialRef,
+        owner: &str,
+        secret: &OriginSecret,
+    ) -> Result<(), ProviderError> {
         let data = serde_json::to_vec(&[&secret.username, &secret.password])
             .map_err(|_| ProviderError::Unavailable)?;
-        let mut fields = query(reference);
+        let mut fields = query(reference, owner);
         fields.push((
             unsafe { CFString::wrap_under_get_rule(kSecValueData) },
             CFData::from_buffer(&data).into_CFType(),
@@ -77,8 +87,8 @@ impl CredentialProvider for SystemProvider {
         let dictionary = CFDictionary::from_CFType_pairs(&fields);
         status(unsafe { SecItemAdd(dictionary.as_concrete_TypeRef(), std::ptr::null_mut()) })
     }
-    fn get(&self, reference: &CredentialRef) -> Result<OriginSecret, ProviderError> {
-        let mut fields = query(reference);
+    fn get(&self, reference: &CredentialRef, owner: &str) -> Result<OriginSecret, ProviderError> {
+        let mut fields = query(reference, owner);
         unsafe {
             fields.push((
                 CFString::wrap_under_get_rule(kSecReturnData),
@@ -103,8 +113,8 @@ impl CredentialProvider for SystemProvider {
             serde_json::from_slice(data.bytes()).map_err(|_| ProviderError::Unavailable)?;
         Ok(OriginSecret { username, password })
     }
-    fn remove(&self, reference: &CredentialRef) -> Result<(), ProviderError> {
-        let dictionary = CFDictionary::from_CFType_pairs(&query(reference));
+    fn remove(&self, reference: &CredentialRef, owner: &str) -> Result<(), ProviderError> {
+        let dictionary = CFDictionary::from_CFType_pairs(&query(reference, owner));
         match status(unsafe { SecItemDelete(dictionary.as_concrete_TypeRef()) }) {
             Err(ProviderError::Missing) => Ok(()),
             result => result,

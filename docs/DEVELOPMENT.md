@@ -219,6 +219,10 @@ On 2026-11-12, default-parallel managed tests reproduce a sibling inheriting a c
 
 ### FTP 来源元数据与凭据 / FTP origin metadata and credentials
 
+Keychain 原子新增同时把 SQLite 已持久化的 `operation_id` 保存为 `kSecAttrGeneric` 二进制所有权标记。读取和删除在同一个 provider 查询中匹配精确引用及该标记。相同 service／account 的不同 owner 新增仍返回冲突。失败新增后的 pending 丢弃即使失败或中断，恢复也只会清理该操作实际拥有的项目。
+
+Keychain adds atomically store the already-durable SQLite `operation_id` as a binary `kSecAttrGeneric` ownership marker. Reads and deletion match both the exact reference and marker in one provider query. A different owner adding the same service/account still receives a duplicate conflict. If discarding pending after a failed add fails or is interrupted, recovery cleans only an item owned by that operation.
+
 F1 提供 `task.create_transfer` v1 元数据创建。CLI 从 stdin 接收最多 1 MiB 的 JSON，先验证输入和 Server 能力，再提交类型化请求。匿名请求可以使用明文连接。密码请求必须选择 `tls://host:port`，通过证书链和名称验证后才发送。客户端入口可拆分 URL userinfo，Server 输入须为无 userinfo 的 URL。`path_mode` 默认 `login_relative`，显式 `absolute` 绑定根路径。当前安全模式为 `plain`，`required_explicit_tls` 在任何存储副作用前返回不可用。
 
 F1 provides `task.create_transfer` v1 metadata creation. The CLI reads at most 1 MiB of JSON from stdin, validates input and Server capabilities, then submits the typed request. Anonymous input permits plaintext. Password input requires `tls://host:port` with verified certificate chain and server name before transmission. Client ingestion can split URL userinfo. Server input requires a URL without userinfo. Default `login_relative` and explicit `absolute` bind path semantics. The current security mode is `plain`. `required_explicit_tls` returns unavailable before storage effects.

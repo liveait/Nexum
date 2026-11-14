@@ -175,6 +175,10 @@ RFC 0002's same-UID directory-entry replacement model applies to the new path. R
 
 ### F1 来源凭据实现状态 / F1 origin-credential implementation status
 
+Keychain 原子新增同时把 SQLite 已持久化的 `operation_id` 保存为 `kSecAttrGeneric` 二进制所有权标记。读取和删除在同一个 provider 查询中匹配精确引用及该标记。相同 service／account 的不同 owner 新增仍返回冲突。失败新增后的 pending 丢弃即使失败或中断，恢复也只会清理该操作实际拥有的项目。
+
+Keychain adds atomically store the already-durable SQLite `operation_id` as a binary `kSecAttrGeneric` ownership marker. Reads and deletion match both the exact reference and marker in one provider query. A different owner adding the same service/account still receives a duplicate conflict. If discarding pending after a failed add fails or is interrupted, recovery cleans only an item owned by that operation.
+
 2026-11-14 基于 `f8b89c6` 实现 `task.create_transfer` v1、严格 FTP 路径、真实 CLI stdin 和 TCP／HTTP 的实际 TLS 校验。macOS provider 使用独立、非同步的 Keychain 项、原子 add-only 写入及非交互查询／删除。schema 3 保留随机数据实例、版本化来源、pending 与精确 cleanup tombstone，覆盖任务激活、失败补偿、删除和重启清理。provider 在 Core 锁外运行，恢复清理在 Ready 后启动。同 ID 重试比较输入及 provider 中的秘密，冲突拒绝改密。
 
 On 2026-11-14, implement `task.create_transfer` v1, strict FTP paths, actual CLI stdin and actual TCP/HTTP TLS assurance from `f8b89c6`. The macOS provider uses separate nonsynchronized Keychain items, atomic add-only writes and noninteractive queries/deletion. Schema 3 retains random data-instance identity, versioned origins, pending and exact cleanup tombstones for activation, compensation, removal and restart cleanup. Providers run outside Core and recovery starts after Ready. Same-ID retries compare input and provider secrets, rejecting changed passwords.

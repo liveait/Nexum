@@ -2,8 +2,9 @@ use super::*;
 use nexum_core::nexum_storage::TaskRepository;
 #[derive(Default)]
 struct MemoryProvider {
-    items: Mutex<HashMap<String, OriginSecret>>,
+    items: Mutex<HashMap<String, (String, OriginSecret)>>,
     put_error: Mutex<Option<ProviderError>>,
+    existing_on_put: Mutex<Option<OriginSecret>>,
     get_error: Mutex<Option<ProviderError>>,
     remove_error: Mutex<Option<ProviderError>>,
     gate: Mutex<Option<Arc<Gate>>>,
@@ -20,7 +21,12 @@ impl CredentialProvider for MemoryProvider {
     fn durable(&self) -> bool {
         true
     }
-    fn put(&self, reference: &CredentialRef, secret: &OriginSecret) -> Result<(), ProviderError> {
+    fn put(
+        &self,
+        reference: &CredentialRef,
+        owner: &str,
+        secret: &OriginSecret,
+    ) -> Result<(), ProviderError> {
         if let Some(gate) = self.gate.lock().unwrap().clone() {
             let mut state = gate.state.lock().unwrap();
             state.0 = true;
@@ -33,13 +39,16 @@ impl CredentialProvider for MemoryProvider {
             return Err(error);
         }
         let mut items = self.items.lock().unwrap();
+        if let Some(existing) = self.existing_on_put.lock().unwrap().take() {
+            items.insert(key(reference), ("preexisting-owner".into(), existing));
+        }
         if items.contains_key(&key(reference)) {
             return Err(ProviderError::Exists);
         }
-        items.insert(key(reference), secret.clone());
+        items.insert(key(reference), (owner.to_owned(), secret.clone()));
         Ok(())
     }
-    fn get(&self, reference: &CredentialRef) -> Result<OriginSecret, ProviderError> {
+    fn get(&self, reference: &CredentialRef, owner: &str) -> Result<OriginSecret, ProviderError> {
         if let Some(error) = *self.get_error.lock().unwrap() {
             return Err(error);
         }
@@ -47,14 +56,21 @@ impl CredentialProvider for MemoryProvider {
             .lock()
             .unwrap()
             .get(&key(reference))
-            .cloned()
+            .filter(|(stored_owner, _)| stored_owner == owner)
+            .map(|(_, secret)| secret.clone())
             .ok_or(ProviderError::Missing)
     }
-    fn remove(&self, reference: &CredentialRef) -> Result<(), ProviderError> {
+    fn remove(&self, reference: &CredentialRef, owner: &str) -> Result<(), ProviderError> {
         if let Some(error) = *self.remove_error.lock().unwrap() {
             return Err(error);
         }
-        self.items.lock().unwrap().remove(&key(reference));
+        let mut items = self.items.lock().unwrap();
+        if items
+            .get(&key(reference))
+            .is_some_and(|(stored_owner, _)| stored_owner == owner)
+        {
+            items.remove(&key(reference));
+        }
         Ok(())
     }
 }
@@ -309,7 +325,7 @@ fn delete_is_durable_before_cleanup_and_reuse_keeps_new_reference() {
     assert!(
         fixture
             .provider
-            .get(fresh.credential.as_ref().unwrap())
+            .get(fresh.credential.as_ref().unwrap(), &fresh.operation_id)
             .is_ok()
     );
 }
@@ -338,6 +354,7 @@ fn pending_recovery_releases_only_exact_owned_items() {
         .provider
         .put(
             record.credential.as_ref().unwrap(),
+            &record.operation_id,
             parsed.secret.as_ref().unwrap(),
         )
         .unwrap();
@@ -345,8 +362,14 @@ fn pending_recovery_releases_only_exact_owned_items() {
     foreign.instance_id = random_id().unwrap();
     fixture
         .provider
-        .put(&foreign, parsed.secret.as_ref().unwrap())
+        .put(
+            &foreign,
+            &record.operation_id,
+            parsed.secret.as_ref().unwrap(),
+        )
         .unwrap();
+    fixture.state.lock().unwrap().core.repository =
+        SqliteRepository::open(fixture.root.join(DATABASE_FILE)).unwrap();
     origins.recover(&fixture.state);
     origins.recover(&fixture.state);
     assert!(
@@ -360,9 +383,11 @@ fn pending_recovery_releases_only_exact_owned_items() {
             .unwrap()
             .is_empty()
     );
-    assert!(fixture.provider.get(&foreign).is_ok());
+    assert!(fixture.provider.get(&foreign, &record.operation_id).is_ok());
     assert_eq!(
-        fixture.provider.get(record.credential.as_ref().unwrap()),
+        fixture
+            .provider
+            .get(record.credential.as_ref().unwrap(), &record.operation_id),
         Err(ProviderError::Missing)
     );
 }
@@ -423,13 +448,43 @@ fn blocked_provider_preserves_core_responsiveness_and_pending_fences_legacy() {
 fn provider_add_failure_does_not_remove_existing_exact_item() {
     let fixture = Fixture::new();
     let origins = fixture.origins();
-    // A failed add confers no ownership of an existing provider value.
-    *fixture.provider.put_error.lock().unwrap() = Some(ProviderError::Exists);
-    *fixture.provider.remove_error.lock().unwrap() = Some(ProviderError::Denied);
-    assert!(
+    let existing = OriginSecret {
+        username: "PREEXISTING_USER".into(),
+        password: "PREEXISTING_SECRET".into(),
+    };
+    *fixture.provider.existing_on_put.lock().unwrap() = Some(existing.clone());
+    let database = rusqlite::Connection::open(fixture.root.join(DATABASE_FILE)).unwrap();
+    database.execute_batch("CREATE TRIGGER reject_pending_delete BEFORE DELETE ON task_origins BEGIN SELECT RAISE(FAIL,'controlled pending deletion failure'); END;").unwrap();
+    assert_eq!(
         origins
             .create(&fixture.state, &fixture.input("collision"), true)
-            .is_err()
+            .unwrap_err(),
+        provider_error(ProviderError::Exists)
+    );
+    let pending = fixture
+        .state
+        .lock()
+        .unwrap()
+        .core
+        .repository
+        .pending_origins()
+        .unwrap()
+        .remove(0);
+    let reference = pending.credential.as_ref().unwrap();
+    assert_eq!(
+        fixture.provider.items.lock().unwrap().get(&key(reference)),
+        Some(&("preexisting-owner".into(), existing.clone()))
+    );
+    database
+        .execute_batch("DROP TRIGGER reject_pending_delete;")
+        .unwrap();
+    drop(database);
+    fixture.state.lock().unwrap().core.repository =
+        SqliteRepository::open(fixture.root.join(DATABASE_FILE)).unwrap();
+    origins.recover(&fixture.state);
+    assert_eq!(
+        fixture.provider.items.lock().unwrap().get(&key(reference)),
+        Some(&("preexisting-owner".into(), existing.clone()))
     );
     assert!(
         fixture
@@ -438,7 +493,7 @@ fn provider_add_failure_does_not_remove_existing_exact_item() {
             .unwrap()
             .core
             .repository
-            .cleanup_records()
+            .pending_origins()
             .unwrap()
             .is_empty()
     );
@@ -449,7 +504,7 @@ fn provider_add_failure_does_not_remove_existing_exact_item() {
             .unwrap()
             .core
             .repository
-            .pending_origins()
+            .cleanup_records()
             .unwrap()
             .is_empty()
     );
@@ -552,5 +607,51 @@ fn blocked_provider_does_not_delay_unrelated_http_removal() {
             .expect("unrelated HTTP removal waited for Keychain")
             .unwrap()
             .is_success()
+    );
+}
+
+#[test]
+fn provider_operation_owner_fences_reads_and_removal_without_changing_uniqueness() {
+    let fixture = Fixture::new();
+    fixture
+        .origins()
+        .create(&fixture.state, &fixture.input("owner"), true)
+        .unwrap();
+    let record = fixture
+        .state
+        .lock()
+        .unwrap()
+        .core
+        .repository
+        .active_origin(&TaskId::from("owner"))
+        .unwrap()
+        .unwrap();
+    let reference = record.credential.as_ref().unwrap();
+    let secret = fixture
+        .provider
+        .get(reference, &record.operation_id)
+        .unwrap();
+    assert_eq!(
+        fixture.provider.get(reference, "different-owner"),
+        Err(ProviderError::Missing)
+    );
+    assert_eq!(
+        fixture.provider.put(
+            reference,
+            "different-owner",
+            &OriginSecret {
+                username: "other".into(),
+                password: "other".into()
+            }
+        ),
+        Err(ProviderError::Exists)
+    );
+    fixture
+        .provider
+        .remove(reference, "different-owner")
+        .unwrap();
+    assert_eq!(
+        fixture.provider.get(reference, &record.operation_id),
+        Ok(secret)
     );
 }

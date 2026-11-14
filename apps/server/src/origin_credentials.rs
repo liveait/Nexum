@@ -16,19 +16,29 @@ use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderError {
+    #[cfg(any(target_os = "macos", test))]
     Missing,
+    #[cfg(any(target_os = "macos", test))]
     Locked,
+    #[cfg(any(target_os = "macos", test))]
     Denied,
     Unavailable,
+    #[cfg(any(target_os = "macos", test))]
     Exists,
 }
 
 pub trait CredentialProvider: Send + Sync {
     fn durable(&self) -> bool;
-    // Failed atomic adds create no item and never change an existing item.
-    fn put(&self, reference: &CredentialRef, secret: &OriginSecret) -> Result<(), ProviderError>;
-    fn get(&self, reference: &CredentialRef) -> Result<OriginSecret, ProviderError>;
-    fn remove(&self, reference: &CredentialRef) -> Result<(), ProviderError>;
+    // Add writes the operation owner atomically. Get/remove match that owner
+    // in the same provider query, including cleanup after an interrupted add.
+    fn put(
+        &self,
+        reference: &CredentialRef,
+        owner: &str,
+        secret: &OriginSecret,
+    ) -> Result<(), ProviderError>;
+    fn get(&self, reference: &CredentialRef, owner: &str) -> Result<OriginSecret, ProviderError>;
+    fn remove(&self, reference: &CredentialRef, owner: &str) -> Result<(), ProviderError>;
 }
 
 pub struct Coordinator {
@@ -49,10 +59,14 @@ fn conflict() -> RpcErrorObject {
 }
 fn provider_error(error: ProviderError) -> RpcErrorObject {
     let message = match error {
+        #[cfg(any(target_os = "macos", test))]
         ProviderError::Missing => "origin credential missing; explicitly reimport the task",
+        #[cfg(any(target_os = "macos", test))]
         ProviderError::Locked => "origin credential locked; unlock Keychain and retry",
+        #[cfg(any(target_os = "macos", test))]
         ProviderError::Denied => "origin credential access denied; grant access and retry",
         ProviderError::Unavailable => "origin credential provider unavailable",
+        #[cfg(any(target_os = "macos", test))]
         ProviderError::Exists => "origin credential reference already exists",
     };
     RpcErrorObject::internal_error(message)
@@ -116,7 +130,12 @@ impl Coordinator {
                         .as_ref()
                         .filter(|reference| self.owns(&existing, reference))
                         .ok_or_else(internal)?;
-                    if self.provider.get(reference).map_err(provider_error)? != *secret {
+                    if self
+                        .provider
+                        .get(reference, &existing.operation_id)
+                        .map_err(provider_error)?
+                        != *secret
+                    {
                         return Err(conflict());
                     }
                 }
@@ -132,10 +151,10 @@ impl Coordinator {
             Reservation::New => {}
         }
         if let (Some(reference), Some(secret)) = (&record.credential, &input.secret)
-            && let Err(error) = self.provider.put(reference, secret)
+            && let Err(error) = self.provider.put(reference, &record.operation_id, secret)
         {
-            // An unsuccessful atomic add owns no provider item. In particular,
-            // a duplicate-reference error must never authorize deleting that item.
+            // Failed adds own no item. If this pending discard also fails, the
+            // durable operation marker fences any later recovery deletion.
             let _ = state
                 .lock()
                 .expect("server state mutex poisoned")
@@ -216,10 +235,13 @@ impl Coordinator {
             else {
                 continue;
             };
-            if matches!(
-                self.provider.remove(reference),
-                Ok(()) | Err(ProviderError::Missing)
-            ) {
+            let removed = match self.provider.remove(reference, &record.operation_id) {
+                Ok(()) => true,
+                #[cfg(any(target_os = "macos", test))]
+                Err(ProviderError::Missing) => true,
+                Err(_) => false,
+            };
+            if removed {
                 let _ = state
                     .lock()
                     .expect("server state mutex poisoned")
@@ -348,13 +370,13 @@ impl CredentialProvider for SystemProvider {
     fn durable(&self) -> bool {
         false
     }
-    fn put(&self, _: &CredentialRef, _: &OriginSecret) -> Result<(), ProviderError> {
+    fn put(&self, _: &CredentialRef, _: &str, _: &OriginSecret) -> Result<(), ProviderError> {
         Err(ProviderError::Unavailable)
     }
-    fn get(&self, _: &CredentialRef) -> Result<OriginSecret, ProviderError> {
+    fn get(&self, _: &CredentialRef, _: &str) -> Result<OriginSecret, ProviderError> {
         Err(ProviderError::Unavailable)
     }
-    fn remove(&self, _: &CredentialRef) -> Result<(), ProviderError> {
+    fn remove(&self, _: &CredentialRef, _: &str) -> Result<(), ProviderError> {
         Err(ProviderError::Unavailable)
     }
 }
