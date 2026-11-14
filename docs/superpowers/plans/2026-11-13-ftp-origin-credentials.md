@@ -64,10 +64,14 @@
 
   实现非交互 add-only Keychain、锁外 provider、Ready 后恢复、两种实际 TLS 入口、可信投影、无 HTTP sidecar 的 typed 删除，以及 stdin 和 capabilities。 / Implement noninteractive add-only Keychain, provider calls outside Core, post-Ready recovery, both actual TLS ingresses, trusted projection, typed removal independent of HTTP sidecars, stdin and capabilities.
 
-- [ ] **Step 4 — 完整门槛与真实消费者 / Complete gates and real consumers**
+- [x] **Step 4 — 完整门槛与真实消费者 / Complete gates and real consumers**
 
   执行 Development Guide 的五项 Rust 门槛。控制者对固定提交运行实际 CLI／随包 Server／Keychain、私有 TLS 根、重启、删除、实例隔离与秘密扫描，并执行原生候选验收。平台缺口按实际结果记录。 / Run the Development Guide's five Rust gates. At the fixed commit, the controller exercises actual CLI/bundled Server/Keychain with private TLS trust, restart, removal, instance isolation and secret scanning, plus native candidate acceptance. Record actual platform gaps.
 
 - [x] **Step 5 — 自审、文档和提交 / Self-review, documentation and commit**
 
   自审调用链、更新双语文档并提交本包。控制者随后安排独立审查、最新 CI 和已授权交付。实现报告位于 `.superpowers/sdd/2026-11-13-ftp-origin-credentials/task-1-report.md`。 / Review call paths, update bilingual docs and commit this package. The controller then arranges independent review, latest CI and authorized delivery. The implementation report is at the stated path.
+
+2026-11-14 在代码提交 `0212d4c` 完成完整 Rust 门槛（workspace 530、额外 managed 14）、实际随包 Server／CLI／Keychain 29 场景及原生 App 受控重开验证。原生观察涵盖 TLS 1.3 就绪、HTTP 完整文件、已有元数据、异常退出与 Server EOF，使用私有预置配置。界面交互、正常菜单退出、干净 OS 用户和 VoiceOver 仍按各自原生验收记录处理。固定 SHA 审查、最新 CI 与合并状态见 [PR #91](https://github.com/liveait/Nexum/pull/91)。
+
+On 2026-11-14, code commit `0212d4c` passes the full Rust gates (workspace 530 and additional managed 14), 29 actual bundled Server/CLI/Keychain scenarios and controlled native App relaunch checks. Native observations cover TLS 1.3 readiness, complete HTTP bytes, existing metadata, abnormal App exit and Server EOF using a private seeded profile. UI interaction, normal menu quit, a clean OS user and VoiceOver retain their respective native acceptance records. See [PR #91](https://github.com/liveait/Nexum/pull/91) for fixed-SHA review, current CI and merge status.
