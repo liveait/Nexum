@@ -108,4 +108,47 @@ fn actual_cli_rejects_plaintext_password_and_malformed_stdin_with_static_errors(
     let output = run("{\"PASSWORD_SENTINEL\":", "127.0.0.1:1");
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid transfer JSON"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("SENTINEL"));
+
+    let mut value = input(json!({"kind":"anonymous"}));
+    value["source"]["source_url"] =
+        json!("ftp://example.org:21?QUERY_SENTINEL=@mirror.example/file");
+    value["source"]
+        .as_object_mut()
+        .unwrap()
+        .remove("authentication");
+    let output = run(&value.to_string(), "127.0.0.1:1");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid transfer v1 input"), "{stderr}");
+    assert!(!stderr.contains("SENTINEL"));
+}
+
+#[test]
+fn actual_cli_explains_unsupported_ftps_and_legacy_absolute_paths_without_reflection() {
+    for (url, guidance) in [
+        ("ftps://example.com/FTPS_SENTINEL", "FTPS is unavailable"),
+        (
+            "ftp://example.com/%2fPATH_SENTINEL/a.bin",
+            "use path_mode=absolute",
+        ),
+    ] {
+        let mut value = input(json!({"kind":"anonymous"}));
+        value["source"]["source_url"] = json!(url);
+        let output = run(&value.to_string(), "127.0.0.1:1");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(guidance), "{stderr}");
+        assert!(!stderr.contains("SENTINEL"));
+        assert!(output.stdout.is_empty());
+    }
+
+    let mut value =
+        input(json!({"kind":"password","username":"USER_SENTINEL","password":"PASSWORD_SENTINEL"}));
+    value["source"]["security"] = json!("required_explicit_tls");
+    let output = run(&value.to_string(), "127.0.0.1:1");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("FTP security mode unavailable"), "{stderr}");
+    assert!(!stderr.contains("SENTINEL"));
+    assert!(output.stdout.is_empty());
 }

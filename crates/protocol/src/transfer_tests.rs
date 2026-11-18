@@ -63,19 +63,40 @@ fn typed_ftp_rejects_hostile_urls_and_unknown_fields_without_reflection() {
     value["version"] = json!(2);
     assert!(transfer::CreateTransferRequest::parse(&value).is_err());
 }
-#[test]
-fn client_normalization_extracts_userinfo_and_redacts_typed_secrets() {
-    let mut value = input("ftp://USER_SENTINEL:p%40ss@example.com/a");
+fn client_input(url: &str) -> Value {
+    let mut value = input(url);
     value["source"]
         .as_object_mut()
         .unwrap()
         .remove("authentication");
+    value
+}
+
+#[test]
+fn client_normalization_extracts_userinfo_and_redacts_typed_secrets() {
+    let value = client_input("ftp://USER_SENTINEL:p%40ss%3F%23%5C@example.com/a");
     let normalized = transfer::CreateTransferRequest::normalize_client(&value).unwrap();
     assert_eq!(normalized["source"]["source_url"], "ftp://example.com/a");
     let request = transfer::CreateTransferRequest::parse(&normalized).unwrap();
-    assert!(request.secret.is_some());
     assert!(!format!("{request:?}").contains("USER_SENTINEL"));
     assert!(!format!("{request:?}").contains("p@ss"));
+    let secret = request.secret.unwrap();
+    assert_eq!(secret.username, "USER_SENTINEL");
+    assert_eq!(secret.password, "p@ss?#\\");
+}
+
+#[test]
+fn client_normalization_rejects_raw_delimiters_before_extracting_userinfo() {
+    for url in [
+        "ftp://example.org:21?QUERY_SENTINEL=@mirror.example/file",
+        "ftp://example.org:21#FRAGMENT_SENTINEL@mirror.example/file",
+        "ftp://user:BACKSLASH_SENTINEL\\pass@mirror.example/file",
+        "ftp://user:CONTROL_SENTINEL\u{001f}@mirror.example/file",
+    ] {
+        let result = transfer::CreateTransferRequest::normalize_client(&client_input(url));
+        assert!(result.is_err(), "accepted malformed FTP URL");
+        assert!(!result.unwrap_err().message.contains("SENTINEL"));
+    }
 }
 
 #[test]

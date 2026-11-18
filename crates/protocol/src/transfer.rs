@@ -34,6 +34,9 @@ fn string<'a>(value: &'a Map<String, Value>, key: &str) -> Result<&'a str, RpcEr
 fn safe(value: &str) -> bool {
     !value.is_empty() && !value.chars().any(char::is_control)
 }
+fn has_safe_url_syntax(raw: &str) -> bool {
+    safe(raw) && !raw.contains(['\\', '?', '#'])
+}
 fn decode(value: &str) -> Result<String, RpcErrorObject> {
     let mut bytes = Vec::with_capacity(value.len());
     let mut source = value.bytes();
@@ -70,10 +73,13 @@ fn encode_component(value: &str) -> String {
     result
 }
 fn ftp_url(raw: &str, path_mode: &str) -> Result<(String, String, String), RpcErrorObject> {
-    if !safe(raw) || raw.contains(['\\', '?', '#']) {
+    if !has_safe_url_syntax(raw) {
         return Err(invalid());
     }
     let (scheme, remainder) = raw.split_once("://").ok_or_else(invalid)?;
+    if scheme.eq_ignore_ascii_case("ftps") {
+        return Err(RpcErrorObject::invalid_params("FTPS is unavailable"));
+    }
     if !scheme.eq_ignore_ascii_case("ftp") {
         return Err(invalid());
     }
@@ -84,6 +90,11 @@ fn ftp_url(raw: &str, path_mode: &str) -> Result<(String, String, String), RpcEr
         || path.starts_with('/')
     {
         return Err(invalid());
+    }
+    if path.starts_with("%2F") || path.starts_with("%2f") {
+        return Err(RpcErrorObject::invalid_params(
+            "FTP encoded root slash is unsupported; remove %2F and use path_mode=absolute",
+        ));
     }
     // Validate raw components before URL libraries can normalize dot segments or backslashes.
     let mut components = Vec::new();
@@ -217,6 +228,9 @@ impl CreateTransferRequest {
             .and_then(Value::as_object_mut)
             .ok_or_else(invalid)?;
         let raw = string(source, "source_url")?.to_owned();
+        if !has_safe_url_syntax(&raw) {
+            return Err(invalid());
+        }
         if let Some((scheme, remainder)) = raw.split_once("://") {
             let (authority, path) = remainder.split_once('/').ok_or_else(invalid)?;
             if let Some((userinfo, host)) = authority.rsplit_once('@') {

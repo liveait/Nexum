@@ -334,7 +334,7 @@ impl JsonRpcClient {
             let input = nexum_protocol::transfer::CreateTransferRequest::parse(
                 params.as_ref().unwrap_or(&Value::Null),
             )
-            .map_err(|_| "invalid transfer v1 input".to_owned())?;
+            .map_err(|error| error.message)?;
             if input.secret.is_some() && !matches!(self.stream, ClientTransport::Tls(_)) {
                 return Err("password credentials require verified TLS".into());
             }
@@ -471,7 +471,7 @@ fn main() {
         ("task", "create-transfer") if args.len() == 2 => {
             let input = transfer_stdin(&mut std::io::stdin().lock()).and_then(|value| {
                 let parsed = nexum_protocol::transfer::CreateTransferRequest::parse(&value)
-                    .map_err(|_| "invalid transfer v1 input".to_owned())?;
+                    .map_err(|error| error.message)?;
                 if parsed.secret.is_some()
                     && !matches!(
                         parse_transport_address(&address)?,
@@ -662,7 +662,7 @@ fn transfer_stdin(reader: &mut impl Read) -> Result<Value, String> {
     }
     let value = serde_json::from_slice(&bytes).map_err(|_| "invalid transfer JSON".to_owned())?;
     nexum_protocol::transfer::CreateTransferRequest::normalize_client(&value)
-        .map_err(|_| "invalid transfer v1 input".into())
+        .map_err(|error| error.message)
 }
 
 fn transfer_capabilities(caps: &Value, input: &Value) -> Result<(), String> {

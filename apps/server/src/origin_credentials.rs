@@ -348,8 +348,16 @@ pub fn project(state: &ServerState, task: &DownloadTask) -> Value {
     serde_json::to_value(view).expect("task view serializes")
 }
 
-pub fn capabilities() -> Value {
-    json!({"create_transfer":{"versions":[1]},"ftp":{"metadata_create":true,"durable_credentials":cfg!(target_os="macos"),"security":["plain"],"transfer":false}})
+pub fn capabilities(tls: bool) -> Value {
+    json!({
+        "create_transfer": {"versions": [1]},
+        "ftp": {
+            "metadata_create": true,
+            "durable_credentials": tls && SystemProvider.durable(),
+            "security": ["plain"],
+            "transfer": false
+        }
+    })
 }
 
 pub fn spawn_recovery(state: &Arc<Mutex<ServerState>>) {

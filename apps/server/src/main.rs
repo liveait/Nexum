@@ -1522,7 +1522,7 @@ fn dispatch_transport_request(
         return reply_error(request, error);
     }
     if request.method == "server.capabilities" || request.method.starts_with("torrent.inspect.") {
-        return dispatch_inspection_request(state, request);
+        return dispatch_inspection_request(state, request, tls);
     }
     if request.method == "task.start" {
         return start_http_task(state, request);
@@ -1628,6 +1628,7 @@ fn dispatch_transport_request(
 fn dispatch_inspection_request(
     state: &Arc<Mutex<ServerState>>,
     request: &RpcRequest,
+    tls: bool,
 ) -> Option<RpcResponse> {
     // Only verified authentication configuration determines scope. Optional,
     // unverified credential fields never grant a separate principal.
@@ -1648,7 +1649,7 @@ fn dispatch_inspection_request(
     let params = request.params.as_ref().unwrap_or(&serde_json::Value::Null);
     let result = match request.method.as_str() {
         "server.capabilities" => {
-            let mut capabilities = origin_credentials::capabilities();
+            let mut capabilities = origin_credentials::capabilities(tls);
             capabilities["torrent_inspect"] = torrent_inspection::Inspector::capabilities();
             Ok(capabilities)
         }

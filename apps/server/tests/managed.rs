@@ -71,6 +71,20 @@ fn managed_tls_authenticates_rpc_http_events_and_rotates_ephemeral_certificates(
         }
     }
     let mut stream = tls_client(&child, &ready);
+    writeln!(
+        stream,
+        "{}",
+        rpc_request("server.capabilities", None, Some(TOKEN))
+    )
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    let capabilities = serde_json::from_str::<Value>(&line).unwrap();
+    assert_eq!(
+        capabilities["result"]["ftp"]["durable_credentials"],
+        cfg!(target_os = "macos")
+    );
+    let mut stream = tls_client(&child, &ready);
     let body = rpc_request("server.version", None, Some(TOKEN)).to_string();
     write!(
         stream,
@@ -552,6 +566,15 @@ fn managed_readiness_uses_a_private_ephemeral_authenticated_endpoint() {
         };
         assert_eq!(server.call(method, None), expected);
         assert_eq!(server.http(method, Some(TOKEN))["result"], expected);
+    }
+    for response in [
+        server.rpc("server.capabilities", None, Some(TOKEN)),
+        server.http("server.capabilities", Some(TOKEN)),
+    ] {
+        let capabilities = &response["result"];
+        assert_eq!(capabilities["ftp"]["durable_credentials"], false);
+        assert_eq!(capabilities["ftp"]["metadata_create"], true);
+        assert_eq!(capabilities["torrent_inspect"]["version"], 1);
     }
     for token in [None, Some(OTHER_TOKEN)] {
         let (events, rejected) = server.subscribe(token);

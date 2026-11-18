@@ -63,6 +63,10 @@ The task-owning Server owns origin passwords separately from Desktop RPC credent
 
 Pinning a loopback port/PID/generation and sending a bearer authenticates only the client, without excluding a replacement listener after child exit. F1 must define compatible managed-bootstrap/TLS-pin negotiation before accepting origin passwords. Retain old HTTP clients/managed protocol without advertising new authenticated FTP capability. External Servers use TLS with validated chains/hostnames. Test replacement listeners, certificate rotation/wrong pins, reconnects and mode switches to prove passwords are not sent to substitutes.
 
+`server.capabilities.ftp.durable_credentials` 仅在当前 RPC 连接已完成 TLS 握手且 Server 提供 macOS Keychain 持久化时返回 true。旧托管 v1 及独立 Server 的明文 TCP／HTTP 连接仍声明匿名 FTP 元数据创建和种子检查能力。
+
+`server.capabilities.ftp.durable_credentials` is true only after the current RPC connection completes a TLS handshake and the Server provides macOS Keychain persistence. Legacy managed v1 and standalone plaintext TCP/HTTP still advertise anonymous FTP metadata creation and torrent inspection.
+
 任务引用 `credential_id + revision`；更新密码使旧恢复绑定失效并重新验证来源。缺少、锁定、拒绝访问或删除的凭据报告可操作错误，不匿名重试、不使用其他 Server 的密码。其他平台 provider 未交付前仍可运行现有 HTTP 功能，但不声明支持持久化的认证 FTP；测试的内存 provider 不能充当产品持久化实现。
 
 Tasks bind `credential_id + revision`. Updating a secret invalidates the old recovery binding and requires source revalidation. Missing, locked, denied or removed credentials yield actionable errors without anonymous retries or credentials from another Server. Existing HTTP remains available on other platforms; persistent authenticated FTP requires a delivered provider. A test-only memory provider is not product persistence.
