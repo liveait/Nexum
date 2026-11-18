@@ -2387,6 +2387,7 @@ dependencies = [
  "nexum-task",
  "serde",
  "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -2422,12 +2423,14 @@ name = "nexum-server"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "core-foundation",
  "getrandom 0.3.4",
  "nexum-core",
  "nexum-protocol",
  "rcgen",
  "rusqlite",
  "rustls",
+ "security-framework-sys",
  "serde_json",
 ]
 
@@ -2435,9 +2438,12 @@ dependencies = [
 name = "nexum-storage"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
  "nexum-domain",
  "nexum-task",
  "rusqlite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

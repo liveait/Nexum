@@ -25,6 +25,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[path = "support/legacy_sources.rs"]
 mod legacy_sources;
+#[path = "support/origin_credentials.rs"]
+mod origin_credentials;
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 static SERVER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -2701,11 +2703,22 @@ fn torrent_inspection_round_trips_without_tasks_output_or_restart_reuse() {
     let dir = TestDir::new();
     let mut server = ServerProcess::start(dir.path());
     let caps = server.call("server.capabilities", None);
+    assert_eq!(caps["ftp"]["durable_credentials"], false);
+    assert_eq!(caps["ftp"]["metadata_create"], true);
     assert_eq!(caps["torrent_inspect"]["version"], 1);
     assert_eq!(
         caps["torrent_inspect"]["sources"],
         json!(["metainfo_base64"])
     );
+    let (status, _, caps) = server.http_request(
+        "POST",
+        "/jsonrpc",
+        Some(json!({"jsonrpc":"2.0","id":1,"method":"server.capabilities"})),
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    assert_eq!(caps["result"]["ftp"]["durable_credentials"], false);
+    assert_eq!(caps["result"]["ftp"]["metadata_create"], true);
+    assert_eq!(caps["result"]["torrent_inspect"]["version"], 1);
     let (status,_,begin) = server.http_request("POST","/jsonrpc",Some(json!({
         "jsonrpc":"2.0","id":1,"method":"torrent.inspect.begin","params":metainfo_params(&inspection_fixture())
     })));
@@ -2851,6 +2864,27 @@ fn torrent_inspection_runs_through_https_and_verified_tls_rpc() {
     let _test_guard = server_test_guard();
     let dir = TestDir::new();
     let (mut server, certificate) = ServerProcess::start_with_tls(dir.path(), &dir.root);
+    let capabilities = json!({"jsonrpc":"2.0","id":1,"method":"server.capabilities"});
+    let (status, _, https_caps) = tls_http_request(
+        server.port,
+        &certificate,
+        "POST",
+        "/jsonrpc",
+        Some(capabilities.clone()),
+        None,
+    );
+    assert_eq!(status, "HTTP/1.1 200 OK");
+    for response in [
+        tls_rpc_request(server.port, &certificate, capabilities),
+        https_caps,
+    ] {
+        assert_eq!(
+            response["result"]["ftp"]["durable_credentials"],
+            cfg!(target_os = "macos")
+        );
+        assert_eq!(response["result"]["ftp"]["metadata_create"], true);
+        assert_eq!(response["result"]["torrent_inspect"]["version"], 1);
+    }
     let (status, _, begin) = tls_http_request(
         server.port,
         &certificate,
