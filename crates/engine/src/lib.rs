@@ -1140,9 +1140,13 @@ impl HttpTransferControl {
             return Err(EngineError::Cancelled);
         }
         if state.pause_requested {
-            state.paused = true;
-            wake.notify_all();
             while state.pause_requested && !state.cancelled {
+                // Resume and a new pause may both arrive while this worker
+                // is still parked, before it has reacquired the lock.
+                if !state.paused {
+                    state.paused = true;
+                    wake.notify_all();
+                }
                 state = wake
                     .wait(state)
                     .expect("HTTP transfer control mutex poisoned while waiting");
@@ -3458,6 +3462,42 @@ mod tests {
         requester.join().unwrap();
         assert!(control.is_paused());
         first_progress
+    }
+
+    #[test]
+    fn parked_http_worker_acknowledges_a_new_pause_after_resume() {
+        let control = HttpTransferControl::new();
+        let (lock, wake) = &*control.inner;
+        let mut state = lock.lock().unwrap();
+        state.pause_requested = true;
+        let worker_control = control.clone();
+        let worker = thread::spawn(move || worker_control.wait_if_paused());
+
+        let (mut state, _) = wake
+            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.paused)
+            .unwrap();
+        let first_acknowledged = state.paused;
+        // Apply resume and the next pause before the worker can reacquire
+        // the mutex. It is still parked at the same write boundary.
+        state.pause_requested = false;
+        state.paused = false;
+        wake.notify_all();
+        state.pause_requested = true;
+        wake.notify_all();
+        let (state, _) = wake
+            .wait_timeout_while(state, Duration::from_secs(2), |state| !state.paused)
+            .unwrap();
+        let next_acknowledged = state.paused;
+        drop(state);
+
+        // Cancel and join even if the acknowledgement did not arrive.
+        control.cancel();
+        assert_eq!(worker.join().unwrap(), Err(EngineError::Cancelled));
+        assert!(first_acknowledged, "worker did not park on the first pause");
+        assert!(
+            next_acknowledged,
+            "worker did not acknowledge the new pause"
+        );
     }
 
     #[derive(Default)]
