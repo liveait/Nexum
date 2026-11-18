@@ -129,9 +129,9 @@ EPSV 优先；仅在明确不支持时回退一次 PASV。数据连接固定到�
 
 Prefer EPSV, falling back once to PASV only when explicitly unsupported. Pin data connections to the actual control peer IP, ignoring the PASV host and preventing third-party connections. Initially bound connection/banner/individual commands/final replies to five seconds each. Data reads check controls every second and fail after eight consecutive empty windows; all waits are cancellable. Retain the ten-second removal wait, keeping reservations and reporting timeout rather than assuming blocked file I/O exited. Pause waits for quiescence, snapshots progress at that boundary and persists it before replying. Cancellation wakes pause/throttling waits and joins before releasing destinations/slots; sleep is not proof of exit.
 
-重试由 Scheduler 统一计数；FTP 库不另开无限重试。临时网络／适用 4xx 可在预算内重试；认证／权限、取消、本地安全、凭证和最终保存错误不自动重试。用结构化内部错误分类，再生成脱敏可读消息，不按错误字符串猜测类别。暂停进度的继承 P2 须在新协议控制消费者启用前修复并回归。
+重试由 Scheduler 统一计数；FTP 库不另开无限重试。临时网络／适用 4xx 可在预算内重试；认证／权限、取消、本地安全、凭证和最终保存错误不自动重试。用结构化内部错误分类，再生成脱敏可读消息，不按错误字符串猜测类别。HTTP 暂停进度的继承问题已按 [RFC 0003](0003-registry-transfer-sessions.md#http-pause-progress-boundary) 实施修复和确定性回归。FTP 消费者仍须验证各自的停写边界、进度持久化与取消清理。
 
-The Scheduler owns retry accounting, without an independent unbounded library loop. Transient network/applicable 4xx errors may retry within budget. Authentication/permission, cancellation, local safety, receipt and final-persistence errors do not. Classify internal errors structurally before rendering redacted messages, rather than parsing strings. Fix and regress the inherited pause-progress P2 before enabling new protocol control consumers.
+The Scheduler owns retry accounting, without an independent unbounded library loop. Transient network/applicable 4xx errors may retry within budget. Authentication/permission, cancellation, local safety, receipt and final-persistence errors do not. Classify internal errors structurally before rendering redacted messages, rather than parsing strings. [RFC 0003](0003-registry-transfer-sessions.md#http-pause-progress-boundary) records the HTTP pause-progress fix and deterministic regressions for the inherited issue. The FTP consumer still requires its own write boundary, progress persistence and cancellation cleanup verification.
 
 ## 版本化恢复 / Versioned recovery
 

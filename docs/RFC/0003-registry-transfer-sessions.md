@@ -84,3 +84,15 @@ The initial consumer assertion that the first SQLite count after pause already e
 该继承的进度快照延迟作为已知 P2 接受本次工厂路由独立交付。文件已停止写入，最终完整性、取消清理和重启恢复通过，F0 没有扩大该窗口。首发前另行修复暂停时进度采样／持久化的同步，并增加对应的确定性回归；本次不把原始计数断言记为通过，也不据此完成 M1／M2／M5。
 
 This inherited progress-snapshot delay is accepted as a known P2 for independent delivery of factory routing. Files have stopped writing, final integrity/cancellation/restart recovery pass, and F0 does not widen the observed window. Before the first release, fix pause-time progress sampling/persistence synchronization separately and add a deterministic regression. The original counter assertion remains failed, and this slice completes neither M1, M2 nor M5.
+
+<a id="http-pause-progress-boundary"></a>
+
+## HTTP 暂停进度边界 / HTTP pause progress boundary
+
+基线 `bbe67d5` 的实际 CLI 在三次暂停返回后立即观察到局部文件为 327,680 字节，SQLite 仅记录 262,144 字节。修复后的单连接 Worker 在确认暂停前记录已验证的续传偏移和每次成功写入后的进度。Server 等待 Worker 停写时释放 Core 锁，随后用一次仓库更新保存该进度和 `Paused`，并在保存成功后释放调度槽。暂停速度为零，预计剩余时间为空。仅做离线完成对账的任务保留对账前的进度基准。
+
+On baseline `bbe67d5`, the actual CLI observed 327,680 partial bytes and only 262,144 SQLite bytes immediately after pause in three runs. The single-connection worker now records the validated resume offset and progress after each successful write before acknowledging pause. The Server waits for quiescence outside the Core lock, then saves that progress and `Paused` in one repository update and releases the scheduler slot after the save. Paused snapshots use zero speed and no ETA. Offline completion reconciliation retains its pre-reconciliation progress baseline.
+
+同一尝试的暂停与恢复串行处理，移除可以独立发出取消。轮询结果须匹配当前下载尝试与控制操作序号，任务处于 `Paused` 时不写入。确定性回归阻塞真正 HTTP 会话的 Server 轮询，核对暂停返回时 TaskView 和 SQLite 与停写位置一致，并在恢复轮询时保持进度。SQLite 拒绝保存暂停时保留原任务、事件及槽位，Worker 继续现有响应。FTP 控制与文件发布仍按 [RFC 0004](0004-ftp-credentials-and-recovery.md) 单独验收。
+
+Pause and resume serialize per attempt, while removal can cancel independently. A poll must match the current attempt and control revision, and polling skips `Paused` tasks. Deterministic regressions block the Server poll for a real HTTP session and check TaskView and SQLite against the stopped write boundary at pause return and after polling resumes. When SQLite rejects the pause save, the original task, events and slot remain intact, and the worker continues its existing response. [RFC 0004](0004-ftp-credentials-and-recovery.md) tracks separate FTP control and publication acceptance.

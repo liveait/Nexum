@@ -269,10 +269,6 @@ struct HttpTransferSessionInner {
     /// Source and destination paths owned by the session.
     source: String,
     _destination: PathBuf,
-    /// Shared byte counter for progress polling.
-    _bytes: Arc<AtomicU64>,
-    /// Latest known progress (total if known, rate, eta).
-    progress: Mutex<Progress>,
     /// Current state of the transfer.
     state: Mutex<EngineTaskState>,
     /// Error message if the transfer failed (None while downloading).
@@ -333,15 +329,11 @@ impl HttpTransferSession {
         let destination = PathBuf::from(destination);
         let partial_path = partial_path.to_owned();
         let has_valid = has_valid_partial;
-        let bytes = Arc::new(AtomicU64::new(0));
-
         let inner = Arc::new(HttpTransferSessionInner {
-            control: control.clone(),
+            control,
             client: engine.client.clone(),
             source: source.clone(),
             _destination: destination.clone(),
-            _bytes: Arc::clone(&bytes),
-            progress: Mutex::new(Progress::default()),
             state: Mutex::new(EngineTaskState::Downloading),
             error: Mutex::new(None),
             condvar: Condvar::new(),
@@ -364,60 +356,29 @@ impl HttpTransferSession {
                 &inner.control,
                 has_valid,
                 completion_context.as_ref(),
-                |progress: Progress| {
-                    // Update the shared byte counter and progress snapshot.
-                    bytes.store(progress.downloaded_bytes, Ordering::SeqCst);
-                    {
-                        let mut p = inner.progress.lock().unwrap();
-                        *p = progress;
-                    }
-                    // Return Ok so the download continues; the session's internal
-                    // progress state is used by the polling thread to persist
-                    // progress to the database.
+                |progress| {
+                    inner.control.record_session_progress(progress);
                     Ok(())
                 },
             );
 
+            let progress = inner.control.session_progress().unwrap_or_default();
+            let downloaded = match &result {
+                Ok(downloaded) => *downloaded,
+                Err(_) => progress.downloaded_bytes,
+            };
+            // Keep the total learned from Content-Length or Content-Range.
+            inner
+                .control
+                .record_session_progress(Progress::new(downloaded, progress.total_bytes));
+
             let (final_state, final_error) = match result {
-                Ok(downloaded) => {
-                    bytes.store(downloaded, Ordering::SeqCst);
-                    {
-                        let mut p = inner.progress.lock().unwrap();
-                        // Keep the total learned from Content-Length or
-                        // Content-Range. Clearing it here made completed
-                        // session downloads render as indeterminate.
-                        let total = p.total_bytes;
-                        *p = Progress::new(downloaded, total);
-                    }
-                    (EngineTaskState::Completed, None)
-                }
-                Err(EngineError::Cancelled) => {
-                    {
-                        let mut p = inner.progress.lock().unwrap();
-                        let total = p.total_bytes;
-                        *p = Progress::new(bytes.load(Ordering::SeqCst), total);
-                    }
-                    {
-                        let mut e = inner.error.lock().unwrap();
-                        *e = Some("transfer cancelled".to_owned());
-                    }
-                    (
-                        EngineTaskState::Failed,
-                        Some("transfer cancelled".to_owned()),
-                    )
-                }
-                Err(EngineError::Failed(msg)) => {
-                    {
-                        let mut p = inner.progress.lock().unwrap();
-                        let total = p.total_bytes;
-                        *p = Progress::new(bytes.load(Ordering::SeqCst), total);
-                    }
-                    {
-                        let mut e = inner.error.lock().unwrap();
-                        *e = Some(msg);
-                    }
-                    (EngineTaskState::Failed, None)
-                }
+                Ok(_) => (EngineTaskState::Completed, None),
+                Err(EngineError::Cancelled) => (
+                    EngineTaskState::Failed,
+                    Some("transfer cancelled".to_owned()),
+                ),
+                Err(EngineError::Failed(msg)) => (EngineTaskState::Failed, Some(msg)),
                 Err(EngineError::TaskNotFound(_)) => {
                     (EngineTaskState::Failed, Some("internal error".to_owned()))
                 }
@@ -428,10 +389,6 @@ impl HttpTransferSession {
             };
 
             {
-                let mut s = inner.state.lock().unwrap();
-                *s = final_state;
-            }
-            {
                 let mut e = inner.error.lock().unwrap();
                 if final_error.is_some() {
                     *e = final_error;
@@ -439,6 +396,8 @@ impl HttpTransferSession {
             }
 
             // Signal completion to waiters.
+            let mut state = inner.state.lock().unwrap();
+            *state = final_state;
             inner.done.store(true, Ordering::SeqCst);
             inner.condvar.notify_all();
         });
@@ -794,9 +753,7 @@ where
 
 impl TransferSession for HttpTransferSession {
     fn progress(&self) -> Progress {
-        let progress = self.inner.progress.lock().unwrap();
-        // Return a copy of the latest recorded progress (already includes the byte count).
-        progress.clone()
+        self.inner.control.session_progress().unwrap_or_default()
     }
 
     fn state(&self) -> EngineTaskState {
@@ -855,7 +812,7 @@ impl TransferSession for HttpTransferSession {
             state = inner.condvar.wait(state).unwrap();
         }
         let final_state = *state;
-        let final_progress = inner.progress.lock().unwrap().clone();
+        let final_progress = inner.control.session_progress().unwrap_or_default();
         (final_state, final_progress)
     }
 }
@@ -1042,6 +999,8 @@ impl TransferSessionFactory for HttpSessionFactory {
 #[derive(Clone, Default)]
 pub struct HttpTransferControl {
     inner: Arc<(Mutex<HttpTransferControlState>, Condvar)>,
+    // Reading a snapshot must not wait on the publication decision lock.
+    session_progress: Arc<Mutex<Option<Progress>>>,
 }
 
 #[derive(Default)]
@@ -1064,6 +1023,24 @@ struct HttpTransferControlState {
 impl HttpTransferControl {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Latest progress published by the built-in single-connection worker.
+    /// The worker records its validated offset and every written chunk before
+    /// acknowledging a pause. No session snapshot exists before that offset
+    /// is known, or for an attempt that only reconciles a completion receipt.
+    pub fn session_progress(&self) -> Option<Progress> {
+        self.session_progress
+            .lock()
+            .expect("HTTP session progress mutex poisoned")
+            .clone()
+    }
+
+    fn record_session_progress(&self, progress: Progress) {
+        *self
+            .session_progress
+            .lock()
+            .expect("HTTP session progress mutex poisoned") = Some(progress);
     }
 
     /// Requests a pause and waits until every registered participant reaches a

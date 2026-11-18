@@ -328,10 +328,22 @@ struct HttpTransfer {
     completion_context: CompletionContext,
     control: HttpTransferControl,
     completion: Arc<HttpWorkerCompletion>,
-    latest_progress: Arc<Mutex<nexum_core::nexum_domain::Progress>>,
+    fallback_progress: Arc<Mutex<nexum_core::nexum_domain::Progress>>,
+    // Serializes pause/resume. The revision fences poll samples taken across
+    // those operations without making them wait on a session trait call.
+    pause_resume: Arc<Mutex<u64>>,
     remove_requested: Arc<AtomicBool>,
     recovery_only: bool,
     session_factory: Option<Arc<dyn TransferSessionFactory>>,
+}
+
+impl HttpTransfer {
+    fn is_current(&self, state: &ServerState) -> bool {
+        state.active_http.get(&self.id).is_some_and(|active| {
+            Arc::ptr_eq(&self.completion, &active.completion)
+                && !active.remove_requested.load(Ordering::Acquire)
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -737,33 +749,27 @@ fn run_session_download(
             EngineTaskState::Queued => {} // shouldn't happen, keep polling
         }
 
-        // Poll progress and persist to the database.
-        let session_progress = session.progress();
+        let revision = match transfer.pause_resume.try_lock() {
+            Ok(revision) => *revision,
+            Err(_) => continue,
+        };
+        // Sample custom sessions without Core or the pause/resume lock.
+        let progress = session.progress();
+        let mut locked = state.lock().expect("server state mutex poisoned");
+        let Ok(current_revision) = transfer.pause_resume.try_lock() else {
+            continue;
+        };
+        if *current_revision != revision
+            || !transfer.is_current(&locked)
+            || locked.core.tasks.get(&id).map(|task| task.state) != Some(TaskState::Downloading)
         {
-            let mut locked = state.lock().expect("server state mutex poisoned");
-            let active_info = locked.active_http.get(&id).map(|active| {
-                (
-                    active.latest_progress.clone(),
-                    active.destination.clone(),
-                    active.destination_path.clone(),
-                    active.partial_path.clone(),
-                )
-            });
-            if let Some((latest_progress, _destination, _destination_path, _partial_path)) =
-                active_info
-            {
-                if progress_reporter.should_persist(&session_progress) {
-                    let _ = locked.core.update_progress(&id, session_progress.clone());
-                    progress_reporter.record(&session_progress);
-                }
-                // Keep the transfer's latest_progress in sync with session progress.
-                let mut current = latest_progress.lock().unwrap();
-                current.downloaded_bytes = session_progress.downloaded_bytes;
-                current.total_bytes = session_progress.total_bytes;
-                current.speed_bytes_per_second = session_progress.speed_bytes_per_second;
-                current.eta_seconds = session_progress.eta_seconds;
-            }
+            continue;
         }
+        if progress_reporter.should_persist(&progress) {
+            let _ = locked.core.update_progress(&id, progress.clone());
+            progress_reporter.record(&progress);
+        }
+        *transfer.fallback_progress.lock().unwrap() = progress;
     }
 
     // Session reached terminal state — wait for the background thread and
@@ -1052,9 +1058,7 @@ fn claim_next_http_transfer(
         )));
     }
     let active_destination = destination_path.clone();
-    let mut latest_progress = resume_progress.unwrap_or_else(|| task.progress.clone());
-    latest_progress.speed_bytes_per_second = 0;
-    latest_progress.eta_seconds = None;
+    let fallback_progress = resume_progress.unwrap_or_else(|| task.progress.clone());
     let transfer = HttpTransfer {
         id: id.clone(),
         source,
@@ -1064,7 +1068,8 @@ fn claim_next_http_transfer(
         completion_context,
         control: HttpTransferControl::new(),
         completion: Arc::new(HttpWorkerCompletion::default()),
-        latest_progress: Arc::new(Mutex::new(latest_progress)),
+        fallback_progress: Arc::new(Mutex::new(fallback_progress)),
+        pause_resume: Arc::new(Mutex::new(0)),
         remove_requested: Arc::new(AtomicBool::new(false)),
         recovery_only,
         session_factory,
@@ -1210,6 +1215,8 @@ fn pause_active_http_task(
         let locked = state.lock().expect("server state mutex poisoned");
         locked.active_http.get(id).cloned()
     }?;
+    let mut operation = transfer.pause_resume.lock().unwrap();
+    *operation = operation.wrapping_add(1);
 
     if let Err(error) = transfer.control.request_pause() {
         return reply_error(
@@ -1224,30 +1231,25 @@ fn pause_active_http_task(
         );
     }
 
-    let progress = transfer
-        .latest_progress
-        .lock()
-        .expect("HTTP progress mutex poisoned")
-        .clone();
-    let mut resume_worker = false;
     let result = {
         let mut locked = state.lock().expect("server state mutex poisoned");
-        if locked
-            .active_http
-            .get(id)
-            .is_none_or(|active| active.remove_requested.load(Ordering::Acquire))
-        {
+        if !transfer.is_current(&locked) {
             Err(RpcErrorObject::invalid_params(
                 "HTTP transfer is being removed",
             ))
         } else {
             match locked.core.tasks.get(id).map(|task| task.state) {
                 Some(TaskState::Paused) => Ok(()),
-                Some(TaskState::Downloading) => locked
-                    .core
-                    .update_progress(id, progress)
-                    .and_then(|()| locked.core.pause_task(id))
-                    .map_err(|error| RpcErrorObject::internal_error(format!("{error:?}"))),
+                Some(TaskState::Downloading) => {
+                    let progress = transfer
+                        .control
+                        .session_progress()
+                        .unwrap_or_else(|| transfer.fallback_progress.lock().unwrap().clone());
+                    locked
+                        .core
+                        .commit_paused_task(id, progress)
+                        .map_err(|error| RpcErrorObject::internal_error(format!("{error:?}")))
+                }
                 Some(state) => Err(RpcErrorObject::invalid_params(format!(
                     "HTTP transfer is in {state:?} state"
                 ))),
@@ -1255,22 +1257,20 @@ fn pause_active_http_task(
             }
         }
     };
-    if result.is_err() {
-        resume_worker = true;
-    }
-    if resume_worker {
-        let _ = transfer.control.resume();
-    }
     match result {
         Ok(()) => {
             {
                 let locked = state.lock().expect("server state mutex poisoned");
                 refresh_http_bandwidth(&locked);
             }
+            drop(operation);
             dispatch_available_http_tasks(state);
             reply_bool(request, true)
         }
-        Err(error) => reply_error(request, error),
+        Err(error) => {
+            let _ = transfer.control.resume();
+            reply_error(request, error)
+        }
     }
 }
 
@@ -1283,10 +1283,12 @@ fn resume_active_http_task(
         let locked = state.lock().expect("server state mutex poisoned");
         locked.active_http.get(id).cloned()
     }?;
+    let mut operation = transfer.pause_resume.lock().unwrap();
+    *operation = operation.wrapping_add(1);
 
     let resumed = {
         let mut locked = state.lock().expect("server state mutex poisoned");
-        if transfer.remove_requested.load(Ordering::Acquire) {
+        if !transfer.is_current(&locked) {
             return reply_error(
                 request,
                 RpcErrorObject::invalid_params("HTTP transfer is being removed"),
@@ -1337,7 +1339,11 @@ fn remove_active_http_task(
     loop {
         let active = {
             let locked = state.lock().expect("server state mutex poisoned");
-            locked.active_http.get(id).cloned()
+            let active = locked.active_http.get(id).cloned();
+            if let Some(active) = &active {
+                active.remove_requested.store(true, Ordering::Release);
+            }
+            active
         };
         let Some(active) = active else {
             break;
@@ -1345,7 +1351,6 @@ fn remove_active_http_task(
 
         destination_path = Some(active.destination_path.clone());
         partial_path = Some(active.partial_path.clone());
-        active.remove_requested.store(true, Ordering::Release);
         active.control.cancel();
         if active.completion.wait(HTTP_CONTROL_WAIT_TIMEOUT).is_none() {
             return reply_error(

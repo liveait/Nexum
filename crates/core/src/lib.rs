@@ -348,6 +348,22 @@ impl<R: TaskRepository> Core<R> {
         Ok(())
     }
 
+    /// Commits an externally controlled worker's acknowledged pause boundary.
+    /// Its progress and released slot become visible only after the Paused
+    /// snapshot has been saved. The caller keeps the worker parked until then.
+    pub fn commit_paused_task(
+        &mut self,
+        id: &TaskId,
+        progress: nexum_domain::Progress,
+    ) -> Result<(), CoreError> {
+        let progress = nexum_domain::Progress::new(progress.downloaded_bytes, progress.total_bytes);
+        self.commit_task_change(id, |tasks, scheduler| {
+            tasks.update_progress(id, progress)?;
+            scheduler.pause(tasks, id)?;
+            Ok(())
+        })
+    }
+
     pub fn resume_task(&mut self, id: &TaskId) -> Result<bool, CoreError> {
         let mut tasks = self.tasks.clone();
         let mut scheduler = self.scheduler.clone();
