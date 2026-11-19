@@ -1,11 +1,16 @@
 //! Single-connection plain FTP reception into a caller-owned file.
 
 mod reply;
+mod resume;
+pub use resume::{
+    FtpCheckpointRequest, FtpCredentialBinding, FtpPathMode, FtpPrefixProof, FtpResumeBinding,
+    FtpResumeRequest, checkpoint, resume,
+};
 
 use std::fmt;
 use std::fs::File;
 use std::future::Future;
-use std::io::{self, Seek, Write};
+use std::io::{self, Read, Seek, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,6 +61,12 @@ pub enum FtpReceiveError {
     Rejected(FtpStage, u16),
     LengthMismatch,
     SourceSizeChanged,
+    InvalidProof,
+    ResumeBindingMismatch,
+    FileIdentityMismatch,
+    LocalPrefixMismatch,
+    RemotePrefixMismatch,
+    UncommittedTail,
 }
 
 impl fmt::Display for FtpReceiveError {
@@ -72,6 +83,14 @@ impl fmt::Display for FtpReceiveError {
             Self::Rejected(stage, code) => write!(formatter, "FTP {stage:?} rejected ({code})"),
             Self::LengthMismatch => formatter.write_str("FTP data length does not match SIZE"),
             Self::SourceSizeChanged => formatter.write_str("FTP source SIZE changed"),
+            Self::InvalidProof => formatter.write_str("invalid FTP prefix proof"),
+            Self::ResumeBindingMismatch => formatter.write_str("FTP resume binding mismatch"),
+            Self::FileIdentityMismatch => formatter.write_str("FTP held file identity mismatch"),
+            Self::LocalPrefixMismatch => {
+                formatter.write_str("FTP local prefix does not match proof")
+            }
+            Self::RemotePrefixMismatch => formatter.write_str("FTP origin prefix does not match"),
+            Self::UncommittedTail => formatter.write_str("FTP file has an uncommitted tail"),
         }
     }
 }
@@ -204,34 +223,56 @@ pub fn receive(
     file: &mut File,
     control: &FtpTransferControl,
 ) -> Result<Progress, FtpReceiveError> {
-    if control.0.started.swap(true, Ordering::AcqRel) {
-        return Err(FtpReceiveError::ControlAlreadyUsed);
-    }
-    let _finish = FinishOnDrop(&control.0.worker);
+    let _finish = begin(control)?;
     control.checkpoint()?;
-    let (username, password) = match credentials {
-        FtpCredentials::Anonymous => ("anonymous", "anonymous@"),
-        FtpCredentials::Password { username, password } => (username, password),
-    };
-    if endpoint.port() == 0
-        || !valid_arg(path, 32768, false)
-        || !valid_arg(username, 4096, false)
-        || !valid_arg(password, 65536, true)
-    {
-        return Err(FtpReceiveError::InvalidRequest);
-    }
     let metadata = file.metadata().map_err(local_io)?;
     if !metadata.is_file() || metadata.len() != 0 || file.stream_position().map_err(local_io)? != 0
     {
         return Err(FtpReceiveError::InvalidTarget);
     }
 
+    transfer(endpoint, path, credentials, file, control, 0, None)
+}
+
+fn begin(control: &FtpTransferControl) -> Result<FinishOnDrop<'_>, FtpReceiveError> {
+    if control.0.started.swap(true, Ordering::AcqRel) {
+        return Err(FtpReceiveError::ControlAlreadyUsed);
+    }
+    Ok(FinishOnDrop(&control.0.worker))
+}
+
+fn transfer(
+    endpoint: SocketAddr,
+    path: &str,
+    credentials: FtpCredentials<'_>,
+    file: &mut File,
+    control: &FtpTransferControl,
+    prefix: u64,
+    expected_total: Option<u64>,
+) -> Result<Progress, FtpReceiveError> {
+    let login = match credentials {
+        FtpCredentials::Anonymous => ("anonymous", "anonymous@"),
+        FtpCredentials::Password { username, password } => (username, password),
+    };
+    if endpoint.port() == 0
+        || !valid_arg(path, 32768, false)
+        || !valid_arg(login.0, 4096, false)
+        || !valid_arg(login.1, 65536, true)
+    {
+        return Err(FtpReceiveError::InvalidRequest);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(network_io(FtpStage::Connect))?;
     let progress = runtime.block_on(receive_bytes(
-        endpoint, path, username, password, file, control,
+        endpoint,
+        path,
+        login,
+        file,
+        control,
+        prefix,
+        expected_total,
     ))?;
     control.checkpoint()?;
     file.sync_all().map_err(local_io)?;
@@ -362,21 +403,28 @@ impl Connection<'_> {
 async fn receive_bytes(
     endpoint: SocketAddr,
     path: &str,
-    username: &str,
-    password: &str,
+    login: (&str, &str),
     file: &mut File,
     control: &FtpTransferControl,
+    prefix: u64,
+    expected_total: Option<u64>,
 ) -> Result<Progress, FtpReceiveError> {
     let mut connection = Connection {
         stream: BufReader::new(connect(endpoint, FtpStage::Connect, control).await?),
         control,
     };
-    connection.login(username, password).await?;
+    connection.login(login.0, login.1).await?;
     let total = connection.size(path).await?;
+    if expected_total.is_some() && total != expected_total {
+        return Err(FtpReceiveError::SourceSizeChanged);
+    }
+    if total.is_some_and(|total| total < prefix) {
+        return Err(FtpReceiveError::RemotePrefixMismatch);
+    }
     control
         .0
         .worker
-        .record_session_progress(Progress::new(0, total));
+        .record_session_progress(Progress::new(prefix, total));
     let address = connection.passive_address().await?;
     let mut data = connect(address, FtpStage::Passive, control).await?;
     connection
@@ -384,7 +432,7 @@ async fn receive_bytes(
         .await?
         .expect(FtpStage::Retrieve, &[125, 150])?;
 
-    let received = write_data(&mut data, file, control, total).await?;
+    let received = write_data(&mut data, file, control, total, prefix).await?;
     drop(data);
     let stage = FtpStage::Completion;
     control
@@ -411,6 +459,7 @@ async fn write_data(
     file: &mut File,
     control: &FtpTransferControl,
     total: Option<u64>,
+    prefix: u64,
 ) -> Result<u64, FtpReceiveError> {
     let mut received = 0u64;
     let mut buffer = [0u8; 32 * 1024];
@@ -424,6 +473,9 @@ async fn write_data(
             })
             .await?;
         if read == 0 {
+            if received < prefix {
+                return Err(FtpReceiveError::RemotePrefixMismatch);
+            }
             return Ok(received);
         }
         let end = received
@@ -432,7 +484,18 @@ async fn write_data(
         if total.is_some_and(|total| end > total) {
             return Err(FtpReceiveError::LengthMismatch);
         }
-        let mut pending = &buffer[..read];
+        let comparing = (prefix.saturating_sub(received)).min(read as u64) as usize;
+        if comparing != 0 {
+            control.checkpoint()?;
+            let mut saved = [0u8; 32 * 1024];
+            file.read_exact(&mut saved[..comparing]).map_err(local_io)?;
+            control.checkpoint()?;
+            if saved[..comparing] != buffer[..comparing] {
+                return Err(FtpReceiveError::RemotePrefixMismatch);
+            }
+            received += comparing as u64;
+        }
+        let mut pending = &buffer[comparing..read];
         while !pending.is_empty() {
             control.checkpoint()?;
             match file.write(pending) {

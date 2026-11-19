@@ -179,6 +179,22 @@ On prefix mismatch, close the whole connection and permit at most one zero-offse
 
 Plain FTP cannot prove a consistent snapshot from a malicious or continuously changing origin. This strategy prevents blind reuse of an unchecked prefix without asserting remote immutability. Verify an external expected digest when provided; otherwise SHA256 establishes local completion/recovery proof only.
 
+<a id="held-prefix-recovery"></a>
+
+### 持有文件前缀恢复切片 / Held-file prefix recovery slice
+
+基线为 `b6c9a8936382323d9a6fefa67e1d83a874ebc672`。新增独立的 `ftp-held-prefix/v1` 证明，绑定 Server 实例、任务、无秘密来源 origin、命令路径及路径模式、目标、凭据 ID／revision、尝试 generation、父目录及文件身份、已同步前缀长度／SHA-256 和可用 SIZE。仅从持有的文件及目录句柄取得身份。编码记录最大 64 KiB，未知版本／字段和绑定不符均拒绝。
+
+The baseline is `b6c9a8936382323d9a6fefa67e1d83a874ebc672`. An independent `ftp-held-prefix/v1` proof binds the Server instance, task, secret-free origin, command path and path mode, destination, credential ID/revision, attempt generation, parent and file identities, synced prefix length/SHA-256 and available SIZE. Identities come from held file and directory handles. Encoded records are limited to 64 KiB. Unknown versions/fields and binding mismatches fail.
+
+创建证明先确认调用方声明的可信长度与实际长度一致，分块计算摘要并同步文件，再返回有界编码。调用方负责在其持久层原子保存、按任务领取新 generation 及序列化尝试。恢复先校验绑定、身份及本地摘要，再发一次零偏移 RETR，比较网络前缀，匹配后在同一响应追加。恢复重读不增加整文件进度，追加前再次检查暂停／取消。前缀不匹配、短文件或未确认尾部保留原对象并报告具体错误。
+
+Proof creation requires the caller's trusted length to match the actual length, hashes chunks and syncs the file before returning bounded encoded data. The caller atomically persists it, claims a new task generation and serializes attempts. Recovery validates bindings, identities and the local digest before one zero-offset RETR, compares its prefix and appends from that same response. Prefix retransmission leaves whole-file progress unchanged. Pause/cancel is checked before appending. A mismatched prefix, short file or uncommitted tail preserves the held object and returns a specific error.
+
+此层证明作为后续 `ftp-resume/v1` 持久化消费者的输入。持久层的原子领取、目录项所有权、安全发布及最终状态保存仍由对应消费者验收。验收使用实际进程退出、重新打开句柄及真实 FTP 回环连接，检查恢复后的字节、摘要和进度。
+
+This layer supplies proof to the later `ftp-resume/v1` persistence consumer. Atomic claiming, directory-entry ownership, safe publication and final-state persistence retain their consumer acceptance gates. Tests use actual process exit, reopened handles and real loopback FTP connections to check recovered bytes, digest and progress.
+
 ## 完成、文件安全与兼容 / Completion, file safety and compatibility
 
 停写、长度验证和 sync 后先保存完成证明，再在同一取消决定锁内安全地不覆盖发布，最后原子保存最终进度和 Completed。保存失败保留证明，重启优先离线对账，不发额外 RETR。沿用旧 HTTP v1 路径／读取，FTP 新格式与目录独立版本化，不能静默修改 `http-completions` 含义。
