@@ -8,6 +8,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use nexum_engine::ftp::{FtpCredentials, FtpReceiveError, FtpStage, FtpTransferControl, receive};
+#[path = "support/ftp_resume.rs"]
+mod resume;
 
 const WAIT: Duration = Duration::from_secs(12);
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
