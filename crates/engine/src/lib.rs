@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 mod completion;
 mod file_identity;
+pub mod ftp;
 #[cfg(test)]
 mod segment_completion_tests;
 mod segment_control;
