@@ -479,7 +479,7 @@ mod sqlite_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -524,7 +524,7 @@ mod sqlite_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         drop(repository);
         let _ = std::fs::remove_file(path);
     }
