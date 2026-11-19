@@ -89,13 +89,28 @@ struct ControlState {
 pub struct FtpTransferControl(Arc<ControlState>);
 
 impl FtpTransferControl {
-    /// Waits for the worker to stop writing. Returns whether it is parked.
+    /// Waits for the worker to park. Returns false if the attempt finishes or
+    /// a concurrent resume clears the pause request before it is observed.
     pub fn request_pause(&self) -> Result<bool, FtpReceiveError> {
-        self.0
-            .worker
-            .request_pause()
-            .map_err(|_| FtpReceiveError::Cancelled)?;
-        Ok(self.0.worker.is_paused())
+        let (lock, wake) = &*self.0.worker.inner;
+        let mut state = lock.lock().expect("FTP transfer control mutex poisoned");
+        if state.cancelled {
+            return Err(FtpReceiveError::Cancelled);
+        }
+        if state.finished {
+            return Ok(false);
+        }
+        state.pause_requested = true;
+        wake.notify_all();
+        let state = wake
+            .wait_while(state, |state| {
+                state.pause_requested && !(state.paused || state.cancelled || state.finished)
+            })
+            .expect("FTP transfer control mutex poisoned while waiting for pause");
+        if state.cancelled {
+            return Err(FtpReceiveError::Cancelled);
+        }
+        Ok(state.paused)
     }
 
     pub fn resume(&self) -> Result<(), FtpReceiveError> {
@@ -299,7 +314,7 @@ impl Connection<'_> {
         if reply.code == 331 {
             self.command(stage, "PASS", Some(password))
                 .await?
-                .expect(stage, &[230])?;
+                .expect(stage, &[202, 230])?;
         } else {
             reply.expect(stage, &[230])?;
         }
@@ -325,6 +340,11 @@ impl Connection<'_> {
             .get_ref()
             .peer_addr()
             .map_err(network_io(stage))?;
+        if let SocketAddr::V6(peer) = address
+            && let Some(ip) = peer.ip().to_ipv4_mapped()
+        {
+            address = SocketAddr::new(ip.into(), peer.port());
+        }
         let reply = self.command(stage, "EPSV", None).await?;
         let port = if matches!(reply.code, 500 | 502) && address.is_ipv4() {
             let reply = self.command(stage, "PASV", None).await?;
@@ -429,5 +449,38 @@ async fn write_data(
                 Err(error) => return Err(local_io(error)),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+
+    use super::*;
+
+    #[test]
+    fn resume_releases_a_pause_request_before_the_worker_acknowledges() {
+        let control = FtpTransferControl::default();
+        let pending = control.clone();
+        let (send, result) = mpsc::channel();
+        let waiter = thread::spawn(move || send.send(pending.request_pause()));
+        let (lock, wake) = &*control.0.worker.inner;
+        let state = lock.lock().unwrap();
+        let (state, _) = wake
+            .wait_timeout_while(state, Duration::from_secs(1), |state| {
+                !state.pause_requested
+            })
+            .unwrap();
+        let requested = state.pause_requested;
+        drop(state);
+        control.resume().unwrap();
+        let released = result.recv_timeout(Duration::from_secs(1));
+        if released.is_err() {
+            control.cancel();
+        }
+        waiter.join().unwrap().unwrap();
+        assert!(requested);
+        assert_eq!(released, Ok(Ok(false)));
     }
 }

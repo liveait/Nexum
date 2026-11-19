@@ -141,13 +141,13 @@ The Scheduler owns retry accounting, without an independent unbounded library lo
 
 This slice starts at `c1a03660db9a80be14a07531a563278bebfa470c`. Engine takes a resolved endpoint, decoded command path, anonymous or username/password input, and a caller-exclusive empty file handle. It uses the existing Tokio runtime and single-worker pause controls. The caller owns the thread lifecycle and joins before releasing the file. Engine writes and syncs the held object. Server dispatch, recovery records and publication retain their follow-up dependencies.
 
-固定候选 suppaftp 的实际试验发现 trace 泄漏认证命令及回复，且接受缺少 CRLF 或匹配多行结束码的最终回复。本切片用有界 FTP 回复解析和固定错误类型，拒绝不完整的回复。IPv4 仅在 EPSV 返回 500 或 502 时尝试一次 PASV，数据地址始终来自控制连接。SIZE 可用时在数据 EOF、226／250 及最终 SIZE 后检查长度一致。暂停时间从主动网络等待预算中扣除。
+固定候选 suppaftp 的实际试验发现 trace 泄漏认证命令及回复，且接受缺少 CRLF 或匹配多行结束码的最终回复。本切片用有界 FTP 回复解析和固定错误类型，拒绝不完整的回复。IPv4（包括 IPv4 映射地址）仅在 EPSV 返回 500 或 502 时尝试一次 PASV，数据地址始终来自控制连接。SIZE 可用时在数据 EOF、226／250 及最终 SIZE 后检查长度一致。暂停时间从主动网络等待预算中扣除。恢复撤销尚未确认的暂停时，暂停调用结束并报告未停写。
 
-The pinned suppaftp probe exposed login commands and replies in trace logs and accepted final replies without CRLF or a matching multiline terminator. This slice uses bounded FTP reply parsing and structured errors that reject incomplete replies. On IPv4, only EPSV 500 or 502 permits one PASV attempt. The data address always comes from the control connection. When SIZE is available, lengths must agree after data EOF, 226/250 and the final SIZE response. Active network deadlines exclude time parked for pause.
+The pinned suppaftp probe exposed login commands and replies in trace logs and accepted final replies without CRLF or a matching multiline terminator. This slice uses bounded FTP reply parsing and structured errors that reject incomplete replies. On IPv4, including mapped addresses, only EPSV 500 or 502 permits one PASV attempt. The data address always comes from the control connection. When SIZE is available, lengths must agree after data EOF, 226/250 and the final SIZE response. Active network deadlines exclude time parked for pause. A resume that supersedes an unacknowledged pause releases its caller with an unpaused result.
 
-实际回环消费者验证同一 RETR 暂停／恢复、停写字节快照、数据和最终回复等待中取消、目录项替换后只写原对象、IPv4 PASV 地址固定、IPv6 EPSV、回复和数据停滞上限，以及长度和认证错误。日志测试使用合成认证字段。FTP 明文来源、已解析端点和持有文件是本切片的执行范围。
+实际回环消费者验证同一 RETR 暂停／恢复、停写字节快照、数据和最终回复等待中取消、目录项替换后只写原对象、IPv4 PASV 地址固定、IPv6 EPSV、回复和数据停滞上限，以及长度和认证错误。认证异常检查确认错误的 Debug 和 Display 不包含合成认证字段及源站回复。FTP 明文来源、已解析端点和持有文件是本切片的执行范围。
 
-Actual loopback consumers verify pause/resume on one RETR, the quiescent byte snapshot, cancellation during data and final-reply waits, held-object writes across directory-entry replacement, IPv4 PASV address pinning, IPv6 EPSV, reply and data-stall bounds, and length and authentication failures. Log checks use synthetic credentials. This slice operates on plain FTP, a resolved endpoint and a held file.
+Actual loopback consumers verify pause/resume on one RETR, the quiescent byte snapshot, cancellation during data and final-reply waits, held-object writes across directory-entry replacement, IPv4 PASV address pinning, IPv6 EPSV, reply and data-stall bounds, and length and authentication failures. Authentication failures verify that Debug and Display omit synthetic credentials and origin replies. This slice operates on plain FTP, a resolved endpoint and a held file.
 
 ## 版本化恢复 / Versioned recovery
 

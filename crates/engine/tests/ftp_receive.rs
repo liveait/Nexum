@@ -322,26 +322,36 @@ fn bounds_idle_data_and_incomplete_final_replies() {
 
 #[test]
 fn ipv4_falls_back_to_pasv_once_and_pins_the_actual_control_peer() {
-    let (endpoint, origin) = spawn_origin(move |mut origin| {
-        origin.login();
-        origin.size("550 SIZE unavailable\r\n");
-        origin.command("EPSV");
-        origin.reply("502 Command not implemented\r\n");
-        origin.command("PASV");
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let [high, low] = listener.local_addr().unwrap().port().to_be_bytes();
-        origin.reply(&format!("227 Passive mode 127,0,0,2,{high},{low}.\r\n"));
-        let mut data = origin.start_retr(&listener);
-        data.write_all(b"yes").unwrap();
-        drop(data);
-        origin.reply("226 Complete\r\n");
-        origin.expect_closed();
-    });
-    let (held, mut file) = HeldFile::new();
-    let progress = fetch(endpoint, &mut file, &FtpTransferControl::default()).unwrap();
-    origin.join().unwrap();
-    assert_eq!(progress.total_bytes, Some(3));
-    assert_eq!(fs::read(held.0.join("file.part")).unwrap(), b"yes");
+    for mapped in [false, true] {
+        let (endpoint, origin) = spawn_origin(move |mut origin| {
+            origin.login();
+            origin.size("550 SIZE unavailable\r\n");
+            origin.command("EPSV");
+            origin.reply("502 Command not implemented\r\n");
+            origin.command("PASV");
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let [high, low] = listener.local_addr().unwrap().port().to_be_bytes();
+            origin.reply(&format!("227 Passive mode 127,0,0,2,{high},{low}.\r\n"));
+            let mut data = origin.start_retr(&listener);
+            data.write_all(b"yes").unwrap();
+            drop(data);
+            origin.reply("226 Complete\r\n");
+            origin.expect_closed();
+        });
+        let endpoint = if mapped {
+            let SocketAddr::V4(address) = endpoint else {
+                unreachable!("IPv4 loopback fixture");
+            };
+            SocketAddr::new(address.ip().to_ipv6_mapped().into(), address.port())
+        } else {
+            endpoint
+        };
+        let (held, mut file) = HeldFile::new();
+        let progress = fetch(endpoint, &mut file, &FtpTransferControl::default()).unwrap();
+        origin.join().unwrap();
+        assert_eq!(progress.total_bytes, Some(3));
+        assert_eq!(fs::read(held.0.join("file.part")).unwrap(), b"yes");
+    }
 }
 
 #[test]
@@ -521,6 +531,40 @@ fn authentication_errors_omit_credentials_and_raw_origin_text() {
             .iter()
             .all(|sentinel| !rendered.contains(sentinel))
     );
+}
+
+#[test]
+fn logs_in_when_pass_is_reported_as_superfluous() {
+    let (endpoint, origin) = spawn_origin(move |mut origin| {
+        origin.reply("220 Ready\r\n");
+        origin.command("USER account");
+        origin.reply("331 Continue\r\n");
+        origin.command("PASS sample-test-password");
+        origin.reply("202 PASS superfluous\r\n");
+        origin.command("TYPE I");
+        origin.reply("200 Binary\r\n");
+        origin.size("213 3\r\n");
+        let mut data = origin.open_data();
+        data.write_all(b"yes").unwrap();
+        drop(data);
+        origin.reply("226 Complete\r\n");
+        origin.size("213 3\r\n");
+        origin.expect_closed();
+    });
+    let (held, mut file) = HeldFile::new();
+    let result = receive(
+        endpoint,
+        "pub/a b.bin",
+        FtpCredentials::Password {
+            username: "account",
+            password: "sample-test-password",
+        },
+        &mut file,
+        &FtpTransferControl::default(),
+    );
+    assert_eq!(result.unwrap().downloaded_bytes, 3);
+    origin.join().unwrap();
+    assert_eq!(fs::read(held.0.join("file.part")).unwrap(), b"yes");
 }
 
 #[test]
