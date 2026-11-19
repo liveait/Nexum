@@ -13,3 +13,6 @@ nexum-resolver = { path = "../resolver" }
 nexum-scheduler = { path = "../scheduler" }
 nexum-storage = { path = "../storage" }
 nexum-task = { path = "../task" }
+
+[dev-dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }

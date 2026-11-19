@@ -1,5 +1,6 @@
 //! Persistence boundaries for Nexum task state.
 
+pub mod ftp_resume;
 pub mod origin;
 
 use nexum_domain::{Destination, DownloadSource, Progress, TaskId};
@@ -223,7 +224,7 @@ impl SqliteRepository {
             })
             .map_err(|e| StorageError::Other(e.to_string()))?;
 
-        if version > 3 {
+        if version > 4 {
             return Err(StorageError::Other(format!(
                 "unsupported schema version: {version}"
             )));
@@ -270,7 +271,8 @@ impl SqliteRepository {
                 .map_err(|e| StorageError::Other(e.to_string()))?;
         }
 
-        self.migrate_origins()
+        self.migrate_origins()?;
+        self.migrate_ftp_resume()
     }
 
     fn insert_task(

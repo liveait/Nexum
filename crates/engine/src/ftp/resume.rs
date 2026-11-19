@@ -73,6 +73,18 @@ pub struct FtpPrefixProof {
 }
 
 impl FtpPrefixProof {
+    pub fn binding(&self) -> &FtpResumeBinding {
+        &self.binding
+    }
+
+    pub fn attempt_generation(&self) -> &str {
+        &self.attempt_generation
+    }
+
+    pub fn progress(&self) -> Progress {
+        Progress::new(self.trusted_bytes, self.total_bytes)
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, FtpReceiveError> {
         self.validate()?;
         let bytes = serde_json::to_vec(self).map_err(|_| FtpReceiveError::InvalidProof)?;

@@ -1,4 +1,5 @@
 //! Nexum Core orchestration layer.
+pub mod ftp_resume;
 
 pub use nexum_domain;
 pub use nexum_engine;
