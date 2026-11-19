@@ -195,6 +195,26 @@ Proof creation requires the caller's trusted length to match the actual length, 
 
 This layer supplies proof to the later `ftp-resume/v1` persistence consumer. Atomic claiming, directory-entry ownership, safe publication and final-state persistence retain their consumer acceptance gates. Tests use actual process exit, reopened handles and real loopback FTP connections to check recovered bytes, digest and progress.
 
+<a id="sqlite-checkpoint-claims"></a>
+
+### SQLite 检查点与尝试领取 / SQLite checkpoints and attempt claiming
+
+本切片基线为 `8b90113bce4d170b67c24ef18825c2bbdf4589cc`。schema 4 新增每任务的 FTP 尝试行，在同一 SQLite 事务中保存原始有界前缀证明、可信进度及递增的检查点 revision。领取使用预期的旧 generation 比较，生成随机新 generation，保留旧证明。保存同时比较当前 generation、revision、Server 实例和完整来源 incarnation；旧尝试、重复提交及删除重建后的旧引用均拒绝。
+
+This slice starts at `8b90113bce4d170b67c24ef18825c2bbdf4589cc`. Schema 4 adds a per-task FTP attempt row. One SQLite transaction saves the original bounded prefix proof, trusted progress and increasing checkpoint revision. Claims compare the expected old generation, assign a fresh random generation and retain the old proof. Saves compare the current generation, revision, Server instance and full origin incarnation. Stale attempts, duplicate submissions and references surviving task recreation are rejected.
+
+Core 从独立保存的来源重建引擎 binding，使用证明的只读字段检查绑定、generation 及可信进度。数据库拒绝提交时，内存进度与事件保持原状。删除任务在同一事务中清理尝试记录，保留原有凭据 tombstone。schema 3 数据按原样迁移；旧版本程序拒绝 schema 4。
+
+Core reconstructs Engine bindings from the independently stored origin and validates proof bindings, generation and trusted progress through read-only proof metadata. A rejected database commit preserves in-memory progress and events. Task removal clears attempt records in the same transaction while retaining existing credential tombstones. Schema 3 data migrates intact. Older programs reject schema 4.
+
+领取标识只隔离数据库提交，该 API 不领取调度槽位。调用方仍须先停止并回收旧 Worker，持有 Server 数据目录的独占权及目标文件的独占写入权，再领取新尝试。摘要与网络操作在 Core 锁外执行，提交时重新检查领取。新 API 由跨进程消费者验证；Server 下载派发、安全发布、完成对账和 App 接线继续按后续门槛推进。
+
+Claim tokens fence database commits. This API does not claim a scheduler slot. Before a new claim the caller still stops and joins the old worker and holds exclusive Server data-directory ownership and target-file writer access. Hashing and networking run outside the Core lock, with the claim checked again at commit. Cross-process consumers verify the new APIs. Server download dispatch, safe publication, completion reconciliation and App integration retain their later gates.
+
+数据库拒绝新的检查点时，文件中已同步的新增字节仍保留。旧证明面对这些未提交尾部会明确失败。安全截尾和文件所有权机制完成后才能接入自动恢复。
+
+When SQLite rejects a new checkpoint, newly synced file bytes remain. The old proof rejects that uncommitted tail explicitly. Automatic recovery requires the safe trimming and file-ownership mechanisms.
+
 ## 完成、文件安全与兼容 / Completion, file safety and compatibility
 
 停写、长度验证和 sync 后先保存完成证明，再在同一取消决定锁内安全地不覆盖发布，最后原子保存最终进度和 Completed。保存失败保留证明，重启优先离线对账，不发额外 RETR。沿用旧 HTTP v1 路径／读取，FTP 新格式与目录独立版本化，不能静默修改 `http-completions` 含义。

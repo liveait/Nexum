@@ -62,7 +62,7 @@ pub(crate) fn database_error(error: rusqlite::Error) -> StorageError {
         StorageError::Other("origin database operation failed".into())
     }
 }
-fn read_record(
+pub(crate) fn read_record(
     connection: &Connection,
     id: &str,
     state: &str,
@@ -135,7 +135,7 @@ impl SqliteRepository {
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS origin_instance (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS task_origins(task_id TEXT PRIMARY KEY, operation_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','active')), record TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS origin_cleanup(operation_id TEXT PRIMARY KEY, record TEXT NOT NULL);
-            UPDATE schema_version SET version=3;").map_err(database_error)?;
+            UPDATE schema_version SET version=MAX(version,3);").map_err(database_error)?;
         transaction
             .execute(
                 "INSERT OR IGNORE INTO origin_instance(singleton,identity) VALUES(1,?1)",
@@ -280,6 +280,9 @@ impl SqliteRepository {
                 "DELETE FROM task_origins WHERE task_id=?1 AND status='active'",
                 [id.as_str()],
             )
+            .map_err(database_error)?;
+        transaction
+            .execute("DELETE FROM ftp_attempts WHERE task_id=?1", [id.as_str()])
             .map_err(database_error)?;
         transaction
             .execute("DELETE FROM tasks WHERE id=?1", [id.as_str()])
