@@ -159,12 +159,42 @@ fn held_identity(file: &File, directory: bool) -> Result<FileIdentity, FtpReceiv
 }
 
 fn exact_length(file: &File, trusted: u64) -> Result<(), FtpReceiveError> {
-    let length = file.metadata().map_err(local_io)?.len();
+    let length = minimum_length(file, trusted)?;
     if length > trusted {
         return Err(FtpReceiveError::UncommittedTail);
     }
+    Ok(())
+}
+
+fn minimum_length(file: &File, trusted: u64) -> Result<u64, FtpReceiveError> {
+    let length = file.metadata().map_err(local_io)?.len();
     if length < trusted {
         return Err(FtpReceiveError::LocalPrefixMismatch);
+    }
+    Ok(length)
+}
+
+fn verify_request(request: &FtpResumeRequest<'_>) -> Result<(), FtpReceiveError> {
+    request.proof.validate()?;
+    validate_binding(request.binding)?;
+    if &request.proof.binding != request.binding
+        || !valid_arg(request.attempt_generation, 256, false)
+        || request.attempt_generation == request.proof.attempt_generation
+    {
+        return Err(FtpReceiveError::ResumeBindingMismatch);
+    }
+    Ok(())
+}
+
+fn verify_objects(
+    file: &File,
+    directory: &File,
+    proof: &FtpPrefixProof,
+) -> Result<(), FtpReceiveError> {
+    if held_identity(file, false)? != proof.partial_identity
+        || held_identity(directory, true)? != proof.parent_identity
+    {
+        return Err(FtpReceiveError::FileIdentityMismatch);
     }
     Ok(())
 }
@@ -230,6 +260,64 @@ pub fn checkpoint(
     Ok(proof)
 }
 
+/// Explicitly discards only the uncommitted tail of a proof-bound held file.
+///
+/// The caller joins the old worker, owns file writes and supplies the current
+/// binding and fresh generation. Proof and SQLite data are unchanged. Other
+/// aliases of this same object see its new length. A sync error may occur after
+/// truncation, so retain proof and retry with a fresh control. Local file I/O
+/// holds the repair decision lock and cannot be forcibly interrupted.
+pub fn repair_uncommitted_tail(
+    file: &mut File,
+    directory: &File,
+    request: FtpResumeRequest<'_>,
+    control: &FtpTransferControl,
+) -> Result<Progress, FtpReceiveError> {
+    repair_tail(file, directory, request, control, || {}, File::sync_all)
+}
+
+fn repair_tail(
+    file: &mut File,
+    directory: &File,
+    request: FtpResumeRequest<'_>,
+    control: &FtpTransferControl,
+    before_decision: impl FnOnce(),
+    synchronize: impl FnOnce(&File) -> std::io::Result<()>,
+) -> Result<Progress, FtpReceiveError> {
+    let _finish = begin(control)?;
+    control.checkpoint()?;
+    verify_request(&request)?;
+    let proof = request.proof;
+    verify_objects(file, directory, proof)?;
+    minimum_length(file, proof.trusted_bytes)?;
+    if digest(file, proof.trusted_bytes, control)? != proof.prefix_sha256 {
+        return Err(FtpReceiveError::LocalPrefixMismatch);
+    }
+    verify_objects(file, directory, proof)?;
+    before_decision();
+    let (lock, wake) = &*control.0.worker.inner;
+    loop {
+        control.checkpoint()?;
+        let mut state = lock.lock().expect("FTP repair control mutex poisoned");
+        if state.cancelled {
+            return Err(FtpReceiveError::Cancelled);
+        }
+        if state.pause_requested {
+            continue;
+        }
+        let length = minimum_length(file, proof.trusted_bytes)?;
+        if length > proof.trusted_bytes {
+            file.set_len(proof.trusted_bytes).map_err(local_io)?;
+        }
+        synchronize(file).map_err(local_io)?;
+        let progress = proof.progress();
+        control.0.worker.record_session_progress(progress.clone());
+        state.finished = true;
+        wake.notify_all();
+        return Ok(progress);
+    }
+}
+
 /// Verifies local proof, then compares the prefix of one zero-offset RETR
 /// before appending. No path is opened, truncated, removed or published.
 pub fn resume(
@@ -243,21 +331,13 @@ pub fn resume(
     let _finish = begin(control)?;
     control.checkpoint()?;
     let proof = request.proof;
-    proof.validate()?;
-    validate_binding(request.binding)?;
-    if &proof.binding != request.binding
-        || !valid_arg(request.attempt_generation, 256, false)
-        || request.attempt_generation == proof.attempt_generation
-        || request.binding.credential.is_some()
-            != matches!(credentials, FtpCredentials::Password { .. })
+    verify_request(&request)?;
+    if request.binding.credential.is_some()
+        != matches!(credentials, FtpCredentials::Password { .. })
     {
         return Err(FtpReceiveError::ResumeBindingMismatch);
     }
-    if held_identity(file, false)? != proof.partial_identity
-        || held_identity(directory, true)? != proof.parent_identity
-    {
-        return Err(FtpReceiveError::FileIdentityMismatch);
-    }
+    verify_objects(file, directory, proof)?;
     exact_length(file, proof.trusted_bytes)?;
     if digest(file, proof.trusted_bytes, control)? != proof.prefix_sha256 {
         return Err(FtpReceiveError::LocalPrefixMismatch);
@@ -277,6 +357,10 @@ pub fn resume(
         proof.total_bytes,
     )
 }
+
+#[cfg(all(test, unix))]
+#[path = "tail_tests.rs"]
+mod tail_tests;
 
 #[cfg(test)]
 mod tests {

@@ -4,7 +4,7 @@ mod reply;
 mod resume;
 pub use resume::{
     FtpCheckpointRequest, FtpCredentialBinding, FtpPathMode, FtpPrefixProof, FtpResumeBinding,
-    FtpResumeRequest, checkpoint, resume,
+    FtpResumeRequest, checkpoint, repair_uncommitted_tail, resume,
 };
 
 use std::fmt;

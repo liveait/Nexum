@@ -256,6 +256,81 @@ fn failed_checkpoint_preserves_old_proof_and_rejects_the_unsaved_tail() {
     );
 }
 
+#[test]
+fn repairs_a_rejected_checkpoint_tail_then_resumes_using_the_sqlite_proof() {
+    let fixture = Fixture::new();
+    let mut owner = core(fixture.db());
+    create(&mut owner);
+    let id = TaskId::from("ftp");
+    let first = owner.claim_ftp_attempt(&id, None).unwrap();
+    let mut file = fixture.file();
+    file.write_all(b"first").unwrap();
+    let directory = File::open(&fixture.0).unwrap();
+    let first_proof = proof(&mut file, &directory, &first, 5);
+    let saved = owner.save_ftp_checkpoint(&first, &first_proof).unwrap();
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::End(0)).unwrap();
+    file.write_all(b"end").unwrap();
+    let unsaved = proof(&mut file, &directory, &saved, 8);
+    let connection = rusqlite::Connection::open(fixture.db()).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_save BEFORE UPDATE OF proof ON ftp_attempts BEGIN SELECT RAISE(ABORT,'reject save'); END").unwrap();
+    assert!(owner.save_ftp_checkpoint(&saved, &unsaved).is_err());
+    drop(owner);
+    let mut owner = core(fixture.db());
+    owner.recover().unwrap();
+    let old = owner.load_ftp_attempt(&id).unwrap().unwrap();
+    let next = owner.claim_ftp_attempt(&id, Some(&old)).unwrap();
+    let request = || FtpResumeRequest {
+        binding: next.binding(),
+        attempt_generation: next.generation(),
+        proof: next.proof().unwrap(),
+    };
+    let repaired = ftp::repair_uncommitted_tail(
+        &mut file,
+        &directory,
+        request(),
+        &FtpTransferControl::default(),
+    )
+    .unwrap();
+    assert_eq!(repaired, Progress::new(5, Some(8)));
+    assert_eq!(fs::read(fixture.0.join("partial")).unwrap(), b"first");
+    let unchanged = owner.load_ftp_attempt(&id).unwrap().unwrap();
+    assert_eq!(unchanged.generation(), next.generation());
+    assert_eq!(unchanged.revision(), saved.revision());
+    assert_eq!(
+        unchanged.proof().unwrap().encode().unwrap(),
+        first_proof.encode().unwrap()
+    );
+    assert_eq!(
+        owner.repository.get(&id).unwrap().unwrap().progress,
+        repaired
+    );
+    connection
+        .execute_batch("DROP TRIGGER reject_save")
+        .unwrap();
+    let (endpoint, origin) = origin(false);
+    let complete = ftp::resume(
+        endpoint,
+        FtpCredentials::Anonymous,
+        &mut file,
+        &directory,
+        request(),
+        &FtpTransferControl::default(),
+    )
+    .unwrap();
+    origin.join().unwrap();
+    assert_eq!(complete, Progress::new(8, Some(8)));
+    let final_proof = proof(&mut file, &directory, &next, 8);
+    let committed = owner.save_ftp_checkpoint(&next, &final_proof).unwrap();
+    assert_eq!(committed.revision(), 2);
+    assert_eq!(
+        owner.repository.get(&id).unwrap().unwrap().progress,
+        complete
+    );
+    assert_eq!(fs::read(fixture.0.join("partial")).unwrap(), b"firstend");
+    assert!(owner.save_ftp_checkpoint(&saved, &first_proof).is_err());
+}
+
 fn origin(partial: bool) -> (SocketAddr, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = listener.local_addr().unwrap();

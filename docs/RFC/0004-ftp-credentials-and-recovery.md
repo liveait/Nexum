@@ -215,6 +215,22 @@ Claim tokens fence database commits. This API does not claim a scheduler slot. B
 
 When SQLite rejects a new checkpoint, newly synced file bytes remain. The old proof rejects that uncommitted tail explicitly. Automatic recovery requires the safe trimming and file-ownership mechanisms.
 
+<a id="held-tail-repair"></a>
+
+### 持有对象尾部修复 / Held-object tail repair
+
+基线为 `7653eeba615518b47f477d4d3ef33a41f3632937`。新增显式 `repair_uncommitted_tail` 入口，复用当前来源 binding、新领取的 generation 和原前缀证明。先验证父目录／文件句柄身份及可信前缀摘要，再以原文件句柄调用 `File::set_len`，截到可信长度并同步。空前缀和已经等长的文件同样校验／同步，可用于中断后的幂等重试。普通 `resume` 继续要求精确长度，修复由拥有文件的消费者明确调用。 [Rust File](https://doc.rust-lang.org/std/fs/struct.File.html#method.set_len)
+
+The baseline is `7653eeba615518b47f477d4d3ef33a41f3632937`. A separate `repair_uncommitted_tail` entry uses the current origin binding, newly claimed generation and original prefix proof. It validates held parent/file identities and the trusted prefix digest, then calls `File::set_len` through that file handle and syncs it. Empty prefixes and already exact-length files are validated and synced too, permitting idempotent retry after interruption. Ordinary `resume` keeps its exact-length requirement. The file-owning consumer explicitly requests repair. [Rust File](https://doc.rust-lang.org/std/fs/struct.File.html#method.set_len)
+
+截断、同步、可信进度及修复完成在暂停／取消的同一决定锁内执行。先取得该锁的取消阻止修复，暂停使修复停驻；先取得锁的修复完成后，后到的取消观察已完成状态。本地文件 I/O 的阻塞仍受调用方退出／join 边界约束。同步失败保留具体错误和原证明，文件可能已经截断，重试会重新验证前缀并同步。
+
+Truncation, sync, trusted progress and successful repair completion share the pause/cancel decision lock. Cancellation winning that lock prevents repair, while pause parks it. When repair wins, later cancellation observes its finished state. Blocking local file I/O still requires the caller's exit/join boundary. Sync failure preserves its specific error and the original proof. The file may already be truncated; retry revalidates and syncs the prefix.
+
+所有修改只作用于证明绑定的对象。目录项被换成另一普通文件、符号链接或无关 hard link 时，替换对象保留。指向同一 inode 的其他名称会观察到该对象的长度变化。调用方负责回收旧 Worker、独占写入及按 SQLite claim 隔离提交；证明和数据库进度在修复期间保持原样。精确替换、控制交错、失败注入和实际子进程终止后重试均需验证。发布、名称清理和最终 Completed 继续按各自门槛推进。
+
+All mutations affect the proof-bound object. Replacing its former entry with another regular file, symlink or unrelated hard link preserves the replacement. Other names for the same inode observe its length change. The caller joins the old worker, owns file writes and fences commits through the SQLite claim. Proof and database progress stay intact during repair. Exact replacement races, control interleavings, injected failure and retry after actual child termination require validation. Publication, name cleanup and final Completed retain their own gates.
+
 ## 完成、文件安全与兼容 / Completion, file safety and compatibility
 
 停写、长度验证和 sync 后先保存完成证明，再在同一取消决定锁内安全地不覆盖发布，最后原子保存最终进度和 Completed。保存失败保留证明，重启优先离线对账，不发额外 RETR。沿用旧 HTTP v1 路径／读取，FTP 新格式与目录独立版本化，不能静默修改 `http-completions` 含义。

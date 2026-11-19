@@ -4,7 +4,7 @@ use nexum_engine::ftp::{
     FtpResumeRequest, checkpoint, resume,
 };
 
-fn binding() -> FtpResumeBinding {
+pub(super) fn binding() -> FtpResumeBinding {
     FtpResumeBinding {
         server_instance_id: "server-instance".into(),
         task_id: "ftp-task".into(),
@@ -17,7 +17,7 @@ fn binding() -> FtpResumeBinding {
     }
 }
 
-fn proof(
+pub(super) fn proof(
     file: &mut File,
     directory: &File,
     binding: &FtpResumeBinding,
@@ -37,7 +37,7 @@ fn proof(
     .unwrap()
 }
 
-fn resume_request<'a>(
+pub(super) fn resume_request<'a>(
     binding: &'a FtpResumeBinding,
     proof: &'a FtpPrefixProof,
 ) -> FtpResumeRequest<'a> {
@@ -299,7 +299,13 @@ fn prefix_comparison_can_pause_and_cancel_without_counting_retransmission() {
         let mut data = origin.open_data();
         data.write_all(b"fir").unwrap();
         release.send(()).unwrap();
-        assert_eq!(data.read(&mut [0]).unwrap(), 0);
+        // Cancellation can drop the socket before consuming these bytes. Both
+        // EOF and a reset prove closure; timeout and other I/O errors do not.
+        match data.read(&mut [0]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            result => panic!("cancelled data connection did not close: {result:?}"),
+        }
         origin.expect_closed();
     });
     let (held, mut file) = HeldFile::new();

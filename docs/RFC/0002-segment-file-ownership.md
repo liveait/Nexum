@@ -63,6 +63,10 @@ The following separates documented capabilities from project-specific deductions
 
 ## 决策、兼容性与替代方案 / Decision, compatibility and alternatives
 
+2026-11-19 补充核对 Apple DTS 的 2026 年 10 月回复：当前缺少从已打开 fd 创建同对象 hard link、并阻止同用户来源名称替换的受支持 API；后续回复也确认 rename 具有该来源选择问题。该证据继续支持当前发布依赖状态。持有 fd 的文件内容修改可独立验证，FTP 尾部修复按 RFC 0004 推进。 [Apple DTS](https://developer.apple.com/forums/thread/850377)
+
+On 2026-11-19, review of Apple DTS's October 2026 replies confirms the lack of a supported API for creating a same-object hard link from an open fd while preventing same-user source-name substitution. A follow-up confirms the source-selection issue for rename too. This evidence supports the current publication dependency status. Held-fd content changes can be verified independently, with FTP tail repair proceeding under RFC 0004. [Apple DTS](https://developer.apple.com/forums/thread/850377)
+
 本 RFC 选择**先证明平台机制，再引入内部所有权抽象**。后续抽象须将持有的暂存对象、目标父目录对象、叶名称和完成证明作为一个尝试的输入，明确区分“已发布”“因不支持／冲突而未发布”“清理未完成”；保留控制锁的提交结果。缺少任一保证时失败并保留证据，不降级到 `check → rename/link/unlink`。本轮不新增公共 API 或对外能力声明。
 
 This RFC chooses **platform proof before an internal ownership abstraction**. A future abstraction must take the held staging object, destination-parent object, leaf name and proof as one attempt, distinguishing published, unsupported/conflicted-before-publication and incomplete-cleanup outcomes while retaining the control lock's commit result. Missing guarantees fail with evidence retained; never downgrade to `check → rename/link/unlink`. This slice adds no public API or capability claim.
