@@ -635,6 +635,7 @@ fn fresh_completed_bytes_keep_claim_snapshot_when_all_terminal_writes_fail() {
 
 mod session_routing {
     use super::*;
+    use nexum_core::nexum_domain::Progress;
     use nexum_core::nexum_engine::{
         EngineAdapter, EngineCapabilities, EngineRegistry, EngineTask, TransferSession,
     };
@@ -769,6 +770,252 @@ mod session_routing {
             assert!(!control.is_finished());
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    struct PollGatedFactory {
+        delegate: Arc<dyn TransferSessionFactory>,
+        entered: SyncSender<()>,
+        release: Mutex<Option<Receiver<()>>>,
+    }
+
+    impl TransferSessionFactory for PollGatedFactory {
+        fn start(
+            &self,
+            request: TransferSessionRequest,
+        ) -> Result<Box<dyn TransferSession>, EngineError> {
+            Ok(Box::new(PollGatedSession {
+                delegate: self.delegate.start(request)?,
+                entered: self.entered.clone(),
+                release: Mutex::new(self.release.lock().unwrap().take()),
+            }))
+        }
+    }
+
+    struct PollGatedSession {
+        delegate: Box<dyn TransferSession>,
+        entered: SyncSender<()>,
+        release: Mutex<Option<Receiver<()>>>,
+    }
+
+    impl TransferSession for PollGatedSession {
+        fn progress(&self) -> Progress {
+            self.delegate.progress()
+        }
+
+        fn state(&self) -> EngineTaskState {
+            if let Some(release) = self.release.lock().unwrap().take() {
+                self.entered.send(()).unwrap();
+                release.recv_timeout(Duration::from_secs(10)).unwrap();
+            } else {
+                let _ = self.entered.try_send(());
+            }
+            self.delegate.state()
+        }
+
+        fn error(&self) -> Option<String> {
+            self.delegate.error()
+        }
+
+        fn pause(&self) -> Result<(), EngineError> {
+            self.delegate.pause()
+        }
+
+        fn resume(&self) -> Result<(), EngineError> {
+            self.delegate.resume()
+        }
+
+        fn cancel(&self) {
+            self.delegate.cancel();
+        }
+
+        fn wait(self: Box<Self>) -> (EngineTaskState, Progress) {
+            self.delegate.wait()
+        }
+    }
+
+    fn check_pause_with_blocked_progress_poll(reject_pause: bool) {
+        let fixture = RecoveryFixture::new();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = format!("http://{}/routed", listener.local_addr().unwrap());
+        let first = vec![b'a'; 32 * 1024];
+        let second = vec![b'b'; 32 * 1024];
+        let total = first.len() + second.len();
+        let bytes_before_pause = first.len() as u64;
+        let (send_first, allow_first) = mpsc::sync_channel(1);
+        let (send_second, allow_second) = mpsc::sync_channel(1);
+        let origin = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            assert!(line.starts_with("GET /routed "));
+            while line != "\r\n" {
+                line.clear();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            allow_first.recv_timeout(Duration::from_secs(5)).unwrap();
+            stream.write_all(&first).unwrap();
+            allow_second.recv_timeout(Duration::from_secs(10)).unwrap();
+            stream.write_all(&second).unwrap();
+        });
+
+        let mut state = routing_state(&fixture, &source, 0);
+        let delegate = state
+            .core
+            .engines
+            .session_factory_for_protocol("http")
+            .unwrap();
+        let (poll_entered, wait_for_poll) = mpsc::sync_channel(1);
+        let (release_poll, poll_release) = mpsc::sync_channel(1);
+        let factory = PollGatedFactory {
+            delegate,
+            entered: poll_entered,
+            release: Mutex::new(Some(poll_release)),
+        };
+        state.core.engines = EngineRegistry::new();
+        state
+            .core
+            .engines
+            .register(Box::new(FactoryAdapter(Arc::new(factory))));
+        let id = TaskId::from("routed");
+        let transfer = claim_next_http_transfer(&mut state).unwrap().unwrap();
+        let control = transfer.control.clone();
+        let partial = transfer.partial_path.clone();
+        let initial = state.core.repository.get(&id).unwrap().unwrap();
+        state.core.drain_task_events();
+        state.core.drain_scheduler_events();
+        let database_path = fixture.data.join("routing.sqlite");
+        if reject_pause {
+            let db = rusqlite::Connection::open(&database_path).unwrap();
+            db.execute_batch(
+                "CREATE TRIGGER reject_pause BEFORE UPDATE ON tasks
+                WHEN NEW.state = 'paused' BEGIN SELECT RAISE(FAIL, 'pause save refused'); END;",
+            )
+            .unwrap();
+        }
+        let state = Arc::new(Mutex::new(state));
+        let worker_state = Arc::clone(&state);
+        let worker = std::thread::spawn(move || run_http_transfer(worker_state, transfer));
+        wait_for_poll.recv_timeout(Duration::from_secs(5)).unwrap();
+        send_first.send(()).unwrap();
+        wait_control(&control, || {
+            std::fs::metadata(&partial).is_ok_and(|metadata| metadata.len() == bytes_before_pause)
+        });
+
+        let rpc_state = Arc::clone(&state);
+        let (pause_response, wait_for_pause) = mpsc::sync_channel(1);
+        let pause = std::thread::spawn(move || {
+            let request = RpcRequest::new(1, "task.pause", Some(json!({"id":"routed"})));
+            pause_response
+                .send(dispatch_server_request(&rpc_state, &request).unwrap())
+                .unwrap();
+        });
+        let response = wait_for_pause.recv_timeout(Duration::from_secs(5)).unwrap();
+        pause.join().unwrap();
+        let paused_control = control.is_paused();
+        let view = dispatch_server_request(
+            &state,
+            &RpcRequest::new(2, "task.get", Some(json!({"id":"routed"}))),
+        )
+        .unwrap()
+        .result
+        .unwrap();
+        let stored = SqliteRepository::open(&database_path)
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .unwrap();
+        let (active_slots, task_events, scheduler_events) = {
+            let mut locked = state.lock().unwrap();
+            (
+                locked.core.scheduler.active_len(),
+                locked.core.drain_task_events(),
+                locked.core.drain_scheduler_events(),
+            )
+        };
+        assert_eq!(
+            std::fs::metadata(&partial).unwrap().len(),
+            bytes_before_pause
+        );
+        // Unblock both sides before asserting on the captured snapshot so a
+        // regression leaves no paused worker or fixture thread behind.
+        release_poll.send(()).unwrap();
+        wait_for_poll.recv_timeout(Duration::from_secs(5)).unwrap();
+        let stored_after_poll = SqliteRepository::open(&database_path)
+            .unwrap()
+            .get(&id)
+            .unwrap()
+            .unwrap();
+        if paused_control {
+            if reject_pause {
+                control.resume().unwrap();
+            } else {
+                let request = RpcRequest::new(3, "task.resume", Some(json!({"id":"routed"})));
+                assert_eq!(
+                    dispatch_server_request(&state, &request).unwrap().result,
+                    Some(json!(true))
+                );
+            }
+        }
+        send_second.send(()).unwrap();
+        origin.join().unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            state.lock().unwrap().core.tasks.get(&id).unwrap().state,
+            TaskState::Completed
+        );
+        let contents = std::fs::read(fixture.root.join("routed")).unwrap();
+        assert_eq!(
+            contents[..bytes_before_pause as usize],
+            vec![b'a'; bytes_before_pause as usize]
+        );
+        assert_eq!(
+            contents[bytes_before_pause as usize..],
+            vec![b'b'; bytes_before_pause as usize]
+        );
+        if reject_pause {
+            assert!(response.error.is_some());
+            assert!(!paused_control);
+            assert_eq!(view["state"], "Downloading");
+            assert_eq!(view["downloaded_bytes"], initial.progress.downloaded_bytes);
+            assert_eq!(stored, initial);
+            assert_eq!(active_slots, 1);
+            assert!(task_events.is_empty());
+            assert!(scheduler_events.is_empty());
+        } else {
+            assert_eq!(response.result, Some(json!(true)));
+            assert!(paused_control);
+            assert_eq!(view["state"], "Paused");
+            assert_eq!(view["downloaded_bytes"], bytes_before_pause);
+            assert_eq!(stored.state, TaskState::Paused);
+            assert_eq!(
+                stored.progress,
+                Progress::new(bytes_before_pause, Some(total as u64))
+            );
+            assert_eq!(stored_after_poll, stored);
+            assert_eq!(active_slots, 0);
+        }
+    }
+
+    #[test]
+    fn pause_persists_worker_progress_while_poller_is_blocked() {
+        check_pause_with_blocked_progress_poll(false);
+    }
+
+    #[test]
+    fn rejected_pause_leaves_progress_and_slot_unchanged() {
+        check_pause_with_blocked_progress_poll(true);
     }
 
     #[test]
