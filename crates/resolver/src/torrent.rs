@@ -1,4 +1,7 @@
-//! Bounded, offline v1 metainfo inspection. No files or network connections.
+//! Bounded offline v1 metainfo inspection; explicit-peer metadata reception is
+//! isolated in `metadata` and never invoked by the offline inspector.
+
+pub mod metadata;
 
 use caseless::Caseless;
 use serde::Serialize;

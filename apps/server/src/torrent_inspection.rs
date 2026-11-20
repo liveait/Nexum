@@ -1,7 +1,11 @@
-//! Process-local metainfo jobs; no download, output files or network discovery.
+//! Owned offline/explicit-peer inspection jobs; no download or network discovery.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nexum_core::nexum_resolver::torrent::{self, MetainfoError, MetainfoSummary};
+use nexum_core::nexum_resolver::{
+    magnet::{self, MagnetInfo},
+    torrent::metadata::{self, MetadataError},
+};
 use nexum_protocol::RpcErrorObject;
 use serde_json::{Value, json};
 use std::{
@@ -34,7 +38,12 @@ struct Inspected {
 }
 type Parse =
     dyn Fn(&[u8], &AtomicBool, Instant) -> Result<MetainfoSummary, MetainfoError> + Send + Sync;
-type Worker = JoinHandle<Result<Inspected, MetainfoError>>;
+type Worker = JoinHandle<Result<Inspected, MetadataError>>;
+
+enum Source {
+    Metainfo(String),
+    Magnet(MagnetInfo, std::net::SocketAddr),
+}
 
 struct Job {
     principal: Principal,
@@ -140,11 +149,12 @@ impl Inspector {
     }
 
     pub(super) fn capabilities() -> Value {
-        json!({"version": 1, "sources": ["metainfo_base64"], "max_metainfo_bytes": torrent::MAX_METAINFO_BYTES,
+        json!({"version": 1, "sources": ["metainfo_base64", "magnet_peer"], "max_metainfo_bytes": torrent::MAX_METAINFO_BYTES,
             "max_files": torrent::MAX_FILES, "max_pieces": torrent::MAX_PIECES,
             "max_bencode_depth": torrent::MAX_DEPTH, "max_bencode_nodes": torrent::MAX_NODES,
             "max_path_depth": torrent::MAX_PATH_DEPTH, "max_component_bytes": torrent::MAX_COMPONENT_BYTES,
-            "max_active": MAX_ACTIVE, "max_records": MAX_RECORDS, "parse_timeout_seconds": PARSE_BUDGET.as_secs(), "ttl_seconds": RESULT_TTL.as_secs()})
+            "max_active": MAX_ACTIVE, "max_records": MAX_RECORDS, "parse_timeout_seconds": PARSE_BUDGET.as_secs(), "ttl_seconds": RESULT_TTL.as_secs(),
+            "magnet": {"max_bytes": magnet::MAX_MAGNET_BYTES, "max_peers": 1, "discovery": false, "timeout_seconds": metadata::METADATA_TIMEOUT.as_secs(), "max_frame_bytes": metadata::MAX_FRAME_BYTES, "max_header_bytes": metadata::MAX_HEADER_BYTES, "max_frames": metadata::MAX_FRAMES}})
     }
 
     pub(super) fn begin(
@@ -152,17 +162,39 @@ impl Inspector {
         principal: Principal,
         params: &Value,
     ) -> Result<Value, RpcErrorObject> {
-        let object = params
-            .as_object()
-            .filter(|p| p.len() == 1)
-            .ok_or_else(|| RpcErrorObject::invalid_params("expected only metainfo_base64"))?;
-        let encoded = object
-            .get("metainfo_base64")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RpcErrorObject::invalid_params("expected only metainfo_base64"))?;
-        if encoded.len() > MAX_ENCODED {
-            return Err(RpcErrorObject::invalid_params("metainfo exceeds 512 KiB"));
-        }
+        let object = params.as_object().ok_or_else(|| {
+            RpcErrorObject::invalid_params("expected metainfo_base64 or magnet and peer")
+        })?;
+        let source = if object.len() == 1 && object.contains_key("metainfo_base64") {
+            let encoded = object["metainfo_base64"]
+                .as_str()
+                .ok_or_else(|| RpcErrorObject::invalid_params("expected only metainfo_base64"))?;
+            if encoded.len() > MAX_ENCODED {
+                return Err(RpcErrorObject::invalid_params("metainfo exceeds 512 KiB"));
+            }
+            Source::Metainfo(encoded.to_owned())
+        } else if object.len() == 2 && object.contains_key("magnet") && object.contains_key("peer")
+        {
+            let identity = object["magnet"]
+                .as_str()
+                .ok_or_else(|| RpcErrorObject::invalid_params("invalid Magnet input"))
+                .and_then(|source| {
+                    magnet::parse_magnet(source)
+                        .map_err(|_| RpcErrorObject::invalid_params("invalid Magnet input"))
+                })?;
+            let peer = object["peer"]
+                .as_str()
+                .and_then(|peer| peer.parse().ok())
+                .filter(|peer| metadata::valid_peer(*peer))
+                .ok_or_else(|| {
+                    RpcErrorObject::invalid_params("expected one literal metadata peer")
+                })?;
+            Source::Magnet(identity, peer)
+        } else {
+            return Err(RpcErrorObject::invalid_params(
+                "expected metainfo_base64 or magnet and peer",
+            ));
+        };
         // Reserve under the same lock as spawn, so concurrent clients cannot
         // exceed quotas. Invalid input/spawn/entropy failure leaves no record.
         let mut registry = self
@@ -185,12 +217,18 @@ impl Inspector {
         {
             return Err(exhausted());
         }
-        let raw = STANDARD
-            .decode(encoded)
-            .map_err(|_| RpcErrorObject::invalid_params("invalid metainfo base64"))?;
-        if raw.len() > torrent::MAX_METAINFO_BYTES {
-            return Err(RpcErrorObject::invalid_params("metainfo exceeds 512 KiB"));
-        }
+        let (raw, endpoint) = match source {
+            Source::Metainfo(encoded) => {
+                let raw = STANDARD
+                    .decode(encoded)
+                    .map_err(|_| RpcErrorObject::invalid_params("invalid metainfo base64"))?;
+                if raw.len() > torrent::MAX_METAINFO_BYTES {
+                    return Err(RpcErrorObject::invalid_params("metainfo exceeds 512 KiB"));
+                }
+                (raw, None)
+            }
+            Source::Magnet(identity, peer) => (Vec::new(), Some((identity, peer))),
+        };
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random)
             .map_err(|_| RpcErrorObject::internal_error("could not generate inspection ID"))?;
@@ -204,10 +242,38 @@ impl Inspector {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         let parse = Arc::clone(&self.parse);
-        let deadline = Instant::now() + self.parse_budget;
+        let phase = if endpoint.is_some() {
+            "metadata"
+        } else {
+            "parsing"
+        };
+        let deadline = Instant::now()
+            + if endpoint.is_some() {
+                metadata::METADATA_TIMEOUT
+            } else {
+                self.parse_budget
+            };
+        // Independent entropy: a remote peer must never learn an inspection ID.
+        let mut peer_id = [0; 20];
+        if endpoint.is_some() {
+            getrandom::fill(&mut peer_id).map_err(|_| {
+                RpcErrorObject::internal_error("could not generate metadata peer ID")
+            })?;
+        }
         let worker = thread::Builder::new()
             .name("nexum-metainfo".into())
             .spawn(move || {
+                if let Some((identity, peer)) = endpoint {
+                    let (raw, summary) = metadata::fetch_magnet_metadata(
+                        identity,
+                        peer,
+                        peer_id,
+                        &worker_cancel,
+                        deadline,
+                    )?
+                    .into_parts();
+                    return Ok(Inspected { _raw: raw, summary });
+                }
                 let summary = parse(&raw, &worker_cancel, deadline)?;
                 Ok(Inspected { _raw: raw, summary })
             })
@@ -220,7 +286,7 @@ impl Inspector {
                 cancel,
                 worker: Some(worker),
                 joining: false,
-                phase: "parsing",
+                phase,
                 error: None,
                 result: None,
             },
@@ -390,6 +456,72 @@ fn reap(inner: Arc<Inner>) {
 mod tests {
     use super::*;
     use std::sync::{Barrier, mpsc};
+
+    #[test]
+    fn explicit_magnet_inspection_is_owned_and_cancellable() {
+        let peer = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let inspector = Inspector::new().unwrap();
+        let started = inspector
+            .begin(
+                Principal::Anonymous,
+                &json!({
+                    "magnet": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                    "peer": peer.local_addr().unwrap().to_string()
+                }),
+            )
+            .expect("explicit Magnet inspection must be accepted");
+        let inspection = started["inspection_id"].as_str().unwrap();
+        inspector.cancel(Principal::Anonymous, inspection).unwrap();
+        assert_eq!(
+            inspector.status(Principal::Anonymous, inspection).unwrap()["phase"],
+            "cancelled"
+        );
+        inspector.shutdown();
+    }
+
+    #[test]
+    fn expiring_magnet_inspection_closes_and_joins_the_actual_peer() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut handshake = [0; 68];
+            stream.read_exact(&mut handshake).unwrap();
+            let mut b = [0];
+            assert_eq!(stream.read(&mut b).unwrap(), 0);
+            tx.send(()).unwrap();
+        });
+        let inspector = Inspector::with_parser(
+            Arc::new(torrent::inspect_metainfo),
+            Duration::from_millis(500),
+            PARSE_BUDGET,
+        )
+        .unwrap();
+        let started=inspector.begin(Principal::Anonymous,&json!({"magnet":"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567","peer":address.to_string()})).unwrap();
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        peer.join().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !inspector.inner.registry.lock().unwrap().jobs.is_empty() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            inspector
+                .status(
+                    Principal::Anonymous,
+                    started["inspection_id"].as_str().unwrap()
+                )
+                .unwrap_err()
+                .code,
+            -32031
+        );
+        inspector.shutdown();
+    }
 
     fn params() -> Value {
         // A three-byte, one-piece v1 torrent; only the info dictionary is hashed.

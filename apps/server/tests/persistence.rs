@@ -25,6 +25,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[path = "support/legacy_sources.rs"]
 mod legacy_sources;
+#[path = "support/magnet_metadata.rs"]
+mod magnet_metadata;
 #[path = "support/origin_credentials.rs"]
 mod origin_credentials;
 
@@ -2686,7 +2688,7 @@ fn await_inspection(mut query: impl FnMut() -> Value) -> Value {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let status = query();
-        if status["phase"] != "parsing" {
+        if !matches!(status["phase"].as_str(), Some("parsing" | "metadata")) {
             return status;
         }
         assert!(
@@ -2708,7 +2710,7 @@ fn torrent_inspection_round_trips_without_tasks_output_or_restart_reuse() {
     assert_eq!(caps["torrent_inspect"]["version"], 1);
     assert_eq!(
         caps["torrent_inspect"]["sources"],
-        json!(["metainfo_base64"])
+        json!(["metainfo_base64", "magnet_peer"])
     );
     let (status, _, caps) = server.http_request(
         "POST",
