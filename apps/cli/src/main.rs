@@ -411,6 +411,8 @@ fn usage() {
     eprintln!("  nexum [--server ADDR] server capabilities");
     eprintln!("  nexum [--server ADDR] torrent inspect FILE");
     eprintln!("  nexum [--server ADDR] torrent inspect-begin FILE");
+    eprintln!("  nexum [--server ADDR] torrent inspect-magnet --stdin IP:PORT");
+    eprintln!("  nexum [--server ADDR] torrent inspect-magnet-begin --stdin IP:PORT");
     eprintln!("  nexum [--server ADDR] torrent inspect-status ID");
     eprintln!("  nexum [--server ADDR] torrent inspect-cancel ID");
     eprintln!("  nexum --version");
@@ -462,6 +464,7 @@ fn main() {
     // If connecting to a server, verify version on first connection
     let mut verify_version = true;
     let mut wait_inspection = false;
+    let mut inspection_budget = std::time::Duration::from_secs(7);
 
     let (method, params) = match (args[0].as_str(), args[1].as_str()) {
         ("task", "list") if args.len() == 2 => ("task.list", None),
@@ -519,6 +522,20 @@ fn main() {
                 }
             };
             wait_inspection = args[1] == "inspect";
+            ("torrent.inspect.begin", Some(params))
+        }
+        ("torrent", "inspect-magnet" | "inspect-magnet-begin")
+            if args.len() == 4 && args[2] == "--stdin" =>
+        {
+            let params = match magnet_params(&mut std::io::stdin().lock(), &args[3]) {
+                Ok(params) => params,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            };
+            wait_inspection = args[1] == "inspect-magnet";
+            inspection_budget = std::time::Duration::from_secs(62);
             ("torrent.inspect.begin", Some(params))
         }
         ("torrent", "inspect-status" | "inspect-cancel") if args.len() == 3 => (
@@ -620,12 +637,21 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+        let source = if params
+            .as_ref()
+            .is_some_and(|params| params.get("magnet").is_some())
+        {
+            "magnet_peer"
+        } else {
+            "metainfo_base64"
+        };
         let supported = caps["torrent_inspect"]["version"] == 1
-            && caps["torrent_inspect"]["sources"]
-                .as_array()
-                .is_some_and(|sources| sources.contains(&serde_json::json!("metainfo_base64")));
+            && (method != "torrent.inspect.begin"
+                || caps["torrent_inspect"]["sources"]
+                    .as_array()
+                    .is_some_and(|sources| sources.contains(&serde_json::json!(source))));
         if !supported {
-            eprintln!("server does not support metainfo inspection v1");
+            eprintln!("server does not support the requested inspection source v1");
             std::process::exit(1);
         }
     }
@@ -633,7 +659,7 @@ fn main() {
         .call_with_credential(2, method, params, credential.clone())
         .and_then(|value| {
             if wait_inspection {
-                wait_for_inspection(&mut client, value, credential)
+                wait_for_inspection(&mut client, value, credential, inspection_budget)
             } else {
                 Ok(value)
             }
@@ -695,16 +721,40 @@ fn torrent_params(path: &str) -> Result<Value, String> {
     Ok(serde_json::json!({"metainfo_base64": STANDARD.encode(bytes)}))
 }
 
+fn magnet_params(reader: &mut impl Read, peer: &str) -> Result<Value, String> {
+    let address = peer
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .filter(|address| {
+            address.port() != 0
+                && !address.ip().to_canonical().is_unspecified()
+                && !address.ip().to_canonical().is_multicast()
+                && !matches!(address.ip().to_canonical(),std::net::IpAddr::V4(ip) if ip.is_broadcast())
+        })
+        .ok_or("expected one literal metadata peer")?;
+    let mut bytes = Vec::new();
+    reader
+        .take(8193)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "cannot read Magnet input")?;
+    if bytes.len() > 8192 {
+        return Err("Magnet input exceeds 8 KiB".into());
+    }
+    let source = String::from_utf8(bytes).map_err(|_| "invalid Magnet input")?;
+    Ok(serde_json::json!({"magnet": source,"peer":address.to_string()}))
+}
+
 fn wait_for_inspection(
     client: &mut JsonRpcClient,
     begin: Value,
     credential: Option<Credential>,
+    budget: std::time::Duration,
 ) -> Result<Value, String> {
     let id = begin
         .get("inspection_id")
         .and_then(Value::as_str)
         .ok_or("invalid inspection response")?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(7);
+    let deadline = std::time::Instant::now() + budget;
     loop {
         let status = client.call_with_credential(
             3,
@@ -728,7 +778,7 @@ fn wait_for_inspection(
                 ));
             }
             Some("cancelled") => return Err("torrent inspection cancelled".into()),
-            Some("parsing") if std::time::Instant::now() < deadline => {
+            Some("parsing" | "metadata") if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10))
             }
             _ => {
@@ -752,6 +802,30 @@ mod tests {
     use rustls::{ServerConfig, ServerConnection};
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+
+    #[test]
+    fn magnet_stdin_is_bounded_and_preserves_uri_without_command_arguments() {
+        let source=b"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=https%3A%2F%2Fprivate.invalid%2Fpasskey";
+        let params = magnet_params(&mut &source[..], "[::1]:1234").unwrap();
+        assert_eq!(params["magnet"], std::str::from_utf8(source).unwrap());
+        assert_eq!(params["peer"], "[::1]:1234");
+        let mut bytes = &vec![b'x'; 8192][..];
+        assert!(magnet_params(&mut bytes, "127.0.0.1:1234").is_ok());
+        let mut bytes = &vec![b'x'; 8193][..];
+        assert_eq!(
+            magnet_params(&mut bytes, "127.0.0.1:1234").unwrap_err(),
+            "Magnet input exceeds 8 KiB"
+        );
+        assert!(magnet_params(&mut &b"\xffSECRET"[..], "127.0.0.1:1234").is_err());
+        for peer in [
+            "host.invalid:1234",
+            "127.0.0.1:0",
+            "0.0.0.0:1234",
+            "[ff02::1]:1234",
+        ] {
+            assert!(magnet_params(&mut &source[..], peer).is_err());
+        }
+    }
 
     #[test]
     fn torrent_upload_preserves_bytes_and_rejects_oversized_files() {

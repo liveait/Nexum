@@ -88,6 +88,32 @@ Raw Magnet, metainfo and tracker URLs can contain passkeys. Keep them in private
 
 For private torrents, retain only peers returned by the current private tracker and disconnect other pre-metadata connections. Use one private tracker at a time; on failover disconnect old peers before obtaining new ones. Manual peers/prior DHT results cannot bypass this rule. Verify library behavior with fixtures rather than claiming BEP 27 compliance from disabling DHT alone.
 
+<a id="bounded-magnet-peer-inspection"></a>
+## 有界单节点元数据检查切片 / Bounded single-peer metadata inspection slice
+
+实现基线 `5b321663496b0e04e60534ddd16424c43bef0e02`。本轮实施选择为独立的 BEP 9 元数据接收器，复用现有 Inspector，而不直接接入完整 BT 库。固定候选的私有 reader 在 Nexum 校验前允许分配 32 MiB，并 trace 完整 info；公共接口不能配置 512 KiB 上限。为这个只读切片引入整库维护分叉会扩大范围。完整 BT 仍保留上述库候选、存储与生命周期验收；这不是完整 BT 引擎选型结论。[BEP 9](https://www.bittorrent.org/beps/bep_0009.html) · [BEP 10](https://www.bittorrent.org/beps/bep_0010.html)
+
+Implementation base: `5b321663496b0e04e60534ddd16424c43bef0e02`. This slice chooses a separate BEP 9 metadata receiver through the existing Inspector rather than directly embedding the full BT library. The pinned candidate's private reader allocates up to 32 MiB and traces full info before Nexum validation; its public API cannot configure the 512 KiB cap. Maintaining a full-library fork for this read-only slice would widen scope. Retain the full-BT candidate and its storage/lifecycle gates; this does not select a complete BT engine. [BEP 9](https://www.bittorrent.org/beps/bep_0009.html) · [BEP 10](https://www.bittorrent.org/beps/bep_0010.html)
+
+`torrent.inspect.begin` 增加严格二字段输入 `{magnet, peer}`，peer 是一个显式 IP:port（IPv6 带方括号），拒绝端口 0／未指定地址／多播和额外字段。Magnet 仍先经严格身份 parser；tr、x.pe、dn、so 等不会授权网络或选择。只连接该 peer，不解析 DNS、不访问 Tracker／DHT／PEX／LSD，不监听、不上传数据片、不创建任务或数据文件。能力 source 为 `magnet_peer`，不声称普通无 peer 的 Magnet 已可用。CLI 为 `torrent inspect-magnet --stdin PEER` 及异步 begin 变体，原文仅从有界 stdin 读取；远程模式沿用现有敏感检查请求的 TLS 门槛。
+
+Extend `torrent.inspect.begin` with exactly `{magnet, peer}`. Peer is one explicit IP:port (bracketed IPv6); reject port zero, unspecified/multicast addresses and extra fields. Strict Magnet identity parsing remains first; tr/x.pe/dn/so grant no networking or selection authority. Connect only to that peer: no DNS, tracker/DHT/PEX/LSD, listener, payload upload, tasks or data files. Advertise source `magnet_peer`, not general peerless Magnet availability. CLI uses `torrent inspect-magnet --stdin PEER` and an asynchronous begin variant; read the raw URI only from bounded stdin and retain the existing TLS gate for sensitive remote inspection.
+
+接收器位于 `resolver::torrent::metadata`，消费 `MagnetInfo`、`SocketAddr` 和独立随机的 20 字节 peer ID（不得复用 inspection ID）；现有 Inspector worker 独占同步 socket，取消／过期／关闭保持登记直至真正 join。总期限 60 秒，不因小片段重置；连接和读写每次至多 100 ms 控制窗口。BEP 10 的双方扩展 ID 分开处理，后续扩展握手忽略；未知消息在预算内忽略。每帧最多 20 KiB，bencode header 最多 1 KiB，总计最多 256 帧；metadata 每块 16 KiB，单个在途请求，要求索引、total_size 和精确块长一致。先检查声明大小再分配，info 上限为 512 KiB 减 8 字节封装；随后调用既有严格 metainfo 检查（至多 5 秒且不超过总期限），验证原始 infohash。所有失败仅静态代码，无 URI／peer 消息摘录。
+
+The receiver lives in `resolver::torrent::metadata`, consuming `MagnetInfo`, `SocketAddr` and an independent random 20-byte peer ID (never reuse an inspection ID). An existing Inspector worker exclusively owns the synchronous socket; cancellation/expiry/shutdown retain registration until actual join. Use an absolute 60-second total deadline, never reset by fragments, with at most 100 ms per connect/read/write control window. Separate both BEP 10 extension IDs, ignore subsequent extension handshakes and ignore unknown messages within budgets. Cap frames at 20 KiB, bencode headers at 1 KiB and total frames at 256. Request one 16 KiB metadata block at a time; require matching index/total_size/exact length. Check advertised size before allocation; info is capped at 512 KiB minus its eight-byte envelope. Then run the existing strict inspector within five seconds and the total deadline, validating the original infohash. Errors contain static codes, never URI or peer-message excerpts.
+
+BEP 9 只返回原始 info 字典；私有保存的 metainfo 是 `d4:info<原始 info>e`。因此 `metainfo_sha256` 绑定该构造封装，而不是一个未收到的原始 .torrent 文件。文件摘要、版本、路径、padding 和计数等仍由同一检查器决定。metadata 阶段没有下载进度。B1／M6、Tracker 发现、BT 下载及文件发布保持开放。
+
+BEP 9 returns only the original info dictionary. Privately retain metainfo as `d4:info<original info>e`; `metainfo_sha256` therefore binds that constructed envelope, not an unreceived original .torrent file. The same inspector governs hashes, versions, paths, padding and counts. Metadata has no payload-download progress. B1/M6, tracker discovery, BT transfers and publication remain open.
+
+实施计划 / Implementation plan:
+
+1. 先以真实 peer 记录旧 Server 拒绝新输入的 red；新增直接 receiver 测试及实现，覆盖握手／块／大小／哈希／控制边界。 / Record old Server rejection of the new input, then implement the receiver with direct real-peer handshake/block/size/hash/control tests.
+2. 接入现有 Inspector、能力和 CLI，保留旧导入／配额／权限／退出屏障；验证真实 Server 与 CLI，不按 fixture 地址绕过。 / Wire Inspector, capabilities and CLI, preserving imports/quotas/principals/joins; validate actual Server/CLI without fixture-address bypasses.
+3. 固定 SHA 独立审查及受控消费者覆盖成功、失败、取消、退出、资源释放、无任务／文件／发现副作用和诊断脱敏。 / Freeze/review the SHA and independently verify success/failure/cancel/exit/resource release, absence of tasks/files/discovery and redacted diagnostics.
+4. 运行完整 Rust 门槛及最新 base/head CI，合并后验证实际 main push CI；未通过前仅记实现／待验收。 / Run full Rust gates and latest-base/head CI, then verify actual main push CI; retain implemented/pending status until accepted.
+
 ## 文件树、选择与占用 / File trees, selection and reservations
 
 在创建任何数据文件前验证完整 metainfo 文件映射：拒绝绝对路径、空组件、`.`／`..`、NUL、分隔符混淆、链接／特殊类型、重复、文件与目录前缀冲突，以及目标文件系统的大小写／Unicode 别名冲突。首版文件名采用有效 UTF-8，不能用 lossy 转换把不同名字合并。不可信 torrent 名不直接决定目标目录；用户／安全分配器选择一个尚不存在的新目录。
