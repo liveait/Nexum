@@ -1,5 +1,6 @@
 //! Input resolution boundaries for Nexum.
 
+pub mod magnet;
 pub mod torrent;
 
 use std::{fmt, path::Path, str::FromStr};
@@ -12,18 +13,25 @@ pub enum ResolveKind {
     Local,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ResolveRequest {
     source: String,
 }
 
 impl ResolveRequest {
     pub fn new(source: impl Into<String>) -> Result<Self, ResolverError> {
-        let source = source.into().trim().to_owned();
+        let source = source.into();
+        let source = if is_magnet_source(&source) {
+            magnet::checked_source(&source).map_err(magnet_error)?
+        } else {
+            source.trim()
+        };
         if source.is_empty() {
             return Err(ResolverError::EmptySource);
         }
-        Ok(Self { source })
+        Ok(Self {
+            source: source.to_owned(),
+        })
     }
 
     pub fn source(&self) -> &str {
@@ -49,10 +57,59 @@ impl ResolveRequest {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ResolveResult {
     pub kind: ResolveKind,
     pub source: String,
+}
+
+fn is_magnet_source(source: &str) -> bool {
+    source
+        .trim_start()
+        .split_once(':')
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("magnet"))
+}
+
+fn magnet_error(error: magnet::MagnetError) -> ResolverError {
+    ResolverError::InvalidSource(error.to_string())
+}
+
+struct SourceDebug<'a>(&'a str, bool);
+
+impl fmt::Debug for SourceDebug<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.1 {
+            fmt::Debug::fmt(&"<redacted Magnet URI>", f)
+        } else {
+            fmt::Debug::fmt(self.0, f)
+        }
+    }
+}
+
+impl fmt::Debug for ResolveRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolveRequest")
+            .field(
+                "source",
+                &SourceDebug(&self.source, is_magnet_source(&self.source)),
+            )
+            .finish()
+    }
+}
+
+impl fmt::Debug for ResolveResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolveResult")
+            .field("kind", &self.kind)
+            .field(
+                "source",
+                &SourceDebug(
+                    &self.source,
+                    self.kind == ResolveKind::Magnet || is_magnet_source(&self.source),
+                ),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,15 +178,7 @@ impl Resolver for MagnetResolver {
         if !self.supports(request) {
             return Err(ResolverError::InvalidSource("not a magnet source".into()));
         }
-        let query = request.source().strip_prefix("magnet:?").unwrap_or("");
-        if query
-            .split('&')
-            .all(|part| !part.starts_with("xt=urn:btih:"))
-        {
-            return Err(ResolverError::InvalidSource(
-                "magnet source is missing an xt=urn:btih parameter".into(),
-            ));
-        }
+        magnet::parse_magnet(request.source()).map_err(magnet_error)?;
         Ok(ResolveResult {
             kind: ResolveKind::Magnet,
             source: request.source().to_owned(),
@@ -241,7 +290,10 @@ mod tests {
         for (source, kind) in [
             ("http://example.com/file", ResolveKind::Http),
             ("HTTPS://example.com/file", ResolveKind::Https),
-            ("magnet:?xt=urn:btih:abc", ResolveKind::Magnet),
+            (
+                "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                ResolveKind::Magnet,
+            ),
         ] {
             let request = ResolveRequest::new(source).unwrap();
             assert_eq!(registry.resolve(&request).unwrap().kind, kind);
@@ -258,6 +310,15 @@ mod tests {
                 Err(ResolverError::InvalidSource(_))
             ));
         }
+    }
+
+    #[test]
+    fn rejects_a_short_btih_instead_of_treating_parameter_presence_as_validity() {
+        let request = ResolveRequest::new("magnet:?xt=urn:btih:abc").unwrap();
+        assert!(matches!(
+            ResolverRegistry::new().resolve(&request),
+            Err(ResolverError::InvalidSource(_))
+        ));
     }
 
     #[test]

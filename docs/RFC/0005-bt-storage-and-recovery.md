@@ -9,9 +9,9 @@
 
 The first release supports BitTorrent v1 single/multi-file `.torrent` and `btih` Magnet, file selection, piece verification, progress, pause/cancel and restart recovery. Normalize 40-digit hex/32-character base32 btih to the same 20-byte value. Reject malformed/conflicting xt values and metainfo with a mismatched infohash. Claim hybrid compatibility only after v1 mapping/padding fixtures pass. Explicitly reject v2-only rather than inferring download support from parser acceptance.
 
-当前 `MagnetResolver` 只检查 btih 参数存在，Local 只代表 Server 文件系统中的路径；两者可经旧 Server 创建任务但均无 BT 下载引擎。F0 工厂路由已实现，网络传输派发仍限 HTTP(S)，请求仍为单文件，`active_destinations` 只防精确路径冲突。本 RFC 增加的是实施契约，尚无 BT 运行时或 M6 验收结论。保留 [RFC 0003](0003-registry-transfer-sessions.md) 和 [ADR 0007](../decisions/0007-http-completion-reconciliation.md) 的兼容、控制和原子完成语义。
+本 RFC 提出时，`MagnetResolver` 只检查 btih 参数存在，Local 只代表 Server 文件系统中的路径；两者当时可经旧 Server 创建任务但无 BT 引擎。后续旧入口已限制为 HTTP(S)，本次严格身份解析见下文；网络传输派发仍限 HTTP(S)，请求仍为单文件，`active_destinations` 只防精确路径冲突。尚无 BT 运行时或 M6 验收结论。保留 [RFC 0003](0003-registry-transfer-sessions.md) 和 [ADR 0007](../decisions/0007-http-completion-reconciliation.md) 的兼容、控制和原子完成语义。
 
-Current `MagnetResolver` checks only for a btih parameter, while Local denotes a Server filesystem path. Both can create legacy Server tasks without a BT engine. F0 factories exist, but network dispatch remains HTTP(S), requests remain single-file and `active_destinations` only detects exact-path conflicts. This RFC specifies implementation without establishing a BT runtime or M6 acceptance. Preserve RFC 0003 and ADR 0007 compatibility, controls and atomic completion semantics.
+When this RFC was proposed, Magnet resolution checked only for parameter presence, and Local denoted a Server filesystem path; both could then create legacy tasks without a BT engine. Legacy creation is now HTTP(S)-only, with strict identity parsing detailed below. Network dispatch remains HTTP(S), requests remain single-file and `active_destinations` detects exact-path conflicts only. BT runtime/M6 acceptance remains open. Preserve RFC 0003 and ADR 0007 compatibility, controls and atomic completion semantics.
 
 ## 固定候选与不可直接继承的保证 / Pinned candidate and guarantees to verify
 
@@ -44,6 +44,29 @@ Use RFC 0004's versioned `task.create_transfer`, referencing inspection ID, sele
 B1 在调用库前做有界 bencode 验证：嵌套深度最多 64、节点最多 65536、单字符串及累计字节受 512 KiB 总输入限制，拒绝重复／未排序字典键、非规范整数／长度、尾随数据和溢出。v1 infohash 取原始输入中 info 字典的确切编码字节区间做 SHA-1，不通过解码后重编码计算。解析循环至少每 1024 节点及处理大字符串块时检查期限／取消；`timeout(spawn_blocking)` 不能停止 CPU 任务，不可用来证明预算／退出。若候选库无法配合，先用受控验证器或维护补丁；超时仍须等所属 worker 退出再释放 inspection 资源。
 
 Before invoking the library, B1 validates bounded bencode: depth at most 64, at most 65536 nodes, and individual/cumulative string bytes within the 512 KiB total-input cap. Reject duplicate/unsorted dictionary keys, noncanonical integers/lengths, trailing data and overflow. Compute v1 infohash from SHA-1 of the exact original encoded info-dictionary byte range, never decoded/re-encoded data. Check deadline/cancellation at least every 1024 nodes and during large string blocks. `timeout(spawn_blocking)` cannot stop CPU work or prove its budget/exit. Use a controlled validator or maintained patch if the candidate cannot cooperate; wait for worker exit before releasing timed-out inspection resources.
+
+<a id="strict-magnet-identity"></a>
+
+### 严格 Magnet 身份解析切片 / Strict Magnet identity-parsing slice
+
+基线 `c247f5bc68cefdccfbaa2ed0b9068b36bfa4bd06`。新增纯解析 `magnet::parse_magnet(&str) -> Result<MagnetInfo, MagnetError>`，仅返回私有 20 字节 btih 及规范十六进制访问器，不保存原 URI、Tracker、显示名或选择范围。40 位 hex／32 位 base32 归一到相同值；同值重复 xt 合并，畸形或冲突 xt 拒绝。遵循既有 hybrid 验收门槛，本切片明确拒绝任何 btmh，包括混合主题，不丢弃另一个身份后宣称兼容。协议字段依据 [BEP 9](https://www.bittorrent.org/beps/bep_0009.html)，具体拒绝策略为本切片的保守实施选择。
+
+At baseline `c247f5bc68cefdccfbaa2ed0b9068b36bfa4bd06`, add pure parsing with the signature above. `MagnetInfo` retains only a private 20-byte btih and canonical hex accessor, without URI, trackers, display name or selection ranges. Normalize hex/base32 and coalesce equal repeated xt values; reject malformed/conflicting topics. Under the existing hybrid gate, this slice rejects any btmh, including mixed topics, rather than silently dropping an identity and claiming compatibility. Fields follow [BEP 9](https://www.bittorrent.org/beps/bep_0009.html); rejection policy is this slice's conservative implementation choice.
+
+原输入先按 UTF-8 字节检查 8 KiB 及控制字符，再允许两端空白裁剪；ResolveRequest 同样在 trim 前检查，HTTP 行为不变。接受大小写无关的 magnet／URN namespace 及 hash 字母，query key 在一次解码后大小写敏感，仅小写 xt 提供身份。先按 &／首个 = 分段，再严格解码一次 %HH；+ 保持字面值。每个参数（包括忽略项）均校验 UTF-8、控制字符、非空键及合法键字符。拒绝 fragment、authority／path、内部原始空白、空／无键分段与 xt.* 索引主题；其他参数只校验后忽略，不授权网络或文件选择。允许非空白／控制的原始 Unicode 参数文本及编码 UTF-8，保留显示名兼容；ASCII 原文遵循 query 字符语法。[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html#section-2.4) · [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648.html#section-6)
+
+Check the original UTF-8 byte length and controls before outer trimming; ResolveRequest enforces the same guard before trim, retaining HTTP behavior. Scheme/URN namespace/hash letters are ASCII-insensitive, while decoded query keys are case-sensitive and only lowercase xt supplies identity. Split on & and the first = before exactly one strict %HH decode; preserve literal +. Validate every parameter, including ignored ones, for UTF-8, controls, nonempty keys and allowed key characters. Reject fragments, authority/path, internal raw whitespace, empty/keyless segments and indexed xt.* topics. Other parameters are validated then ignored, without network/selection authorization. Permit nonwhitespace/noncontrol raw Unicode text and encoded UTF-8; raw ASCII uses query character syntax. [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html#section-2.4) · [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648.html#section-6)
+
+MagnetResolver 复用该 parser，保留 ResolveResult 字段；错误只含静态分类，Request／Result 的 Debug 对 Magnet 脱敏。显式 source 访问器仍返回原输入，不被当作公开 TaskView 脱敏器。Registry／Core 直接消费者验证规范值、拒绝及无落库／事件副作用；旧 RPC 继续拒绝有效 Magnet，旧数据库 Magnet 保持不派发。该包不新增依赖、RPC capability、Peer／Tracker、元数据获取或 BT 下载，不关闭 B1／M6。
+
+MagnetResolver reuses the parser without changing ResolveResult fields. Errors contain static categories, and Request/Result Debug redact Magnet sources. Explicit source access remains raw and is not a public TaskView sanitizer. Registry/Core consumers verify normalization, rejection and no persistence/event side effects. Legacy RPC still rejects valid Magnet inputs, and recovered Magnet tasks remain undispatched. Add no dependency, capability, peer/tracker, metadata fetch or BT transfer; keep B1/M6 open.
+
+实施顺序 / Execution order:
+
+1. 先记录旧解析器错误接受短哈希的失败测试，再新增有界值类型和严格 codec。 / Record a failing short-hash acceptance regression, then implement bounded values/codecs.
+2. 接入 Registry／Core，覆盖原始字节上限、单次解码、重复／冲突／索引主题及 Debug／错误脱敏。 / Wire Registry/Core and cover raw bounds, one decode, repeated/conflicting/indexed topics and Debug/error privacy.
+3. 验证有效 Magnet 仍受旧 RPC／派发门槛约束，更新双语状态。 / Verify valid Magnet remains gated at RPC/dispatch and update bilingual status.
+4. 固定 SHA 独立审查及实际消费者验证；完整 Rust 门槛、最新 base/head 与实际 main push CI 全通过后交付。 / Freeze/review the SHA, validate real consumers, run full Rust gates and verify latest-base/head plus actual-main CI before delivery.
 
 旧入口保护沿用 RFC 0004：HTTP 调用保留，新非 HTTP 创建必须走类型化方法；旧 Magnet／Local 记录不能因新引擎注册而自动开始下载。任务领取前同时验证持久 metainfo／来源摘要／选择，缺少绑定即拒绝并要求显式重导入。
 
