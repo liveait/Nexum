@@ -1,7 +1,11 @@
 //! Single-connection plain FTP reception into a caller-owned file.
 
+mod completion;
 mod reply;
 mod resume;
+pub use completion::{
+    FtpCompletionProof, FtpCompletionRequest, receive_complete, resume_complete, verify_completion,
+};
 pub use resume::{
     FtpCheckpointRequest, FtpCredentialBinding, FtpPathMode, FtpPrefixProof, FtpResumeBinding,
     FtpResumeRequest, checkpoint, repair_uncommitted_tail, resume,
@@ -83,12 +87,10 @@ impl fmt::Display for FtpReceiveError {
             Self::Rejected(stage, code) => write!(formatter, "FTP {stage:?} rejected ({code})"),
             Self::LengthMismatch => formatter.write_str("FTP data length does not match SIZE"),
             Self::SourceSizeChanged => formatter.write_str("FTP source SIZE changed"),
-            Self::InvalidProof => formatter.write_str("invalid FTP prefix proof"),
+            Self::InvalidProof => formatter.write_str("invalid FTP proof"),
             Self::ResumeBindingMismatch => formatter.write_str("FTP resume binding mismatch"),
             Self::FileIdentityMismatch => formatter.write_str("FTP held file identity mismatch"),
-            Self::LocalPrefixMismatch => {
-                formatter.write_str("FTP local prefix does not match proof")
-            }
+            Self::LocalPrefixMismatch => formatter.write_str("FTP local file does not match proof"),
             Self::RemotePrefixMismatch => formatter.write_str("FTP origin prefix does not match"),
             Self::UncommittedTail => formatter.write_str("FTP file has an uncommitted tail"),
         }
@@ -159,6 +161,13 @@ impl FtpTransferControl {
     }
 
     fn finish_success(&self) -> Result<(), FtpReceiveError> {
+        self.finish_success_with_progress(None)
+    }
+
+    fn finish_success_with_progress(
+        &self,
+        progress: Option<Progress>,
+    ) -> Result<(), FtpReceiveError> {
         let (lock, wake) = &*self.0.worker.inner;
         loop {
             self.checkpoint()?;
@@ -167,6 +176,9 @@ impl FtpTransferControl {
                 return Err(FtpReceiveError::Cancelled);
             }
             if !state.pause_requested {
+                if let Some(progress) = progress {
+                    self.0.worker.record_session_progress(progress);
+                }
                 state.finished = true;
                 wake.notify_all();
                 return Ok(());
@@ -250,6 +262,28 @@ fn transfer(
     prefix: u64,
     expected_total: Option<u64>,
 ) -> Result<Progress, FtpReceiveError> {
+    let progress = transfer_data(
+        endpoint,
+        path,
+        credentials,
+        file,
+        control,
+        prefix,
+        expected_total,
+    )?;
+    control.finish_success()?;
+    Ok(progress)
+}
+
+fn transfer_data(
+    endpoint: SocketAddr,
+    path: &str,
+    credentials: FtpCredentials<'_>,
+    file: &mut File,
+    control: &FtpTransferControl,
+    prefix: u64,
+    expected_total: Option<u64>,
+) -> Result<Progress, FtpReceiveError> {
     let login = match credentials {
         FtpCredentials::Anonymous => ("anonymous", "anonymous@"),
         FtpCredentials::Password { username, password } => (username, password),
@@ -277,7 +311,6 @@ fn transfer(
     control.checkpoint()?;
     file.sync_all().map_err(local_io)?;
     control.0.worker.record_session_progress(progress.clone());
-    control.finish_success()?;
     Ok(progress)
 }
 

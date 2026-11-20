@@ -509,6 +509,148 @@ fn restarts_a_real_ftp_download_through_the_core_persistence_consumer() {
 }
 
 #[test]
+fn completion_proof_survives_a_core_consumer_process_and_verifies_with_the_origin_offline() {
+    use ftp::{FtpCompletionProof, FtpCompletionRequest};
+    const CHILD: &str = "NEXUM_FTP_COMPLETION_CHILD";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let root = PathBuf::from(path);
+        let mut owner = core(root.join("nexum.sqlite"));
+        owner.recover().unwrap();
+        let id = TaskId::from("ftp");
+        let old = owner.load_ftp_attempt(&id).unwrap();
+        let attempt = owner.claim_ftp_attempt(&id, old.as_ref()).unwrap();
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .open(root.join("partial"))
+            .unwrap();
+        let directory = File::open(&root).unwrap();
+        // Fixture-owned journal, already open before production APIs run.
+        // This is not a product journal-publication implementation.
+        let mut journal = File::options()
+            .write(true)
+            .create_new(true)
+            .open(root.join("complete-proof.json"))
+            .unwrap();
+        let endpoint = std::env::var("NEXUM_FTP_COMPLETION_ENDPOINT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let control = FtpTransferControl::default();
+        let complete = if let Some(prefix) = attempt.proof() {
+            ftp::resume_complete(
+                endpoint,
+                FtpCredentials::Anonymous,
+                &mut file,
+                &directory,
+                FtpResumeRequest {
+                    binding: attempt.binding(),
+                    attempt_generation: attempt.generation(),
+                    proof: prefix,
+                },
+                &control,
+            )
+        } else {
+            ftp::receive_complete(
+                endpoint,
+                FtpCredentials::Anonymous,
+                &mut file,
+                &directory,
+                FtpCompletionRequest {
+                    binding: attempt.binding(),
+                    attempt_generation: attempt.generation(),
+                },
+                &control,
+            )
+        }
+        .unwrap();
+        assert!(control.is_finished());
+        assert_eq!(complete.progress(), Progress::new(8, Some(8)));
+        assert_eq!(complete.attempt_generation(), attempt.generation());
+        journal.write_all(&complete.encode().unwrap()).unwrap();
+        journal.sync_all().unwrap();
+        return;
+    }
+    for resumed in [false, true] {
+        let fixture = Fixture::new();
+        let mut original = core(fixture.db());
+        create(&mut original);
+        let mut file = fixture.file();
+        if resumed {
+            let attempt = original
+                .claim_ftp_attempt(&TaskId::from("ftp"), None)
+                .unwrap();
+            file.write_all(b"first").unwrap();
+            let prefix = proof(&mut file, &File::open(&fixture.0).unwrap(), &attempt, 5);
+            original.save_ftp_checkpoint(&attempt, &prefix).unwrap();
+        }
+        drop(file);
+        drop(original);
+        let (endpoint, origin) = origin(false);
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","completion_proof_survives_a_core_consumer_process_and_verifies_with_the_origin_offline","--nocapture"])
+            .env(CHILD,&fixture.0).env("NEXUM_FTP_COMPLETION_ENDPOINT",endpoint.to_string()).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        origin.join().unwrap();
+        assert!(std::net::TcpStream::connect(endpoint).is_err());
+        let mut restarted = core(fixture.db());
+        restarted.recover().unwrap();
+        let id = TaskId::from("ftp");
+        let attempt = restarted.load_ftp_attempt(&id).unwrap().unwrap();
+        let encoded = fs::read(fixture.0.join("complete-proof.json")).unwrap();
+        assert!(encoded.len() <= 65536);
+        let complete = FtpCompletionProof::decode(&encoded).unwrap();
+        let mut file = File::open(fixture.0.join("partial")).unwrap();
+        let directory = File::open(&fixture.0).unwrap();
+        let verified = ftp::verify_completion(
+            &mut file,
+            &directory,
+            FtpCompletionRequest {
+                binding: attempt.binding(),
+                attempt_generation: attempt.generation(),
+            },
+            &complete,
+            &FtpTransferControl::default(),
+        )
+        .unwrap();
+        assert_eq!(verified, Progress::new(8, Some(8)));
+        assert_eq!(fs::read(fixture.0.join("partial")).unwrap(), b"firstend");
+        assert_eq!(complete.encode().unwrap(), encoded);
+        let expected = Progress::new(
+            if resumed { 5 } else { 0 },
+            if resumed { Some(8) } else { None },
+        );
+        assert_eq!(
+            restarted.repository.get(&id).unwrap().unwrap().progress,
+            expected
+        );
+        assert_eq!(
+            restarted.tasks.get(&id).unwrap().state,
+            nexum_task::TaskState::Created
+        );
+        let next = restarted.claim_ftp_attempt(&id, Some(&attempt)).unwrap();
+        assert_eq!(
+            ftp::verify_completion(
+                &mut file,
+                &directory,
+                FtpCompletionRequest {
+                    binding: next.binding(),
+                    attempt_generation: next.generation()
+                },
+                &complete,
+                &FtpTransferControl::default()
+            ),
+            Err(FtpReceiveError::ResumeBindingMismatch)
+        );
+    }
+}
+
+#[test]
 fn corrupted_or_unknown_engine_proof_is_retained_and_rejected_by_the_consumer() {
     for unknown in [false, true] {
         let fixture = Fixture::new();

@@ -118,7 +118,7 @@ impl FtpPrefixProof {
     }
 }
 
-fn validate_binding(binding: &FtpResumeBinding) -> Result<(), FtpReceiveError> {
+pub(super) fn validate_binding(binding: &FtpResumeBinding) -> Result<(), FtpReceiveError> {
     let valid = valid_arg(&binding.server_instance_id, 256, false)
         && valid_arg(&binding.task_id, 256, false)
         && valid_arg(&binding.operation_id, 256, false)
@@ -150,7 +150,7 @@ fn validate_binding(binding: &FtpResumeBinding) -> Result<(), FtpReceiveError> {
     Ok(())
 }
 
-fn held_identity(file: &File, directory: bool) -> Result<FileIdentity, FtpReceiveError> {
+pub(super) fn held_identity(file: &File, directory: bool) -> Result<FileIdentity, FtpReceiveError> {
     let metadata = file.metadata().map_err(local_io)?;
     if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
         return Err(FtpReceiveError::InvalidTarget);
@@ -199,7 +199,7 @@ fn verify_objects(
     Ok(())
 }
 
-fn digest(
+pub(super) fn digest(
     file: &mut (impl Read + Seek),
     bytes: u64,
     control: &FtpTransferControl,
@@ -330,8 +330,27 @@ pub fn resume(
 ) -> Result<Progress, FtpReceiveError> {
     let _finish = begin(control)?;
     control.checkpoint()?;
+    prepare_resume(file, directory, &request, &credentials, control)?;
+    transfer(
+        endpoint,
+        &request.binding.command_path,
+        credentials,
+        file,
+        control,
+        request.proof.trusted_bytes,
+        request.proof.total_bytes,
+    )
+}
+
+pub(super) fn prepare_resume(
+    file: &mut File,
+    directory: &File,
+    request: &FtpResumeRequest<'_>,
+    credentials: &FtpCredentials<'_>,
+    control: &FtpTransferControl,
+) -> Result<(), FtpReceiveError> {
     let proof = request.proof;
-    verify_request(&request)?;
+    verify_request(request)?;
     if request.binding.credential.is_some()
         != matches!(credentials, FtpCredentials::Password { .. })
     {
@@ -347,15 +366,7 @@ pub fn resume(
         .0
         .worker
         .record_session_progress(Progress::new(proof.trusted_bytes, proof.total_bytes));
-    transfer(
-        endpoint,
-        &request.binding.command_path,
-        credentials,
-        file,
-        control,
-        proof.trusted_bytes,
-        proof.total_bytes,
-    )
+    Ok(())
 }
 
 #[cfg(all(test, unix))]

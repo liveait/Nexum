@@ -231,6 +231,30 @@ Truncation, sync, trusted progress and successful repair completion share the pa
 
 All mutations affect the proof-bound object. Replacing its former entry with another regular file, symlink or unrelated hard link preserves the replacement. Other names for the same inode observe its length change. The caller joins the old worker, owns file writes and fences commits through the SQLite claim. Proof and database progress stay intact during repair. Exact replacement races, control interleavings, injected failure and retry after actual child termination require validation. Publication, name cleanup and final Completed retain their own gates.
 
+<a id="held-completion-proof"></a>
+
+### 持有文件完成证明切片 / Held-file completion-proof slice
+
+基线 `48ae2a4950a6b09beee0da969a9dfb3c9c1a45c6`。本切片落实已规划的发布前证明生成及离线重核，不操作目录项。新增 `receive_complete`／`resume_complete`，只有真实 RETR 的 EOF、226／250、可用的 SIZE 一致性和同步成功后，才从持有文件生成独立 `ftp-held-completion/v1`。绑定来源／任务 incarnation／凭据 revision、独立当前 generation、父目录和文件身份、完整长度及 SHA256；严格有界编码沿用 64 KiB 上限，不把等长前缀证明当作终结回复证明。
+
+At baseline `48ae2a4950a6b09beee0da969a9dfb3c9c1a45c6`, this slice implements planned prepublication proof generation and offline verification without directory-entry operations. New `receive_complete`/`resume_complete` generate a separate `ftp-held-completion/v1` from the held file only after actual RETR EOF, 226/250, available SIZE consistency and successful sync. Bind origin/task incarnation/credential revision, independently supplied current generation, parent/file identities, complete length and SHA256. Strict bounded encoding retains the 64 KiB cap. An exact-length prefix proof is not evidence of the terminal FTP reply.
+
+`FtpCompletionRequest` 提供独立 binding／generation；`verify_completion` 必须精确匹配两者，并重新检查持有对象身份、长度及摘要。未知格式、前缀证明、同内容不同身份、错误来源／generation、损坏及多余尾部均拒绝。证明生成／重核期间沿用分块取消／暂停，不把摘要扫描量报告为下载量。成功结果只在最后控制决定后返回；原 receive／resume 和 HTTP v1 行为保持兼容。
+
+`FtpCompletionRequest` supplies independent binding/generation; `verify_completion` matches both exactly and rechecks held identities, length and digest. Reject unknown formats, prefix proofs, equal-content replacement identities, wrong origin/generation, corruption and extra tails. Proof generation/verification retain chunked pause/cancellation without counting digest scanning as downloads. Return success only after the final control decision. Preserve existing receive/resume and HTTP v1 behavior.
+
+外部结构化导入只通过有界 `decode`，公开证明类型不提供直接反序列化。离线重核的可信进度与成功完成在同一决定锁内发布；哈希后取消获胜时，不发布该核验进度。网络实写进度仍保留原有含义。
+
+External structured imports use bounded `decode`; the public proof type provides no direct deserialization. Offline verified progress and successful completion are published under one decision lock. Cancellation winning after hashing prevents that verified progress publication. Network-written progress retains its existing meaning.
+
+消费者用公开 Core 入口取得来源和 generation，经真实 FTP 生成证明；测试拥有并预先打开证明文件，写入／同步编码后退出进程。另一进程在源站离线时从未重新领取的 Core 尝试独立取得 binding／generation，重开持有文件并核验；错误 generation 不自动接受。此测试文件不是产品 journal 发布协议。产品 SQLite 完成证明保存、重新领取时保留旧证明授权、Ready 后恢复、最终 Completed、发布／清理和 Server 路由留给后续；不新增 schema 或产品能力声明。
+
+A consumer obtains origin/generation through public Core APIs and generates proof over actual FTP. Its test owns an already-open proof file, writes/syncs the encoding and exits. With the origin offline, another process obtains binding/generation independently from the unreclaimed Core attempt, reopens held files and verifies; mismatched generations are not implicitly authorized. The test file is not a product journal-publication protocol. Durable product SQLite completion proofs, retained-proof authorization across reclaim, recovery after Ready, final Completed, publication/cleanup and Server routing remain later work. Add no schema or product capability claim.
+
+实施顺序：先记录真实 FTP 成功而新入口尚未实现的失败测试；分离单流接收与控制结束，增加完整证明及重核；覆盖终结失败／SIZE 变化／未知长度／零文件、对象／来源／generation／格式异常、精确替换及摘要中暂停／取消；加入 Core 跨进程离线消费者。最后固定 SHA，完整 Rust 门槛及独立真实源站验证、审查和合并前后 CI 全通过后交付。
+
+Execution order: record a failing real-FTP success case before implementing the new entry; separate reception from final control completion and add full proofs/verification; cover terminal failure/SIZE changes/unknown length/empty files, object/origin/generation/format failures, exact replacement and pause/cancel during hashing; add the cross-process offline Core consumer. Freeze the SHA and deliver only after complete Rust gates, independent real-origin validation/review and CI before/after merge pass.
+
 ## 完成、文件安全与兼容 / Completion, file safety and compatibility
 
 停写、长度验证和 sync 后先保存完成证明，再在同一取消决定锁内安全地不覆盖发布，最后原子保存最终进度和 Completed。保存失败保留证明，重启优先离线对账，不发额外 RETR。沿用旧 HTTP v1 路径／读取，FTP 新格式与目录独立版本化，不能静默修改 `http-completions` 含义。
