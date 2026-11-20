@@ -8,6 +8,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use nexum_engine::ftp::{FtpCredentials, FtpReceiveError, FtpStage, FtpTransferControl, receive};
+#[path = "support/ftp_completion.rs"]
+mod completion;
 #[path = "support/ftp_resume.rs"]
 mod resume;
 #[path = "support/ftp_tail.rs"]
