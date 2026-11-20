@@ -8,8 +8,11 @@ use serde_json::json;
 fn legacy_create_rejects_non_http_without_storage_or_events() {
     let mut core = Core::new(SchedulerConfig::default()).unwrap();
     let local = std::env::current_exe().unwrap();
+    let valid_magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=https://tracker.invalid/SOURCE_SECRET";
+    assert!(core.resolve_source(valid_magnet).is_ok());
     for source in [
         "magnet:?xt=urn:btih:abc&tr=https://user:SOURCE_SECRET@tracker.invalid".to_owned(),
+        valid_magnet.to_owned(),
         local.to_str().unwrap().to_owned(),
         "ftp://user:SOURCE_SECRET@host.invalid/file".to_owned(),
         "SOURCE_SECRET://host.invalid/file".to_owned(),
@@ -35,16 +38,19 @@ fn legacy_create_rejects_non_http_without_storage_or_events() {
 #[test]
 fn legacy_non_http_notification_cannot_create_a_task() {
     let mut core = Core::new(SchedulerConfig::default()).unwrap();
-    let request = RpcRequest::notification(
-        "task.create",
-        Some(
-            json!({"id":"notification","source":"magnet:?xt=urn:btih:abc","destination":"output"}),
-        ),
-    );
-    assert!(RpcDispatcher::dispatch(&mut core, &request).is_none());
-    assert!(core.repository.list().unwrap().is_empty());
-    assert_eq!(core.tasks.list().count(), 0);
-    assert!(core.tasks.drain_events().is_empty());
+    for source in [
+        "magnet:?xt=urn:btih:abc",
+        "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+    ] {
+        let request = RpcRequest::notification(
+            "task.create",
+            Some(json!({"id":"notification","source":source,"destination":"output"})),
+        );
+        assert!(RpcDispatcher::dispatch(&mut core, &request).is_none());
+        assert!(core.repository.list().unwrap().is_empty());
+        assert_eq!(core.tasks.list().count(), 0);
+        assert!(core.tasks.drain_events().is_empty());
+    }
 }
 
 #[test]
