@@ -64,10 +64,19 @@ pub struct ResolveResult {
 }
 
 fn is_magnet_source(source: &str) -> bool {
-    source
-        .trim_start()
-        .split_once(':')
-        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("magnet"))
+    // Conservative classification for rejection and diagnostics only. The
+    // actual parser never accepts a control/whitespace-obfuscated scheme.
+    let Some((scheme, _)) = source.split_once(':') else {
+        return false;
+    };
+    let mut characters = scheme
+        .chars()
+        .filter(|character| !character.is_control() && !character.is_whitespace());
+    "magnet".chars().all(|expected| {
+        characters
+            .next()
+            .is_some_and(|character| character.eq_ignore_ascii_case(&expected))
+    }) && characters.next().is_none()
 }
 
 fn magnet_error(error: magnet::MagnetError) -> ResolverError {

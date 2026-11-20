@@ -61,6 +61,8 @@ fn invalid_magnet_creation_leaves_sqlite_memory_and_events_unchanged() {
         format!("{valid}\n"),
         oversized,
         "magnet:?xt=urn:btih:PASSKEY_SENTINEL".into(),
+        format!("\0{valid}&tr=https://tracker.invalid/PASSKEY_SENTINEL"),
+        format!("ma\0gnet:{}", valid.split_once(':').unwrap().1),
     ];
     for (index, source) in sources.into_iter().enumerate() {
         assert!(core.resolve_source(&source).is_err());

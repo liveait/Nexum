@@ -57,6 +57,10 @@ At baseline `c247f5bc68cefdccfbaa2ed0b9068b36bfa4bd06`, add pure parsing with th
 
 Check the original UTF-8 byte length and controls before outer trimming; ResolveRequest enforces the same guard before trim, retaining HTTP behavior. Scheme/URN namespace/hash letters are ASCII-insensitive, while decoded query keys are case-sensitive and only lowercase xt supplies identity. Split on & and the first = before exactly one strict %HH decode; preserve literal +. Validate every parameter, including ignored ones, for UTF-8, controls, nonempty keys and allowed key characters. Reject fragments, authority/path, internal raw whitespace, empty/keyless segments and indexed xt.* topics. Other parameters are validated then ignored, without network/selection authorization. Permit nonwhitespace/noncontrol raw Unicode text and encoded UTF-8; raw ASCII uses query character syntax. [RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html#section-2.4) · [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648.html#section-6)
 
+入口及 Debug 的识别对 scheme 中的空白／控制字符作保守分类，仅用于拒绝／脱敏；真实 parser／kind 不接受这种变形。原文控制字符仍在 trim 前拒绝，覆盖前置 NUL 及 scheme 内插入控制字符。
+
+Ingress/Debug classify whitespace/control-obfuscated schemes conservatively for rejection/redaction only. Actual parsing/kind never accepts that spelling. Original controls are still rejected before trim, including leading NUL and controls embedded in the scheme.
+
 MagnetResolver 复用该 parser，保留 ResolveResult 字段；错误只含静态分类，Request／Result 的 Debug 对 Magnet 脱敏。显式 source 访问器仍返回原输入，不被当作公开 TaskView 脱敏器。Registry／Core 直接消费者验证规范值、拒绝及无落库／事件副作用；旧 RPC 继续拒绝有效 Magnet，旧数据库 Magnet 保持不派发。该包不新增依赖、RPC capability、Peer／Tracker、元数据获取或 BT 下载，不关闭 B1／M6。
 
 MagnetResolver reuses the parser without changing ResolveResult fields. Errors contain static categories, and Request/Result Debug redact Magnet sources. Explicit source access remains raw and is not a public TaskView sanitizer. Registry/Core consumers verify normalization, rejection and no persistence/event side effects. Legacy RPC still rejects valid Magnet inputs, and recovered Magnet tasks remain undispatched. Add no dependency, capability, peer/tracker, metadata fetch or BT transfer; keep B1/M6 open.

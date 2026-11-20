@@ -306,3 +306,44 @@ fn debug_and_errors_hide_magnet_secrets_but_explicit_source_access_is_unchanged(
     assert_eq!(result.source, "HtTpS://example.invalid/file");
     assert!(format!("{result:?}").contains("example.invalid"));
 }
+
+#[test]
+fn rejects_control_obfuscated_magnet_schemes_and_redacts_their_results() {
+    let source = format!("{URI}&tr=https://tracker.invalid/PASSKEY_SENTINEL");
+    let suffix = source.split_once(':').unwrap().1;
+    for code in 0..=0x9f {
+        let character = char::from_u32(code).unwrap();
+        if !character.is_control() {
+            continue;
+        }
+        for boundary in 0..=6 {
+            let mut scheme = "MaGnEt".to_owned();
+            scheme.insert(boundary, character);
+            let invalid = format!("{scheme}:{suffix}");
+            assert_eq!(parse_magnet(&invalid), Err(MagnetError::InvalidUri));
+            assert!(
+                ResolveRequest::new(invalid.clone()).is_err(),
+                "control-obfuscated Magnet must be rejected before constructing a request"
+            );
+            let result = ResolveResult {
+                kind: ResolveKind::Http,
+                source: invalid,
+            };
+            assert!(!format!("{result:?}").contains("PASSKEY_SENTINEL"));
+        }
+        let padded = format!(" \u{2000}{character}{source}");
+        assert!(ResolveRequest::new(padded).is_err());
+    }
+    for invalid in [
+        format!("ma gnet:{suffix}"),
+        format!("ma\u{2000}gnet:{suffix}"),
+    ] {
+        assert_eq!(parse_magnet(&invalid), Err(MagnetError::InvalidUri));
+        let request = ResolveRequest::new(invalid).unwrap();
+        assert!(ResolverRegistry::new().resolve(&request).is_err());
+        assert!(!format!("{request:?}").contains("PASSKEY_SENTINEL"));
+    }
+    let oversized = format!("{}\0{source}", " ".repeat(8193));
+    assert_eq!(parse_magnet(&oversized), Err(MagnetError::TooLong));
+    assert!(ResolveRequest::new(oversized).is_err());
+}
