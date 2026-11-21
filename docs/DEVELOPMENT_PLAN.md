@@ -371,6 +371,10 @@ PR #80 merged as `4038834f7460e9966e33b3d17a2a2a45535cc44a`, with all gates pass
 
 ## 3. 范围与下一步 / 3. Scope and immediate next step
 
+**文件发布平台证据（2026-11-21）**。macOS APFS 的十个 fd-clone／进程终止实验确认来源句柄绑定、不覆盖和父目录绑定；clone 返回后尚未保存新身份即终止时，原 clone 与同字节替换均不能直接复用 v1 来源身份。该模型不是产品恢复验收。独立权限 broker、签名容器受限模式、普通桌面范围修订均仍待选择；不得因此放宽原门槛或启用 FTP／M4。[RFC 0002](RFC/0002-segment-file-ownership.md) 记录证据、平台限制和选择条件，BT 元数据网络工作可独立推进。
+
+**Publication platform evidence (2026-11-21).** Ten macOS APFS fd-clone/process-termination scenarios support source-handle/no-clobber/parent binding. Termination after clone returns but before new identity is saved leaves both the original clone and an equal-byte replacement incompatible with directly reusing v1 source identity. This model is not product recovery acceptance. Independent-principal brokers, a restricted signed-container profile and an ordinary-desktop scope revision remain unselected; do not relax existing gates or enable FTP/M4. [RFC 0002](RFC/0002-segment-file-ownership.md) records evidence, platform limits and decision conditions; BT metadata/network work can advance independently.
+
 官网部署按上述 M3 工作包推进：沿用 GitHub Pages 默认项目地址，固定发布元数据契约并建设中英文官网与预览产物流程；正式下载随 M3 验收通过后上线，R2 镜像按实际流量需求后续安排。
 
 Website deployment follows the M3 work package above: use the default GitHub Pages project address, fix the release metadata contract and build the bilingual website/preview-artifact flow. Official downloads go live after M3 acceptance passes; schedule an R2 mirror later according to actual traffic needs.

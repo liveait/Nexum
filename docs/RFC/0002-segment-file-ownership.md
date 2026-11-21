@@ -1,7 +1,7 @@
 # RFC 0002：分段文件发布与清理的身份边界 / Identity boundaries for segment publication and cleanup
 
-- 状态：提案；平台机制调查与本机实验已完成，安全实现及行为验收尚未完成。日期：2026-10-31；基线：`cf884557140a252f20b87dea71794b23bf07b6f4`。
-  Status: proposed; platform research and local experiments complete, with safe implementation and behavioral acceptance still open. Date: 2026-10-31; baseline: `cf884557140a252f20b87dea71794b23bf07b6f4`.
+- 状态：提案；平台调查与实验不代表发布机制已通过。初稿：2026-10-31，基线 `cf884557140a252f20b87dea71794b23bf07b6f4`；本轮核对：2026-11-21，基线 `5a9bc7de2166a2117f55e2f10784d4e4cacbb03f`。安全实现、行为验收及下述架构／范围选择仍待完成。
+  Status: proposed; platform research and experiments do not accept a publication mechanism. Initial draft: 2026-10-31 at `cf884557140a252f20b87dea71794b23bf07b6f4`; current audit: 2026-11-21 at `5a9bc7de2166a2117f55e2f10784d4e4cacbb03f`. Safe implementation, behavioral acceptance and the architecture/scope choice below remain open.
 
 ## 摘要与范围 / Summary and scope
 
@@ -103,3 +103,52 @@ On 2026-10-31, macOS 27.2 (26B123), arm64, isolated `python3` experiments used `
 本轮仅文档变更，执行 diff／本地链接检查；不因上述实验宣称产品修复。未执行 Linux／Windows 机制、完整 Rust 门槛、原生 App、崩溃恢复或合并后 CI；这些仍是对应实现的验收条件。M4 未完成。
 
 This documentation-only slice checks the diff and local links; the experiments do not establish a product fix. Linux/Windows primitives, full Rust gates, native App behavior, crash recovery and post-merge CI were not executed here and remain implementation acceptance requirements. M4 is incomplete.
+
+## 2026-11-21：fd clone 进程终止实验 / fd-clone process-termination probe
+
+基线 `5a9bc7de2166a2117f55e2f10784d4e4cacbb03f`；macOS 27.2.1（26B131）、arm64、APFS。在独立临时目录直接调用 `fclonefileat`，以 pipe 屏障控制十个子进程场景，并在 clone 返回、尚未打开／读取／记录目标身份时发送 `SIGKILL`；另启动两个恢复进程读取已持久化的模型记录。脚本执行退出码 0，十个场景断言通过，stderr 为空，所有自建子进程均已回收。它是仓库外的平台实验，不调用 Nexum Engine／Core／Server，不是真实 FTP 完成证明或产品恢复链验收。
+
+Base: `5a9bc7de2166a2117f55e2f10784d4e4cacbb03f`; macOS 27.2.1 (26B131), arm64, APFS. Call `fclonefileat` directly in isolated temporary directories, using pipe barriers for ten child-process scenarios. Send `SIGKILL` after clone returns but before opening/reading/recording destination identity; two separate recovery processes read the persisted model record. The script exits 0 with ten passing scenario assertions, empty stderr and all owned children reaped. This external platform probe does not call Nexum Engine/Core/Server and does not accept actual FTP completion proofs or product recovery.
+
+| 场景 / Scenario | 实际结果 / Observed result |
+| --- | --- |
+| 来源名称分别被普通文件、符号链接和 hard link 替换，三个场景。<br>Replace source names with regular files, symlinks and hard links, three cases. | clone 均取原持有 fd 的字节，生成不同 inode；替换项与无关哨兵保留。<br>Each clone uses the held original's bytes and creates a different inode, preserving replacement entries and unrelated sentinels. |
+| 目标已为普通文件、符号链接、hard link 和目录，四个场景。<br>Existing regular-file, symlink, hard-link and directory destinations, four cases. | 均返回 `EEXIST`（17），保留目标和无关项。<br>Each returns `EEXIST` (17), preserving the destination and unrelated entries. |
+| 目标父目录改名后原路径放入替换项，一个场景。<br>Rename the destination parent and replace its old pathname, one case. | 仅向持有的父目录对象克隆，不操作替换项；不证明原目标字符串仍指向该目录。<br>Clone only into the held parent without touching the replacement; this does not preserve the original pathname's binding. |
+| probe 在系统调用前收到取消，一个场景。<br>Cancel the probe before the syscall, one case. | 不调用 clone、不创建目标、不删除文件；不代表 Nexum 控制锁验收。<br>No clone, destination creation or deletion; this is not Nexum control-lock acceptance. |
+| clone 返回后、记录新身份前终止进程，再分别恢复原 clone 和同字节替换项，一个场景及两个恢复进程。<br>Kill after clone returns and before new identity is recorded, then recover the original clone and an equal-byte replacement, one case and two recovery processes. | 两者长度／SHA256 相同，inode 均不同于预存来源。旧来源身份检查均拒绝，纯摘要检查均接受；因此这两种规则分别不能完成原 clone 恢复或不能拒绝替换项。<br>Both match length/SHA256 and both differ from the persisted source inode. Source-identity checks reject both; digest-only checks accept both. The former cannot recover the original clone, while the latter cannot reject its replacement. |
+
+进程终止场景中观察者记录的 source／原 clone／替换 inode 分别为 `61076322`／`61076326`／`61076329`，设备号 `16777233`，长度 86016，SHA256 `dc800a1ea846a6a6375a2b06b2ae23f58200261c77dabb3541424d56982bfe79`。原 clone 身份只供实验观察，未写入可供恢复进程信任的发布记录。模型只使用 v1 身份匹配的必要 device/inode 子条件，不声称复刻完整凭证。原始 `results.json` 的 SHA256 为 `74ec769a51c6927fc2e99b97085033a1ee27ef76f2a260a1a42cb79c4e5e61af`；脚本、执行命令、平台信息和原始产物由本次交付记录保留。
+
+For the termination case, observer-only source/original-clone/replacement inodes are `61076322`/`61076326`/`61076329` on device `16777233`, length 86016, with SHA256 `dc800a1ea846a6a6375a2b06b2ae23f58200261c77dabb3541424d56982bfe79`. The observer's original-clone identity is not written into trusted recovery records. The model uses only the necessary device/inode subset of v1 identity matching, rather than reproducing the entire receipt. Raw `results.json` has SHA256 `74ec769a51c6927fc2e99b97085033a1ee27ef76f2a260a1a42cb79c4e5e61af`; this delivery retains scripts, commands, platform details and raw artifacts.
+
+**结论限定：** 本实验确认 fd 来源绑定和不覆盖候选，也确认直接把 clone 换入现有 v1 协议不能闭合已描述的崩溃窗口；它不是所有可能 v2 协议均不可能的证明。没有测试硬件掉电、跨卷／其他文件系统、系统容器隔离、独立安全主体 broker、Linux／Windows 或原生 App。不新增危险清理或回退，FTP 派发和 M4 继续受原门槛约束。
+
+**Bounded conclusion:** the probe supports fd-source binding/no-clobber and shows that directly substituting clone into the existing v1 protocol leaves this crash window open. It does not prove every possible v2 protocol impossible. Power loss, cross-volume/other filesystems, system-container isolation, independent-principal brokers, Linux/Windows and the native App were not tested. Add no unsafe cleanup/fallback; FTP dispatch and M4 retain the original gates.
+
+## 2026-11-21：受保护来源命名空间候选 / Protected-source namespace candidates
+
+FTP 的 SQLite 完成证明已在 PR #100 保存原生产 generation、持有对象身份及整文件进度，但数据库授权不改变目录项权限。本节只补充平台证据和待决定的架构，不接受新威胁范围、不迁移 v1、不启用 FTP 派发或 M4。旧 HTTP 路径的局限也不因此消失。
+
+PR #100 persists the original FTP producer generation, held-object identity and whole-file progress, but SQLite authority does not change namespace access. This section records platform evidence and an architecture decision still to be made. It accepts no revised threat model, v1 migration, FTP dispatch or M4 enablement, and does not repair the legacy HTTP limitations.
+
+Apple 文档指出，macOS 14 起 App Sandbox 容器与代码签名关联；macOS 15 起 App Group 容器也对非沙盒 App 提供系统数据保护。它是值得验证的操作系统边界，不能与普通 `0700` 目录等同。但其他 App 可经用户授权访问，辅助程序也有签名要求；App Group 的无提示访问还依赖分发与成员身份条件。文档本身不证明当前 Nexum、开发签名候选或任意 `--data-dir` 已受到该保护。[容器保护](https://developer.apple.com/documentation/xcode/protecting-local-app-data-using-containers) · [文件访问与签名条件](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox) · [App Group 配置](https://developer.apple.com/documentation/xcode/configuring-app-groups)
+
+Apple documents code-signature association for App Sandbox containers from macOS 14 and system data protection for nonsandboxed App Group containers from macOS 15. This is an OS boundary worth testing rather than ordinary `0700` permissions. Other apps can receive user authorization, helpers have signing requirements, and prompt-free App Group access has distribution/membership conditions. Documentation alone does not establish protection for current Nexum, development-signed candidates or arbitrary `--data-dir` locations. [Container protection](https://developer.apple.com/documentation/xcode/protecting-local-app-data-using-containers) · [File access and signing conditions](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox) · [App Group configuration](https://developer.apple.com/documentation/xcode/configuring-app-groups)
+
+若来源和 journal 的排他访问确经系统强制，预存来源身份后，从持有的受保护来源目录发布到持有的目标父目录，有望在发布时保留同一对象；之后目标被替换仍按原身份拒绝恢复，且不删除普通下载目录中的替换项。这只是协议候选：须实际证明容器访问拒绝、被授予额外访问权的进程边界、辅助程序身份、取消、进程终止、升级及失败恢复。容器所在卷之外的目标还可能跨卷，不能以 copy／clone 或不安全路径回退掩盖 `EXDEV`。独立 Server／CLI、自选数据目录和外接盘必须分别定义能力，不能沿用托管 App 的保护声明。
+
+If exclusive source/journal access is enforced by the OS, persisting source identity before publishing from a held protected source directory into the held destination parent may preserve the same object at publication. Later destination replacement must still fail recovery against that identity, without deleting replacement entries in ordinary download folders. This remains a protocol candidate requiring actual container-access denial, boundaries for additionally authorized processes, helper identity, cancellation, termination, upgrade and failure recovery. Targets outside the container's volume can cross filesystems: copy/clone or unsafe pathname fallbacks must not conceal `EXDEV`. Standalone Server/CLI, selected data directories and external volumes need their own capability definitions rather than inheriting managed-App claims.
+
+### 实施前需要确定的范围 / Scope decision before implementation
+
+1. **保持当前同 UID 对手保证，设计独立权限的最小发布 broker。** 该路线需要安装授权、请求方认证、最小权限和文件所有者管理、升级／卸载及各目标卷的验收，不能把普通同用户 helper 当作隔离。完整设计与平台验证前不启用产品；本次未安装系统服务。
+   **Retain the current same-UID adversary guarantee through an independent-principal publication broker.** This route adds installation authorization, caller authentication, least privilege and ownership management, upgrade/removal and per-volume acceptance; an ordinary same-user helper is not isolation. Complete design/platform verification precedes enablement; this work installs no system service.
+2. **签名容器的受限模式。** 优先验证 macOS 15 及以上的正式签名 App Group 来源／journal，仅承诺通过测试的同卷目标和托管 App／随包 Server 组合。必须明确拥有用户额外授权／Full Disk Access 的程序是否处于信任边界之外；这不是自动满足现有任意同 UID 写者模型。最低系统版本、外接盘／独立 Server 限制和正式签名身份都需随方案接受，再做真实隔离和崩溃验证。
+   **Use a signed-container restricted profile.** First verify a formally signed App Group source/journal on macOS 15 or later, covering only tested same-volume destinations and managed App/bundled Server combinations. Explicitly define whether programs with additional user grants/Full Disk Access are trusted; this does not automatically satisfy the current arbitrary same-UID writer model. Accept the minimum OS, external-volume/standalone-Server limits and distribution identity requirements before actual isolation/crash testing.
+3. **显式修订为普通桌面安全范围。** 若维护者选择首发不对抗具有同账户写权限的恶意程序持续替换目录项，必须另行接受这一范围修订，记录残留的检查到路径操作竞态。已有目标不覆盖、符号链接保护、完整性、取消、恢复及失败保留仍必须实现和验收；不得把修订表述为 TOCTOU 已修复，也不得自动扩大到所有平台或旧 HTTP 路径。
+   **Explicitly revise to an ordinary desktop security scope.** If the maintainer chooses a first release without resistance to persistent namespace substitution by malicious same-account writers, separately accept that scope change and record the residual check-to-path-operation races. No-clobber destinations, symlink protection, integrity, cancellation, recovery and failure preservation remain implementation/acceptance requirements. Never describe the revision as a TOCTOU fix or silently extend it to every platform or legacy HTTP.
+
+以上三项均未因本次文档更新而选定。产品接线继续受原门槛约束；BT 元数据和网络控制等不依赖文件发布的工作可按各自 RFC 并行推进。
+
+None of these options is selected by this documentation update. Product integration retains the original gates; BT metadata/network-control work that does not depend on file publication can proceed under its own RFC.
