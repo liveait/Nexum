@@ -393,6 +393,10 @@ fn version_five_migration_preserves_data_and_rolls_back_ddl_at_each_failure() {
             "DROP TRIGGER fail",
         ),
         (
+            "CREATE TRIGGER fail AFTER UPDATE OF version ON schema_version WHEN NEW.version=6 BEGIN UPDATE schema_version SET version=5; END",
+            "DROP TRIGGER fail",
+        ),
+        (
             "CREATE TABLE ftp_publications (saved TEXT)",
             "DROP TABLE ftp_publications",
         ),
@@ -565,4 +569,138 @@ fn completed_diagnostics_detect_lost_observed_rows_and_mismatched_current_marker
         f.db().execute_batch(mutation).unwrap();
         assert!(repo.completed_ftp_publications().is_err(), "{mutation}");
     }
+}
+
+#[test]
+fn legacy_claim_rejects_skipped_generation_and_corrupted_writeback() {
+    for trigger in [
+        "BEFORE UPDATE OF generation ON ftp_attempts BEGIN SELECT RAISE(IGNORE); END",
+        "AFTER UPDATE OF generation ON ftp_attempts BEGIN UPDATE ftp_attempts SET generation=OLD.generation WHERE task_id=NEW.task_id; END",
+        "AFTER UPDATE OF generation ON ftp_attempts BEGIN UPDATE ftp_attempts SET completion_generation=NEW.generation WHERE task_id=NEW.task_id; END",
+    ] {
+        let f = Fixture::new();
+        let mut repo = f.repo();
+        let (task, attempt) = create(&mut repo);
+        let prepared = prepare(&mut repo, &task, &attempt);
+        let db = f.db();
+        db.execute_batch(&format!("CREATE TRIGGER fault {trigger}"))
+            .unwrap();
+        assert!(
+            repo.claim_ftp_attempt(&prepared.origin, Some(&prepared))
+                .is_err(),
+            "{trigger}"
+        );
+        assert_eq!(
+            repo.ftp_attempt(&prepared.origin).unwrap(),
+            Some(prepared.clone())
+        );
+        db.execute_batch("DROP TRIGGER fault").unwrap();
+        let claimed = repo
+            .claim_ftp_attempt(&prepared.origin, Some(&prepared))
+            .unwrap();
+        assert_ne!(claimed.generation, prepared.generation);
+        assert_eq!(claimed.completion, prepared.completion);
+        assert_eq!(claimed.publication, prepared.publication);
+        assert!(repo.guard_ftp_publication(&task, &claimed).is_err());
+    }
+}
+
+#[test]
+fn final_transaction_rejects_lost_completed_bindings_and_preserves_retry() {
+    for change in [
+        "UPDATE ftp_attempts SET publication_seen=0",
+        "UPDATE ftp_attempts SET publication_authorization=NULL",
+        "UPDATE ftp_attempts SET completion_generation='replacement'",
+        "UPDATE ftp_attempts SET proof=X'0000'",
+        "UPDATE origin_instance SET identity='other'",
+        "UPDATE task_origins SET operation_id='other'",
+        "DELETE FROM task_origins",
+    ] {
+        let f = Fixture::new();
+        let mut repo = f.repo();
+        let (task, attempt) = create(&mut repo);
+        let prepared = prepare(&mut repo, &task, &attempt);
+        let db = f.db();
+        db.execute_batch(&format!(
+            "CREATE TRIGGER fault AFTER UPDATE OF phase ON ftp_publications BEGIN {change}; END"
+        ))
+        .unwrap();
+        assert!(
+            repo.complete_ftp_publication(&task, &prepared).is_err(),
+            "{change}"
+        );
+        assert_eq!(repo.get(&task.id).unwrap(), Some(task.clone()));
+        assert_eq!(
+            repo.ftp_attempt(&prepared.origin).unwrap(),
+            Some(prepared.clone())
+        );
+        db.execute_batch("DROP TRIGGER fault").unwrap();
+        repo.complete_ftp_publication(&task, &prepared).unwrap();
+        assert_eq!(repo.completed_ftp_publications().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn removal_preserves_the_observed_incarnation_when_journal_is_lost_or_corrupt() {
+    for completed in [false, true] {
+        for fault in [
+            "DELETE FROM ftp_publications",
+            "UPDATE ftp_publications SET authorization='bad'",
+            "UPDATE ftp_attempts SET publication_seen=0",
+        ] {
+            let f = Fixture::new();
+            let mut repo = f.repo();
+            let (task, attempt) = create(&mut repo);
+            let prepared = prepare(&mut repo, &task, &attempt);
+            if completed {
+                repo.complete_ftp_publication(&task, &prepared).unwrap();
+            }
+            let old_task = repo.get(&task.id).unwrap().unwrap();
+            let db = f.db();
+            db.execute_batch(fault).unwrap();
+            assert!(repo.remove(&task.id).is_err(), "{fault}");
+            assert_eq!(repo.get(&task.id).unwrap(), Some(old_task));
+            assert_eq!(
+                repo.active_origin(&task.id).unwrap(),
+                Some(attempt.origin.clone())
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT publication_authorization FROM ftp_attempts",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+                prepared.publication.as_ref().unwrap().authorization
+            );
+            assert_eq!(
+                repo.reserve_origin(&attempt.origin).unwrap(),
+                Reservation::Existing(attempt.origin.clone())
+            );
+        }
+    }
+}
+
+#[test]
+fn removal_rolls_back_if_deleting_the_attempt_also_loses_the_retained_journal() {
+    let f = Fixture::new();
+    let mut repo = f.repo();
+    let (task, attempt) = create(&mut repo);
+    let prepared = prepare(&mut repo, &task, &attempt);
+    let db = f.db();
+    db.execute_batch(
+        "CREATE TRIGGER fault AFTER DELETE ON ftp_attempts BEGIN DELETE FROM ftp_publications; END",
+    )
+    .unwrap();
+    assert!(repo.remove(&task.id).is_err());
+    assert_eq!(
+        repo.ftp_attempt(&prepared.origin).unwrap(),
+        Some(prepared.clone())
+    );
+    db.execute_batch("DROP TRIGGER fault").unwrap();
+    repo.remove(&task.id).unwrap();
+    assert_eq!(
+        repo.orphan_ftp_publications().unwrap()[0].operation_id,
+        prepared.origin.operation_id
+    );
 }

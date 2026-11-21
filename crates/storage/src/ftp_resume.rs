@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     SqliteRepository, StorageError,
-    ftp_publication::{self, FtpPublicationIntent},
+    ftp_publication::{self, FtpPublicationIntent, FtpPublicationPhase},
     origin::{self, OriginRecord},
 };
 
@@ -99,9 +99,14 @@ fn validate_checkpoint(checkpoint: &FtpCheckpoint) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(super) fn verify_origin(
+fn verify_origin(connection: &Connection, record: &OriginRecord) -> Result<String, StorageError> {
+    verify_origin_for_phase(connection, record, FtpPublicationPhase::Prepared)
+}
+
+pub(super) fn verify_origin_for_phase(
     connection: &Connection,
     record: &OriginRecord,
+    phase: FtpPublicationPhase,
 ) -> Result<String, StorageError> {
     if record.version != 1
         || record.security != "plain"
@@ -124,24 +129,43 @@ pub(super) fn verify_origin(
     }) {
         return Err(conflict());
     }
-    let matches:bool=connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_origins o ON o.task_id=t.id
-         WHERE t.id=?1 AND t.source=?2 AND t.destination=?3 AND t.state!='completed' AND o.operation_id=?4)",
-        params![record.task_id,record.canonical_url,record.destination,record.operation_id],|row|row.get(0)
-    ).map_err(origin::database_error)?;
+    let matches: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_origins o ON o.task_id=t.id
+         WHERE t.id=?1 AND t.source=?2 AND t.destination=?3 AND o.operation_id=?4
+         AND (t.state='completed')=?5)",
+            params![
+                record.task_id,
+                record.canonical_url,
+                record.destination,
+                record.operation_id,
+                phase == FtpPublicationPhase::Completed,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(origin::database_error)?;
     if !matches {
         return Err(conflict());
     }
     Ok(instance)
 }
 
-pub(super) fn read_attempt(
+fn read_attempt(
     connection: &Connection,
     record: &OriginRecord,
     instance: &str,
 ) -> Result<Option<FtpAttempt>, StorageError> {
+    read_attempt_for_phase(connection, record, instance, FtpPublicationPhase::Prepared)
+}
+
+pub(super) fn read_attempt_for_phase(
+    connection: &Connection,
+    record: &OriginRecord,
+    instance: &str,
+    phase: FtpPublicationPhase,
+) -> Result<Option<FtpAttempt>, StorageError> {
     let encoded = serde_json::to_string(record).map_err(|_| invalid())?;
-    let publication = ftp_publication::read_intent(connection, record, instance, "prepared")?;
+    let publication = ftp_publication::read_intent(connection, record, instance, phase)?;
     let row = connection.query_row(
         "SELECT version,instance_id,origin_record,generation,revision,
                 proof,trusted_bytes,total_bytes,
@@ -379,15 +403,36 @@ impl SqliteRepository {
         }
         let generation = origin::random_id()?;
         let encoded = serde_json::to_string(record).map_err(|_| invalid())?;
-        transaction.execute(
+        let changed = transaction.execute(
             "INSERT INTO ftp_attempts(task_id,version,instance_id,origin_record,generation,revision)
              VALUES(?1,1,?2,?3,?4,0)
              ON CONFLICT(task_id) DO UPDATE SET generation=excluded.generation",
             params![record.task_id,instance,encoded,generation]
         ).map_err(origin::database_error)?;
-        let attempt = read_attempt(&transaction, record, &instance)?.ok_or_else(conflict)?;
+        if changed != 1 {
+            return Err(conflict());
+        }
+        let claimed = match current {
+            Some(previous) => FtpAttempt {
+                generation,
+                ..previous
+            },
+            None => FtpAttempt {
+                instance_id: instance.clone(),
+                origin: record.clone(),
+                generation,
+                revision: 0,
+                checkpoint: None,
+                completion: None,
+                publication: None,
+            },
+        };
+        let after = verify_origin(&transaction, record)?;
+        if read_attempt(&transaction, record, &after)?.as_ref() != Some(&claimed) {
+            return Err(conflict());
+        }
         transaction.commit().map_err(origin::database_error)?;
-        Ok(attempt)
+        Ok(claimed)
     }
 
     /// Commits proof and normalized task progress in the same transaction.

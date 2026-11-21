@@ -7,7 +7,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 use crate::{
     SqliteRepository, StorageError, StoredTask,
-    ftp_resume::{FtpAttempt, FtpAttemptGuard, conflict, read_attempt, verify_origin},
+    ftp_resume::{
+        FtpAttempt, FtpAttemptGuard, conflict, read_attempt_for_phase, verify_origin_for_phase,
+    },
     origin::{OriginRecord, database_error, random_id},
 };
 
@@ -35,6 +37,23 @@ pub enum FtpPublicationPhase {
     Completed,
 }
 
+impl FtpPublicationPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Completed => "completed",
+        }
+    }
+
+    fn for_task(state: TaskState) -> Self {
+        if state == TaskState::Completed {
+            Self::Completed
+        } else {
+            Self::Prepared
+        }
+    }
+}
+
 /// Diagnostic metadata only. It does not contain a plan or confer attempt authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FtpPublicationRecord {
@@ -56,7 +75,7 @@ pub(super) fn read_intent(
     db: &Connection,
     origin: &OriginRecord,
     instance: &str,
-    expected_phase: &str,
+    expected_phase: FtpPublicationPhase,
 ) -> Result<Option<FtpPublicationIntent>, StorageError> {
     let row = db
         .query_row(
@@ -83,7 +102,7 @@ pub(super) fn read_intent(
     row.map(|(version, task_id, phase, intent)| {
         if version != 1
             || task_id != origin.task_id
-            || phase != expected_phase
+            || phase != expected_phase.as_str()
             || !valid_token(&intent.owner_generation)
             || !valid_token(&intent.authorization)
             || intent.revision == 0
@@ -93,6 +112,40 @@ pub(super) fn read_intent(
         Ok(intent)
     })
     .transpose()
+}
+
+/// Preserve the last independent witness when a publication's task is removed.
+/// Old orphan journals for a previous operation with the same task ID are excluded.
+pub(super) fn publication_before_removal(
+    db: &Connection,
+    task_id: &str,
+    task: Option<&StoredTask>,
+    origin: Option<&OriginRecord>,
+) -> Result<Option<(FtpAttempt, FtpPublicationPhase)>, StorageError> {
+    let observed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ftp_attempts WHERE task_id=?1 AND
+                       (publication_seen!=0 OR publication_authorization IS NOT NULL))
+             OR EXISTS(SELECT 1 FROM ftp_publications p JOIN task_origins o ON o.operation_id=p.operation_id
+                       WHERE o.task_id=?1 AND o.status='active' AND
+                       p.instance_id=(SELECT identity FROM origin_instance WHERE singleton=1))",
+        [task_id], |row| row.get(0),
+    ).map_err(database_error)?;
+    if !observed {
+        return Ok(None);
+    }
+    let task = task.ok_or_else(conflict)?;
+    let origin = origin.ok_or_else(conflict)?;
+    if origin.task_id != task_id {
+        return Err(conflict());
+    }
+    let phase = FtpPublicationPhase::for_task(task.state);
+    let instance = verify_origin_for_phase(db, origin, phase)?;
+    let attempt = read_attempt_for_phase(db, origin, &instance, phase)?.ok_or_else(conflict)?;
+    let intent = attempt.publication.as_ref().ok_or_else(conflict)?;
+    if phase == FtpPublicationPhase::Completed && intent.owner_generation != attempt.generation {
+        return Err(conflict());
+    }
+    Ok(Some((attempt, phase)))
 }
 
 fn immediate(db: &Connection) -> Result<Transaction<'_>, StorageError> {
@@ -124,8 +177,9 @@ fn match_snapshot(
         return Err(conflict());
     }
     match_task(db, task)?;
-    let instance = verify_origin(db, &expected.origin)?;
-    if read_attempt(db, &expected.origin, &instance)?.as_ref() != Some(expected) {
+    let phase = FtpPublicationPhase::for_task(state);
+    let instance = verify_origin_for_phase(db, &expected.origin, phase)?;
+    if read_attempt_for_phase(db, &expected.origin, &instance, phase)?.as_ref() != Some(expected) {
         return Err(conflict());
     }
     Ok(())
@@ -179,6 +233,16 @@ impl SqliteRepository {
         )
         .map_err(database_error)?;
         changed_one(tx.execute("UPDATE schema_version SET version=6 WHERE version=5", []))?;
+        let stamped: bool = tx
+            .query_row(
+                "SELECT COUNT(*)=1 AND MIN(version)=6 FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(database_error)?;
+        if !stamped {
+            return Err(conflict());
+        }
         tx.commit().map_err(database_error)
     }
 
@@ -326,12 +390,7 @@ impl SqliteRepository {
         completed.last_error = None;
         changed_one(tx.execute("UPDATE tasks SET state='completed',downloaded_bytes=?2,total_bytes=?2,speed_bytes_per_second=0,eta_seconds=NULL,last_error=NULL WHERE id=?1", params![task.id.as_str(),bytes]))?;
         changed_one(tx.execute("UPDATE ftp_publications SET phase='completed' WHERE instance_id=?1 AND operation_id=?2 AND phase='prepared'", params![attempt.instance_id,attempt.origin.operation_id]))?;
-        match_task(&tx, &completed)?;
-        if read_intent(&tx, &attempt.origin, &attempt.instance_id, "completed")?
-            != attempt.publication
-        {
-            return Err(conflict());
-        }
+        match_snapshot(&tx, &completed, attempt, TaskState::Completed)?;
         tx.commit().map_err(database_error)?;
         Ok(completed)
     }

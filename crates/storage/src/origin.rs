@@ -272,8 +272,15 @@ impl SqliteRepository {
             [id.as_str()],
             Self::row_to_task,
         ).optional().map_err(database_error)?;
-        if let Some(record) = read_record(&transaction, id.as_str(), "active")? {
-            tombstone(&transaction, &record)?;
+        let origin = read_record(&transaction, id.as_str(), "active")?;
+        let retained = crate::ftp_publication::publication_before_removal(
+            &transaction,
+            id.as_str(),
+            existing.as_ref(),
+            origin.as_ref(),
+        )?;
+        if let Some(record) = &origin {
+            tombstone(&transaction, record)?;
         }
         transaction
             .execute(
@@ -287,6 +294,26 @@ impl SqliteRepository {
         transaction
             .execute("DELETE FROM tasks WHERE id=?1", [id.as_str()])
             .map_err(database_error)?;
+        if let Some((attempt, phase)) = retained {
+            let journal = crate::ftp_publication::read_intent(
+                &transaction,
+                &attempt.origin,
+                &attempt.instance_id,
+                phase,
+            )?;
+            let live: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)
+                     OR EXISTS(SELECT 1 FROM ftp_attempts WHERE task_id=?1)
+                     OR EXISTS(SELECT 1 FROM task_origins WHERE task_id=?1)",
+                    [id.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(database_error)?;
+            if live || journal != attempt.publication {
+                return Err(crate::ftp_resume::conflict());
+            }
+        }
         transaction.commit().map_err(database_error)?;
         Ok(existing)
     }
