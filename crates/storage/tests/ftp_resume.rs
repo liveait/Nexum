@@ -174,7 +174,7 @@ fn completion_migration_failure_rolls_back_all_columns_and_preserves_retry() {
             db.execute_batch("ALTER TABLE ftp_attempts ADD COLUMN completion_version INTEGER")
                 .unwrap();
         } else {
-            db.execute_batch("CREATE TRIGGER reject_migration BEFORE UPDATE ON schema_version BEGIN SELECT RAISE(ABORT,'reject migration'); END").unwrap();
+            db.execute_batch("CREATE TRIGGER reject_migration BEFORE UPDATE ON schema_version WHEN NEW.version=5 BEGIN SELECT RAISE(ABORT,'reject migration'); END").unwrap();
         }
         let before = migration_snapshot(&db);
         let columns: Vec<String> = db
