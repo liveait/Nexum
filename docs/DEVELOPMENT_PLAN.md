@@ -371,6 +371,10 @@ PR #80 merged as `4038834f7460e9966e33b3d17a2a2a45535cc44a`, with all gates pass
 
 ## 3. 范围与下一步 / 3. Scope and immediate next step
 
+**文件发布平台证据与范围决定（2026-11-21）**。十个 macOS APFS fd-clone／进程终止实验确认句柄来源、不覆盖和父目录绑定，但原 clone 与同字节替换均不能直接复用旧来源身份；这不是产品恢复验收。维护者选择首发 macOS FTP／BT 的[普通桌面范围](RFC/0002-segment-file-ownership.md#ordinary-desktop-ftp-bt)：保留不覆盖、符号链接、完整性、取消和恢复，不承诺抵御同账户恶意程序持续篡改，不增加管理员服务。残余路径竞态须明示，检测到不匹配时失败保留；发布／清理、最终 Completed、Server／原生 App 仍须实现并验收。M4 强模型、旧 HTTP 与首发 FTP／BT 完整支持要求均不自动改变。BT 元数据网络工作可独立推进。
+
+**Publication evidence and scope decision (2026-11-21).** Ten macOS APFS fd-clone/process-termination scenarios support source-handle/no-clobber/parent binding, but neither the original clone nor an equal-byte replacement can directly reuse source identity; this is not product recovery acceptance. The maintainer chose the first-release macOS FTP/BT [ordinary-desktop scope](RFC/0002-segment-file-ownership.md#ordinary-desktop-ftp-bt): retain no-clobber, symlink, integrity, cancellation and recovery without promising resistance to persistent same-account tampering or adding an administrator service. Disclose residual pathname races and fail/preserve detected mismatches. Publication/cleanup, final Completed and Server/native App still require implementation/acceptance. Neither M4's stronger model, legacy HTTP nor complete first-release FTP/BT requirements change automatically. BT metadata/network work can advance independently.
+
 官网部署按上述 M3 工作包推进：沿用 GitHub Pages 默认项目地址，固定发布元数据契约并建设中英文官网与预览产物流程；正式下载随 M3 验收通过后上线，R2 镜像按实际流量需求后续安排。
 
 Website deployment follows the M3 work package above: use the default GitHub Pages project address, fix the release metadata contract and build the bilingual website/preview-artifact flow. Official downloads go live after M3 acceptance passes; schedule an R2 mirror later according to actual traffic needs.
