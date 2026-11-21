@@ -1,22 +1,25 @@
 //! Atomic FTP attempt claims and opaque, bounded Engine checkpoints.
 
+use std::fmt;
+
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::{
     SqliteRepository, StorageError,
+    ftp_publication::{self, FtpPublicationIntent},
     origin::{self, OriginRecord},
 };
 
 const MAX_PROOF: usize = 64 * 1024;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct FtpCheckpoint {
     pub proof: Vec<u8>,
     pub trusted_bytes: u64,
     pub total_bytes: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct FtpCompletion {
     pub proof: Vec<u8>,
     pub producing_generation: String,
@@ -24,7 +27,7 @@ pub struct FtpCompletion {
 }
 
 /// A snapshot for compare-and-swap. Reclaim only after the prior writer exits.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct FtpAttempt {
     pub instance_id: String,
     pub origin: OriginRecord,
@@ -32,12 +35,41 @@ pub struct FtpAttempt {
     pub revision: u64,
     pub checkpoint: Option<FtpCheckpoint>,
     pub completion: Option<FtpCompletion>,
+    pub publication: Option<FtpPublicationIntent>,
+}
+
+impl fmt::Debug for FtpCheckpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FtpCheckpoint")
+            .field("trusted_bytes", &self.trusted_bytes)
+            .field("total_bytes", &self.total_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for FtpCompletion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FtpCompletion")
+            .field("trusted_bytes", &self.trusted_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for FtpAttempt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FtpAttempt")
+            .field("revision", &self.revision)
+            .field("checkpoint", &self.checkpoint)
+            .field("completion", &self.completion)
+            .field("publication", &self.publication)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Holds the SQLite writer reservation until a caller publishes its decision.
 /// Drop promptly; callers must not perform network or long-running work.
 pub struct FtpAttemptGuard<'a> {
-    _transaction: rusqlite::Transaction<'a>,
+    pub(super) _transaction: rusqlite::Transaction<'a>,
 }
 
 impl FtpAttemptGuard<'_> {
@@ -47,7 +79,7 @@ impl FtpAttemptGuard<'_> {
     }
 }
 
-fn conflict() -> StorageError {
+pub(super) fn conflict() -> StorageError {
     StorageError::Other("FTP attempt conflict".into())
 }
 fn invalid() -> StorageError {
@@ -67,7 +99,10 @@ fn validate_checkpoint(checkpoint: &FtpCheckpoint) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn verify_origin(connection: &Connection, record: &OriginRecord) -> Result<String, StorageError> {
+pub(super) fn verify_origin(
+    connection: &Connection,
+    record: &OriginRecord,
+) -> Result<String, StorageError> {
     if record.version != 1
         || record.security != "plain"
         || record.authenticated != record.credential.is_some()
@@ -90,8 +125,9 @@ fn verify_origin(connection: &Connection, record: &OriginRecord) -> Result<Strin
         return Err(conflict());
     }
     let matches:bool=connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND source=?2 AND destination=?3 AND state!='completed')",
-        params![record.task_id,record.canonical_url,record.destination],|row|row.get(0)
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_origins o ON o.task_id=t.id
+         WHERE t.id=?1 AND t.source=?2 AND t.destination=?3 AND t.state!='completed' AND o.operation_id=?4)",
+        params![record.task_id,record.canonical_url,record.destination,record.operation_id],|row|row.get(0)
     ).map_err(origin::database_error)?;
     if !matches {
         return Err(conflict());
@@ -99,46 +135,139 @@ fn verify_origin(connection: &Connection, record: &OriginRecord) -> Result<Strin
     Ok(instance)
 }
 
-fn read_attempt(
+pub(super) fn read_attempt(
     connection: &Connection,
     record: &OriginRecord,
     instance: &str,
 ) -> Result<Option<FtpAttempt>, StorageError> {
     let encoded = serde_json::to_string(record).map_err(|_| invalid())?;
-    connection.query_row(
-        "SELECT version,instance_id,origin_record,generation,revision,proof,trusted_bytes,total_bytes,completion_version,completion_proof,completion_generation,completion_bytes,completion_seen FROM ftp_attempts WHERE task_id=?1",
-        [&record.task_id],|row|{
-            let version:i64=row.get(0)?;
-            let row_instance:String=row.get(1)?;
-            let row_origin:String=row.get(2)?;
-            let proof:Option<Vec<u8>>=row.get(5)?;
-            let trusted:Option<u64>=row.get(6)?;
-            let total:Option<u64>=row.get(7)?;
-            Ok((version,row_instance,row_origin,row.get::<_,String>(3)?,row.get::<_,u64>(4)?,proof,trusted,total,row.get::<_,Option<i64>>(8)?,row.get::<_,Option<Vec<u8>>>(9)?,row.get::<_,Option<String>>(10)?,row.get::<_,Option<u64>>(11)?,row.get::<_,i64>(12)?))
-        }
-    ).optional().map_err(origin::database_error)?.map(|(version,row_instance,row_origin,generation,revision,proof,trusted,total,completion_version,completion_proof,completion_generation,completion_bytes,completion_seen)|{
-        if version!=1 || row_instance!=instance || row_origin!=encoded { return Err(conflict()); }
-        let checkpoint=match (proof,trusted) {
-            (Some(proof),Some(trusted_bytes)) => {
-                let value=FtpCheckpoint { proof,trusted_bytes,total_bytes:total };
-                validate_checkpoint(&value)?;
-                Some(value)
+    let publication = ftp_publication::read_intent(connection, record, instance, "prepared")?;
+    let row = connection.query_row(
+        "SELECT version,instance_id,origin_record,generation,revision,
+                proof,trusted_bytes,total_bytes,
+                completion_version,completion_proof,completion_generation,completion_bytes,completion_seen,
+                publication_seen,publication_authorization
+         FROM ftp_attempts WHERE task_id=?1",
+        [&record.task_id],
+        |r| Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, u64>(4)?,
+            r.get::<_, Option<Vec<u8>>>(5)?,
+            r.get::<_, Option<u64>>(6)?,
+            r.get::<_, Option<u64>>(7)?,
+            r.get::<_, Option<i64>>(8)?,
+            r.get::<_, Option<Vec<u8>>>(9)?,
+            r.get::<_, Option<String>>(10)?,
+            r.get::<_, Option<u64>>(11)?,
+            r.get::<_, i64>(12)?,
+            r.get::<_, i64>(13)?,
+            r.get::<_, Option<String>>(14)?,
+        ))
+    ).optional().map_err(origin::database_error)?;
+    if row.is_none() && publication.is_some() {
+        return Err(conflict());
+    }
+    row.map(
+        |(
+            version,
+            row_instance,
+            row_origin,
+            generation,
+            revision,
+            proof,
+            trusted,
+            total,
+            completion_version,
+            completion_proof,
+            completion_generation,
+            completion_bytes,
+            completion_seen,
+            publication_seen,
+            publication_authorization,
+        )| {
+            if version != 1 || row_instance != instance || row_origin != encoded {
+                return Err(conflict());
             }
-            (None,None) if total.is_none() => None,
-            _ => return Err(invalid()),
-        };
-        if generation.is_empty() || generation.len()>256 { return Err(invalid()); }
-        let completion=match (completion_seen,completion_version,completion_proof,completion_generation,completion_bytes) {
-            (0,None,None,None,None)=>None,
-            (1,Some(1),Some(proof),Some(producing_generation),Some(trusted_bytes)) if !proof.is_empty() && proof.len()<=MAX_PROOF && !producing_generation.is_empty() && producing_generation.len()<=256 && trusted_bytes<=i64::MAX as u64 => Some(FtpCompletion {proof,producing_generation,trusted_bytes}),
-            _=>return Err(invalid()),
-        };
-        if let Some(ref completion)=completion {
-            let progress:(u64,Option<u64>)=connection.query_row("SELECT downloaded_bytes,total_bytes FROM tasks WHERE id=?1",[&record.task_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(origin::database_error)?;
-            if progress!=(completion.trusted_bytes,Some(completion.trusted_bytes)) || checkpoint.as_ref().is_some_and(|p|p.trusted_bytes>completion.trusted_bytes || p.total_bytes.is_some_and(|total|total!=completion.trusted_bytes)) {return Err(invalid());}
-        }
-        Ok(FtpAttempt {instance_id:row_instance,origin:record.clone(),generation,revision,checkpoint,completion})
-    }).transpose()
+            let checkpoint = match (proof, trusted) {
+                (Some(proof), Some(trusted_bytes)) => {
+                    let value = FtpCheckpoint {
+                        proof,
+                        trusted_bytes,
+                        total_bytes: total,
+                    };
+                    validate_checkpoint(&value)?;
+                    Some(value)
+                }
+                (None, None) if total.is_none() => None,
+                _ => return Err(invalid()),
+            };
+            if generation.is_empty() || generation.len() > 256 {
+                return Err(invalid());
+            }
+            let completion = match (
+                completion_seen,
+                completion_version,
+                completion_proof,
+                completion_generation,
+                completion_bytes,
+            ) {
+                (0, None, None, None, None) => None,
+                (1, Some(1), Some(proof), Some(producing_generation), Some(trusted_bytes))
+                    if !proof.is_empty()
+                        && proof.len() <= MAX_PROOF
+                        && !producing_generation.is_empty()
+                        && producing_generation.len() <= 256
+                        && trusted_bytes <= i64::MAX as u64 =>
+                {
+                    Some(FtpCompletion {
+                        proof,
+                        producing_generation,
+                        trusted_bytes,
+                    })
+                }
+                _ => return Err(invalid()),
+            };
+            if let Some(ref completion) = completion {
+                let progress: (u64, Option<u64>) = connection
+                    .query_row(
+                        "SELECT downloaded_bytes,total_bytes FROM tasks WHERE id=?1",
+                        [&record.task_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(origin::database_error)?;
+                if progress != (completion.trusted_bytes, Some(completion.trusted_bytes))
+                    || checkpoint.as_ref().is_some_and(|p| {
+                        p.trusted_bytes > completion.trusted_bytes
+                            || p.total_bytes
+                                .is_some_and(|total| total != completion.trusted_bytes)
+                    })
+                {
+                    return Err(invalid());
+                }
+            }
+            match (&publication, publication_seen, publication_authorization) {
+                (None, 0, None) => {}
+                (Some(intent), 1, Some(marker))
+                    if marker == intent.authorization
+                        && intent.revision == revision
+                        && completion.is_some() => {}
+                _ => return Err(conflict()),
+            }
+            Ok(FtpAttempt {
+                instance_id: row_instance,
+                origin: record.clone(),
+                generation,
+                revision,
+                checkpoint,
+                completion,
+                publication,
+            })
+        },
+    )
+    .transpose()
 }
 
 impl SqliteRepository {
@@ -169,7 +298,7 @@ impl SqliteRepository {
                 r.get(0)
             })
             .map_err(origin::database_error)?;
-        if version == 5 {
+        if (5..=6).contains(&version) {
             return transaction.commit().map_err(origin::database_error);
         }
         if version != 4 {

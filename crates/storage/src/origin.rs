@@ -167,8 +167,8 @@ impl SqliteRepository {
         }
         let exists: bool = transaction
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1)",
-                [&record.task_id],
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1) OR EXISTS(SELECT 1 FROM ftp_publications WHERE instance_id=(SELECT identity FROM origin_instance WHERE singleton=1) AND operation_id=?2)",
+                params![record.task_id, record.operation_id],
                 |row| row.get(0),
             )
             .map_err(database_error)?;
