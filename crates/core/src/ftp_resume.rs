@@ -3,21 +3,38 @@
 use nexum_domain::TaskId;
 use nexum_engine::{
     EngineError,
-    ftp::{FtpCredentialBinding, FtpPathMode, FtpPrefixProof, FtpResumeBinding},
+    ftp::{
+        self, FtpCompletionProof, FtpCompletionRequest, FtpCredentialBinding, FtpPathMode,
+        FtpPrefixProof, FtpResumeBinding, FtpTransferControl,
+    },
 };
 use nexum_storage::{
     SqliteRepository, StorageError,
-    ftp_resume::{FtpAttempt, FtpCheckpoint},
+    ftp_resume::{FtpAttempt, FtpCheckpoint, FtpCompletion},
     origin::OriginRecord,
 };
 
 use crate::{Core, CoreError};
+
+struct CompletionGuard<'a> {
+    inner: nexum_storage::ftp_resume::FtpAttemptGuard<'a>,
+    failure: &'a std::cell::RefCell<Option<StorageError>>,
+}
+impl ftp::FtpCompletionGuard for CompletionGuard<'_> {
+    fn release(self) -> Result<(), ftp::FtpReceiveError> {
+        self.inner.release().map_err(|error| {
+            self.failure.replace(Some(error));
+            ftp::FtpReceiveError::ResumeBindingMismatch
+        })
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct FtpResumeAttempt {
     stored: FtpAttempt,
     binding: FtpResumeBinding,
     proof: Option<FtpPrefixProof>,
+    completion: Option<FtpCompletionProof>,
 }
 
 impl FtpResumeAttempt {
@@ -32,6 +49,15 @@ impl FtpResumeAttempt {
     }
     pub fn proof(&self) -> Option<&FtpPrefixProof> {
         self.proof.as_ref()
+    }
+    pub fn completion(&self) -> Option<&FtpCompletionProof> {
+        self.completion.as_ref()
+    }
+    pub fn completion_generation(&self) -> Option<&str> {
+        self.stored
+            .completion
+            .as_ref()
+            .map(|c| c.producing_generation.as_str())
     }
 }
 
@@ -92,10 +118,26 @@ fn typed(stored: FtpAttempt) -> Result<FtpResumeAttempt, CoreError> {
             Ok(proof)
         })
         .transpose()?;
+    let completion = stored
+        .completion
+        .as_ref()
+        .map(|record| {
+            let proof = FtpCompletionProof::decode(&record.proof).map_err(|_| invalid())?;
+            if proof.binding() != &binding
+                || proof.attempt_generation() != record.producing_generation
+                || proof.progress().downloaded_bytes != record.trusted_bytes
+                || proof.progress().total_bytes != Some(record.trusted_bytes)
+            {
+                return Err(invalid());
+            }
+            Ok(proof)
+        })
+        .transpose()?;
     Ok(FtpResumeAttempt {
         stored,
         binding,
         proof,
+        completion,
     })
 }
 
@@ -125,6 +167,7 @@ impl Core<SqliteRepository> {
             stored,
             binding,
             proof: expected.and_then(|attempt| attempt.proof.clone()),
+            completion: expected.and_then(|attempt| attempt.completion.clone()),
         })
     }
 
@@ -158,6 +201,83 @@ impl Core<SqliteRepository> {
             stored: saved,
             binding: attempt.binding.clone(),
             proof: Some(proof.clone()),
+            completion: None,
+        })
+    }
+
+    /// The producer has completed and synced its held file; this commits proof
+    /// and progress only, and grants no pathname or publication ownership.
+    pub fn save_ftp_completion(
+        &mut self,
+        attempt: &FtpResumeAttempt,
+        proof: &FtpCompletionProof,
+    ) -> Result<FtpResumeAttempt, CoreError> {
+        if proof.binding() != attempt.binding()
+            || proof.attempt_generation() != attempt.generation()
+        {
+            return Err(invalid());
+        }
+        let id = TaskId::from(attempt.stored.origin.task_id.clone());
+        let mut tasks = self.tasks.clone();
+        tasks.update_progress(&id, proof.progress())?;
+        let record = FtpCompletion {
+            proof: proof.encode().map_err(|_| invalid())?,
+            producing_generation: attempt.generation().to_owned(),
+            trusted_bytes: proof.progress().downloaded_bytes,
+        };
+        let saved = self
+            .repository
+            .save_ftp_completion(&attempt.stored, &record)?;
+        let saved = typed(saved)?;
+        self.tasks = tasks;
+        Ok(saved)
+    }
+
+    /// Caller owns and joins all writers and retains namespace reservations.
+    /// This returns verification evidence, not an authorization to publish.
+    pub fn verify_ftp_completion(
+        &self,
+        attempt: &FtpResumeAttempt,
+        file: &mut std::fs::File,
+        directory: &std::fs::File,
+        control: &FtpTransferControl,
+    ) -> Result<nexum_domain::Progress, CoreError> {
+        let id = TaskId::from(attempt.stored.origin.task_id.clone());
+        let current = self.repository.ftp_attempt(&attempt.stored.origin)?;
+        if current.as_ref() != Some(&attempt.stored) || self.tasks.get(&id).is_none() {
+            return Err(invalid());
+        }
+        let proof = attempt.completion.as_ref().ok_or_else(invalid)?;
+        let producing_generation = attempt.completion_generation().ok_or_else(invalid)?;
+        let failure = std::cell::RefCell::new(None);
+        let result = ftp::verify_completion_with_guard(
+            file,
+            directory,
+            FtpCompletionRequest {
+                binding: attempt.binding(),
+                attempt_generation: producing_generation,
+            },
+            proof,
+            control,
+            || {
+                self.repository
+                    .guard_ftp_attempt(&attempt.stored)
+                    .map(|inner| CompletionGuard {
+                        inner,
+                        failure: &failure,
+                    })
+                    .map_err(|error| {
+                        failure.replace(Some(error));
+                        ftp::FtpReceiveError::ResumeBindingMismatch
+                    })
+            },
+        );
+        if let Some(error) = failure.into_inner() {
+            return Err(error.into());
+        }
+        result.map_err(|error| match error {
+            ftp::FtpReceiveError::Cancelled => CoreError::Engine(EngineError::Cancelled),
+            _ => CoreError::Engine(EngineError::Failed(error.to_string())),
         })
     }
 }

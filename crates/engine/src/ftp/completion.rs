@@ -234,6 +234,39 @@ pub fn verify_completion(
     verify_with(file, directory, request, proof, control, digest)
 }
 
+/// A held read-only reservation that reports errors when released.
+pub trait FtpCompletionGuard {
+    fn release(self) -> Result<(), FtpReceiveError>;
+}
+impl FtpCompletionGuard for () {
+    fn release(self) -> Result<(), FtpReceiveError> {
+        Ok(())
+    }
+}
+
+/// Verify with a bounded local snapshot fence held through the finished
+/// decision. It publishes no control progress and returns point-in-time
+/// evidence only after successful release, not future I/O authorization.
+/// Never perform network, reentrant Core calls, or long work in the guard.
+pub fn verify_completion_with_guard<G: FtpCompletionGuard>(
+    file: &mut File,
+    directory: &File,
+    request: FtpCompletionRequest<'_>,
+    proof: &FtpCompletionProof,
+    control: &FtpTransferControl,
+    guard: impl FnOnce() -> Result<G, FtpReceiveError>,
+) -> Result<Progress, FtpReceiveError> {
+    verify_with_guard(
+        file,
+        directory,
+        request,
+        proof,
+        control,
+        digest,
+        (guard, false),
+    )
+}
+
 fn verify_with(
     file: &mut File,
     directory: &File,
@@ -241,6 +274,26 @@ fn verify_with(
     proof: &FtpCompletionProof,
     control: &FtpTransferControl,
     hash: impl FnOnce(&mut File, u64, &FtpTransferControl) -> Result<[u8; 32], FtpReceiveError>,
+) -> Result<Progress, FtpReceiveError> {
+    verify_with_guard(
+        file,
+        directory,
+        request,
+        proof,
+        control,
+        hash,
+        (|| Ok(()), true),
+    )
+}
+
+fn verify_with_guard<G: FtpCompletionGuard>(
+    file: &mut File,
+    directory: &File,
+    request: FtpCompletionRequest<'_>,
+    proof: &FtpCompletionProof,
+    control: &FtpTransferControl,
+    hash: impl FnOnce(&mut File, u64, &FtpTransferControl) -> Result<[u8; 32], FtpReceiveError>,
+    guard: (impl FnOnce() -> Result<G, FtpReceiveError>, bool),
 ) -> Result<Progress, FtpReceiveError> {
     let _finish = begin(control)?;
     control.checkpoint()?;
@@ -256,7 +309,14 @@ fn verify_with(
         return Err(FtpReceiveError::LocalPrefixMismatch);
     }
     proof.matches(file, directory)?;
-    control.finish_success_with_progress(Some(proof.progress()))?;
+    control.finish_success_checked(
+        if guard.1 {
+            Some(proof.progress())
+        } else {
+            None
+        },
+        guard.0,
+    )?;
     Ok(proof.progress())
 }
 

@@ -7,6 +7,59 @@ use std::thread;
 
 const WAIT: Duration = Duration::from_secs(5);
 
+#[test]
+fn failed_final_guard_never_publishes_verified_progress() {
+    let mut fixture = Fixture::new();
+    let proof = fixture.proof();
+    let binding = fixture.binding.clone();
+    let control = FtpTransferControl::default();
+    let result = verify_completion_with_guard(
+        &mut fixture.file,
+        &fixture.directory,
+        FtpCompletionRequest {
+            binding: &binding,
+            attempt_generation: "generation",
+        },
+        &proof,
+        &control,
+        || Err::<(), _>(FtpReceiveError::ResumeBindingMismatch),
+    );
+    assert_eq!(result, Err(FtpReceiveError::ResumeBindingMismatch));
+    assert_eq!(control.progress(), None);
+    assert!(control.is_finished());
+}
+
+#[test]
+fn guard_release_failure_reports_error_without_publishing_progress() {
+    struct FailingGuard;
+    impl FtpCompletionGuard for FailingGuard {
+        fn release(self) -> Result<(), FtpReceiveError> {
+            Err(FtpReceiveError::LocalIo(std::io::ErrorKind::Other))
+        }
+    }
+    let mut fixture = Fixture::new();
+    let proof = fixture.proof();
+    let binding = fixture.binding.clone();
+    let control = FtpTransferControl::default();
+    let result = verify_completion_with_guard(
+        &mut fixture.file,
+        &fixture.directory,
+        FtpCompletionRequest {
+            binding: &binding,
+            attempt_generation: "generation",
+        },
+        &proof,
+        &control,
+        || Ok(FailingGuard),
+    );
+    assert_eq!(
+        result,
+        Err(FtpReceiveError::LocalIo(std::io::ErrorKind::Other))
+    );
+    assert_eq!(control.progress(), None);
+    assert!(control.is_finished());
+}
+
 fn accept(listener: &TcpListener) -> TcpStream {
     listener.set_nonblocking(true).unwrap();
     let deadline = Instant::now() + WAIT;

@@ -255,6 +255,29 @@ A consumer obtains origin/generation through public Core APIs and generates proo
 
 Execution order: record a failing real-FTP success case before implementing the new entry; separate reception from final control completion and add full proofs/verification; cover terminal failure/SIZE changes/unknown length/empty files, object/origin/generation/format failures, exact replacement and pause/cancel during hashing; add the cross-process offline Core consumer. Freeze the SHA and deliver only after complete Rust gates, independent real-origin validation/review and CI before/after merge pass.
 
+<a id="sqlite-completion-proof"></a>
+### SQLite 完成证明与离线重核 / SQLite completion proof and offline verification
+
+最终快照检查在取消决定锁内以 SQLite `BEGIN IMMEDIATE` 持有写预约，连接 busy timeout 为 250 ms；持续持有至完成决定，再显式回滚只读事务并报告释放失败，该事务不修改数据库。禁止 guard 执行网络、重入 Core 或长时间工作。此受保护路径不向 control 发布核验进度，只有成功释放后才返回当时有效的核验证据；已保存 SQLite 进度不变，后续发布必须重新取得授权。锁冲突、读取或释放失败不报告成功，取消和验证由先获得决定锁者决定。原 Engine 无 guard 重核保留原有进度行为。
+
+The final snapshot check runs under the cancellation decision lock with a SQLite `BEGIN IMMEDIATE` writer reservation; existing connections use a 250 ms busy timeout. It holds the reservation until the finished decision, then explicitly rolls back the read-only transaction and reports any release failure. No database changes occur in that reservation. Never perform network, reentrant Core calls or long-running work in this guard. This guarded path does not publish control progress; it returns a point-in-time verification result only after successful release. The previously saved SQLite progress remains unchanged, and a later publication must obtain fresh authorization. A lock conflict/read/release failure cannot report success; whichever action takes the decision lock first determines cancellation or verification. Existing unguarded Engine verification retains its original progress behavior.
+
+保留的前缀证明仍可由调用方读取；本切片只拒绝完成证明存在后的数据库前缀覆盖，不能阻止调用方绕过 Core 直接调用 Engine 发起 RETR。未来 Server 派发必须先识别并离线对账已观察到的完成证明，禁止将其静默降级为普通网络重试。
+
+The retained prefix remains readable by callers. This slice rejects database prefix replacement after completion, but cannot prevent a caller from invoking Engine RETR directly. Future Server dispatch must identify and reconcile an observed completion proof offline first, without silently falling back to ordinary network retries.
+
+基线 `815b57bb0cbf4d7cd4c4cb1febffd3ae6c71893e`。schema 5 在 `ftp_attempts` 同一行增加独立版本化完成证明、原生产 generation 和 `completion_seen` 标记，保留 schema 4 的前缀证明。已观察标记仍在而证明字段丢失、版本未知或任务进度与证明不一致时拒绝领取并保留记录。完成证明、可信整文件进度与 revision 在同一 SQLite 事务提交；任务状态不因此变为 Completed。证明须匹配独立加载的来源 binding、当前生产 generation 和完整长度。成功前不发布 Core 内存进度或事件。
+
+At base `815b57bb0cbf4d7cd4c4cb1febffd3ae6c71893e`, schema 5 adds separately versioned completion proof, original producing generation and a `completion_seen` marker to the same `ftp_attempts` row, preserving schema 4 prefix proofs. If the marker remains but proof fields disappear, the version is unknown, or persisted task progress differs from the proof, reject claims and retain the record. Commit completion proof, trusted whole-file progress and revision in one SQLite transaction without setting Completed. Match proof against independently loaded origin binding, current producing generation and complete length; publish no Core progress/event before commit.
+
+领取以 instance、完整来源 incarnation、generation、revision、前缀及完成证明组成的完整快照 CAS；重新领取产生新 generation，但保留原完成证明与生产 generation，不重写或将当前 generation 冒认为原生产者。已有完成证明时拒绝后续前缀或第二份完成证明覆盖。离线重核前后均对照当前完整数据库快照，以保存的原生产 generation、来源绑定及调用方持有的文件／目录句柄调用 Engine 重核；调用方仍负责停止旧 writer、独占对象及保存时与取消协调。SQLite 授权不证明目录项所有权。
+
+Claim via the complete snapshot of instance, origin incarnation, generation, revision, prefix and completion proof. Reclaim changes generation but preserves the completion proof and original producer; never rewrite or substitute the current generation. Reject subsequent prefix or second completion replacement. Before and after offline verification compare the current complete database snapshot, then use its retained producer, origin binding and caller-held file/directory handles for Engine verification. Callers still stop old writers, own the objects and coordinate cancellation when saving. SQLite authority does not prove pathname ownership.
+
+迁移 schema 4 时保留旧记录和来源；未知版本、畸形／缺失字段、陈旧 revision、旧 task incarnation 和来源不一致均失败保留证据。数据库故障回滚整个证明／进度更新；删除与同 ID 重建使旧快照失效。重复领取保留证明而不授权旧快照提交。直接测试迁移、限制／冲突／故障及并发 CAS；真实 FTP 生成证明，持久化后由独立进程重开、源站离线验证，并覆盖取消与对象替换。完整检查、独立审查和前后 CI 在对应 PR 留证。此切片不发布文件、不保存 Completed、不接入 Server FTP 路由。
+
+Migrate schema 4 without altering old records or origins. Reject unknown versions, malformed/missing fields, stale revisions, old task incarnations and origin mismatch while retaining evidence. Database failure rolls back proof/progress together. Deletion and same-ID recreation invalidate old snapshots; repeated claims retain proof without authorizing stale commits. Direct tests cover migration, limits/conflicts/failures and concurrent CAS. A real FTP producer persists proof before an independent process reopens and verifies offline, including cancellation and object replacement. Record full gates, independent review and pre/post-merge CI in the PR. No publication, Completed persistence or Server FTP routing is introduced.
+
 ## 完成、文件安全与兼容 / Completion, file safety and compatibility
 
 停写、长度验证和 sync 后先保存完成证明，再在同一取消决定锁内安全地不覆盖发布，最后原子保存最终进度和 Completed。保存失败保留证明，重启优先离线对账，不发额外 RETR。沿用旧 HTTP v1 路径／读取，FTP 新格式与目录独立版本化，不能静默修改 `http-completions` 含义。
