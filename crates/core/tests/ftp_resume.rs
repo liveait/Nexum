@@ -781,6 +781,63 @@ fn sqlite_completion_survives_real_ftp_process_restart_and_offline_reclaim() {
 }
 
 #[test]
+fn completion_save_failure_preserves_core_memory_events_and_sqlite_until_retry() {
+    for statement in [
+        "CREATE TRIGGER reject_completion BEFORE UPDATE OF completion_proof ON ftp_attempts BEGIN SELECT RAISE(ABORT,'reject completion'); END",
+        "CREATE TRIGGER reject_completion BEFORE UPDATE OF downloaded_bytes ON tasks BEGIN SELECT RAISE(ABORT,'reject task'); END",
+    ] {
+        let fixture = Fixture::new();
+        let mut owner = core(fixture.db());
+        create(&mut owner);
+        let id = TaskId::from("ftp");
+        let attempt = owner.claim_ftp_attempt(&id, None).unwrap();
+        let mut file = fixture.file();
+        let directory = File::open(&fixture.0).unwrap();
+        let (endpoint, source) = origin(false);
+        let proof = ftp::receive_complete(
+            endpoint,
+            FtpCredentials::Anonymous,
+            &mut file,
+            &directory,
+            ftp::FtpCompletionRequest {
+                binding: attempt.binding(),
+                attempt_generation: attempt.generation(),
+            },
+            &FtpTransferControl::default(),
+        )
+        .unwrap();
+        source.join().unwrap();
+        let before_memory = owner.tasks.get(&id).unwrap().clone();
+        let before_sqlite = owner.repository.get(&id).unwrap().unwrap();
+        let db = rusqlite::Connection::open(fixture.db()).unwrap();
+        db.execute_batch(statement).unwrap();
+        assert!(owner.save_ftp_completion(&attempt, &proof).is_err());
+        let current = owner.load_ftp_attempt(&id).unwrap().unwrap();
+        assert_eq!(current.generation(), attempt.generation());
+        assert_eq!(current.revision(), attempt.revision());
+        assert!(current.completion().is_none());
+        assert_eq!(owner.tasks.get(&id).unwrap(), &before_memory);
+        assert_eq!(owner.repository.get(&id).unwrap().unwrap(), before_sqlite);
+        assert!(owner.drain_task_events().is_empty());
+        assert_eq!(fs::read(fixture.0.join("partial")).unwrap(), b"firstend");
+        db.execute_batch("DROP TRIGGER reject_completion").unwrap();
+        let saved = owner.save_ftp_completion(&attempt, &proof).unwrap();
+        assert_eq!(
+            saved.completion().unwrap().encode().unwrap(),
+            proof.encode().unwrap()
+        );
+        assert_eq!(
+            owner.tasks.get(&id).unwrap().progress,
+            Progress::new(8, Some(8))
+        );
+        assert_eq!(
+            owner.repository.get(&id).unwrap().unwrap().progress,
+            Progress::new(8, Some(8))
+        );
+    }
+}
+
+#[test]
 fn sqlite_immediate_lock_allows_read_but_final_fence_times_out_and_bounds_cancel() {
     use ftp::{FtpCompletionRequest, FtpReceiveError};
     use std::sync::mpsc;
