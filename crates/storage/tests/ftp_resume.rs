@@ -1,5 +1,9 @@
 use nexum_domain::{Destination, DownloadSource, TaskId};
-use nexum_storage::{SqliteRepository, TaskRepository, ftp_resume::FtpCheckpoint, origin::*};
+use nexum_storage::{
+    SqliteRepository, TaskRepository,
+    ftp_resume::{FtpCheckpoint, FtpCompletion},
+    origin::*,
+};
 use nexum_task::DownloadTask;
 
 fn create(repo: &mut SqliteRepository) -> OriginRecord {
@@ -34,6 +38,252 @@ fn checkpoint() -> FtpCheckpoint {
         proof: b"opaque-engine-proof".to_vec(),
         trusted_bytes: 5,
         total_bytes: Some(8),
+    }
+}
+
+#[test]
+fn completion_and_whole_file_progress_survive_reclaims_without_prefix_replacement() {
+    let mut repo = SqliteRepository::open_in_memory().unwrap();
+    let origin = create(&mut repo);
+    let attempt = repo.claim_ftp_attempt(&origin, None).unwrap();
+    let completion = FtpCompletion {
+        proof: b"opaque-completion".to_vec(),
+        producing_generation: attempt.generation.clone(),
+        trusted_bytes: 8,
+    };
+    let saved = repo.save_ftp_completion(&attempt, &completion).unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(saved.completion, Some(completion.clone()));
+    assert_eq!(
+        repo.get(&TaskId::from("ftp"))
+            .unwrap()
+            .unwrap()
+            .progress
+            .downloaded_bytes,
+        8
+    );
+    assert!(repo.save_ftp_checkpoint(&saved, &checkpoint()).is_err());
+    assert!(repo.save_ftp_completion(&saved, &completion).is_err());
+    let reclaimed = repo.claim_ftp_attempt(&origin, Some(&saved)).unwrap();
+    assert_ne!(reclaimed.generation, completion.producing_generation);
+    assert_eq!(reclaimed.completion, Some(completion));
+    assert!(repo.claim_ftp_attempt(&origin, Some(&saved)).is_err());
+}
+
+#[test]
+fn schema_four_migration_preserves_existing_checkpoint_and_progress() {
+    let fixture = Fixture::new();
+    let mut repo = SqliteRepository::open(fixture.db()).unwrap();
+    let origin = create(&mut repo);
+    let attempt = repo.claim_ftp_attempt(&origin, None).unwrap();
+    let expected = repo.save_ftp_checkpoint(&attempt, &checkpoint()).unwrap();
+    drop(repo);
+    let db = rusqlite::Connection::open(fixture.db()).unwrap();
+    db.execute_batch("ALTER TABLE ftp_attempts DROP COLUMN completion_seen; ALTER TABLE ftp_attempts DROP COLUMN completion_version; ALTER TABLE ftp_attempts DROP COLUMN completion_proof; ALTER TABLE ftp_attempts DROP COLUMN completion_generation; ALTER TABLE ftp_attempts DROP COLUMN completion_bytes; UPDATE schema_version SET version=4;").unwrap();
+    drop(db);
+    let repo = SqliteRepository::open(fixture.db()).unwrap();
+    assert_eq!(repo.ftp_attempt(&origin).unwrap(), Some(expected));
+    assert_eq!(
+        repo.get(&TaskId::from("ftp"))
+            .unwrap()
+            .unwrap()
+            .progress
+            .downloaded_bytes,
+        5
+    );
+}
+
+#[test]
+fn completion_transaction_failure_and_task_recreation_preserve_isolation() {
+    for trigger in [
+        "CREATE TRIGGER reject_save BEFORE UPDATE OF completion_proof ON ftp_attempts BEGIN SELECT RAISE(ABORT,'reject completion'); END",
+        "CREATE TRIGGER reject_save BEFORE UPDATE OF downloaded_bytes ON tasks BEGIN SELECT RAISE(ABORT,'reject progress'); END",
+    ] {
+        let fixture = Fixture::new();
+        let mut repo = SqliteRepository::open(fixture.db()).unwrap();
+        let old = create(&mut repo);
+        let attempt = repo.claim_ftp_attempt(&old, None).unwrap();
+        let completion = FtpCompletion {
+            proof: b"complete".to_vec(),
+            producing_generation: attempt.generation.clone(),
+            trusted_bytes: 8,
+        };
+        let db = rusqlite::Connection::open(fixture.db()).unwrap();
+        db.execute_batch(trigger).unwrap();
+        assert!(repo.save_ftp_completion(&attempt, &completion).is_err());
+        assert_eq!(repo.ftp_attempt(&old).unwrap(), Some(attempt.clone()));
+        assert_eq!(
+            repo.get(&TaskId::from("ftp"))
+                .unwrap()
+                .unwrap()
+                .progress
+                .downloaded_bytes,
+            0
+        );
+        db.execute_batch("DROP TRIGGER reject_save").unwrap();
+        let saved = repo.save_ftp_completion(&attempt, &completion).unwrap();
+        repo.remove(&TaskId::from("ftp")).unwrap();
+        let replacement = create(&mut repo);
+        assert_ne!(replacement.operation_id, old.operation_id);
+        assert!(repo.claim_ftp_attempt(&old, Some(&saved)).is_err());
+        assert!(repo.ftp_attempt(&replacement).unwrap().is_none());
+    }
+}
+
+fn migration_snapshot(db: &rusqlite::Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    [
+        "schema_version",
+        "origin_instance",
+        "task_origins",
+        "tasks",
+        "ftp_attempts",
+    ]
+    .iter()
+    .map(|table| {
+        let mut query = db
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .unwrap();
+        let count = query.column_count();
+        query
+            .query_map([], |row| {
+                (0..count)
+                    .map(|index| row.get(index))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    })
+    .collect()
+}
+
+#[test]
+fn completion_migration_failure_rolls_back_all_columns_and_preserves_retry() {
+    for mid_alter in [false, true] {
+        let fixture = Fixture::new();
+        let mut repo = SqliteRepository::open(fixture.db()).unwrap();
+        let origin = create(&mut repo);
+        let attempt = repo.claim_ftp_attempt(&origin, None).unwrap();
+        let expected = repo.save_ftp_checkpoint(&attempt, &checkpoint()).unwrap();
+        drop(repo);
+        let db = rusqlite::Connection::open(fixture.db()).unwrap();
+        db.execute_batch("ALTER TABLE ftp_attempts DROP COLUMN completion_seen; ALTER TABLE ftp_attempts DROP COLUMN completion_version; ALTER TABLE ftp_attempts DROP COLUMN completion_proof; ALTER TABLE ftp_attempts DROP COLUMN completion_generation; ALTER TABLE ftp_attempts DROP COLUMN completion_bytes; UPDATE schema_version SET version=4;").unwrap();
+        if mid_alter {
+            // Deliberately malformed schema: the first ALTER can succeed but
+            // the second must fail. It must leave no additional partial DDL.
+            db.execute_batch("ALTER TABLE ftp_attempts ADD COLUMN completion_version INTEGER")
+                .unwrap();
+        } else {
+            db.execute_batch("CREATE TRIGGER reject_migration BEFORE UPDATE ON schema_version WHEN NEW.version=5 BEGIN SELECT RAISE(ABORT,'reject migration'); END").unwrap();
+        }
+        let before = migration_snapshot(&db);
+        let columns: Vec<String> = db
+            .prepare("SELECT name FROM pragma_table_info('ftp_attempts') ORDER BY cid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(SqliteRepository::open(fixture.db()).is_err());
+        assert_eq!(migration_snapshot(&db), before);
+        let after: Vec<String> = db
+            .prepare("SELECT name FROM pragma_table_info('ftp_attempts') ORDER BY cid")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(after, columns);
+        if mid_alter {
+            db.execute_batch("ALTER TABLE ftp_attempts DROP COLUMN completion_version")
+                .unwrap();
+        } else {
+            db.execute_batch("DROP TRIGGER reject_migration").unwrap();
+        }
+        drop(db);
+        let repo = SqliteRepository::open(fixture.db()).unwrap();
+        assert_eq!(repo.ftp_attempt(&origin).unwrap(), Some(expected));
+        assert_eq!(
+            repo.get(&TaskId::from("ftp"))
+                .unwrap()
+                .unwrap()
+                .progress
+                .downloaded_bytes,
+            5
+        );
+    }
+}
+
+#[test]
+fn concurrent_completion_reclaims_allow_only_one_cas_winner() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    let fixture = Fixture::new();
+    let mut repo = SqliteRepository::open(fixture.db()).unwrap();
+    let origin = create(&mut repo);
+    let attempt = repo.claim_ftp_attempt(&origin, None).unwrap();
+    let completion = FtpCompletion {
+        proof: b"complete".to_vec(),
+        producing_generation: attempt.generation.clone(),
+        trusted_bytes: 8,
+    };
+    let saved = repo.save_ftp_completion(&attempt, &completion).unwrap();
+    let gate = Arc::new(Barrier::new(2));
+    let threads = (0..2)
+        .map(|_| {
+            let path = fixture.db();
+            let origin = origin.clone();
+            let saved = saved.clone();
+            let gate = gate.clone();
+            thread::spawn(move || {
+                let mut repo = SqliteRepository::open(path).unwrap();
+                gate.wait();
+                repo.claim_ftp_attempt(&origin, Some(&saved))
+            })
+        })
+        .collect::<Vec<_>>();
+    let outcomes = threads
+        .into_iter()
+        .map(|t| t.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(outcomes.iter().filter(|r| r.is_err()).count(), 1);
+    assert_eq!(
+        repo.ftp_attempt(&origin).unwrap().unwrap().completion,
+        Some(completion)
+    );
+}
+
+#[test]
+fn observed_completion_cannot_silently_disappear_or_disagree_with_progress() {
+    for statement in [
+        "UPDATE ftp_attempts SET completion_version=NULL,completion_proof=NULL,completion_generation=NULL,completion_bytes=NULL WHERE task_id='ftp'",
+        "UPDATE ftp_attempts SET completion_version=9 WHERE task_id='ftp'",
+        "UPDATE tasks SET downloaded_bytes=7 WHERE id='ftp'",
+    ] {
+        let fixture = Fixture::new();
+        let mut repo = SqliteRepository::open(fixture.db()).unwrap();
+        let origin = create(&mut repo);
+        let attempt = repo.claim_ftp_attempt(&origin, None).unwrap();
+        let complete = FtpCompletion {
+            proof: b"complete".to_vec(),
+            producing_generation: attempt.generation.clone(),
+            trusted_bytes: 8,
+        };
+        let saved = repo.save_ftp_completion(&attempt, &complete).unwrap();
+        let db = rusqlite::Connection::open(fixture.db()).unwrap();
+        db.execute_batch(statement).unwrap();
+        assert!(repo.ftp_attempt(&origin).is_err());
+        assert!(repo.claim_ftp_attempt(&origin, Some(&saved)).is_err());
+        assert_eq!(
+            db.query_row(
+                "SELECT completion_seen FROM ftp_attempts WHERE task_id='ftp'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
     }
 }
 
@@ -113,10 +363,10 @@ fn migrates_schema_three_preserving_origins_tasks_and_instance_identity() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     drop(repo);
     connection
-        .execute("UPDATE schema_version SET version=5", [])
+        .execute("UPDATE schema_version SET version=6", [])
         .unwrap();
     assert!(SqliteRepository::open(fixture.db()).is_err());
     assert_eq!(

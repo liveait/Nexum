@@ -651,6 +651,437 @@ fn completion_proof_survives_a_core_consumer_process_and_verifies_with_the_origi
 }
 
 #[test]
+fn sqlite_completion_survives_real_ftp_process_restart_and_offline_reclaim() {
+    use ftp::FtpCompletionRequest;
+    const CHILD: &str = "NEXUM_FTP_DURABLE_COMPLETION_CHILD";
+    if let Some(path) = std::env::var_os(CHILD) {
+        let root = PathBuf::from(path);
+        let mut owner = core(root.join("nexum.sqlite"));
+        owner.recover().unwrap();
+        let id = TaskId::from("ftp");
+        let attempt = owner.claim_ftp_attempt(&id, None).unwrap();
+        let mut file = File::options()
+            .read(true)
+            .write(true)
+            .open(root.join("partial"))
+            .unwrap();
+        let directory = File::open(&root).unwrap();
+        let endpoint = std::env::var("NEXUM_FTP_DURABLE_ENDPOINT")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let proof = ftp::receive_complete(
+            endpoint,
+            FtpCredentials::Anonymous,
+            &mut file,
+            &directory,
+            FtpCompletionRequest {
+                binding: attempt.binding(),
+                attempt_generation: attempt.generation(),
+            },
+            &FtpTransferControl::default(),
+        )
+        .unwrap();
+        let saved = owner.save_ftp_completion(&attempt, &proof).unwrap();
+        assert_eq!(saved.completion_generation(), Some(attempt.generation()));
+        assert_eq!(
+            owner.repository.get(&id).unwrap().unwrap().progress,
+            Progress::new(8, Some(8))
+        );
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut initial = core(fixture.db());
+    create(&mut initial);
+    drop(fixture.file());
+    drop(initial);
+    let (endpoint, source) = origin(false);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sqlite_completion_survives_real_ftp_process_restart_and_offline_reclaim",
+            "--nocapture",
+        ])
+        .env(CHILD, &fixture.0)
+        .env("NEXUM_FTP_DURABLE_ENDPOINT", endpoint.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    source.join().unwrap();
+    assert!(std::net::TcpStream::connect(endpoint).is_err());
+    let mut restarted = core(fixture.db());
+    restarted.recover().unwrap();
+    let id = TaskId::from("ftp");
+    let previous = restarted.load_ftp_attempt(&id).unwrap().unwrap();
+    assert_eq!(
+        previous.completion_generation(),
+        Some(previous.generation())
+    );
+    let claimed = restarted.claim_ftp_attempt(&id, Some(&previous)).unwrap();
+    assert_ne!(
+        claimed.generation(),
+        claimed.completion_generation().unwrap()
+    );
+    assert_eq!(
+        restarted.repository.get(&id).unwrap().unwrap().progress,
+        Progress::new(8, Some(8))
+    );
+    assert_eq!(
+        restarted.tasks.get(&id).unwrap().state,
+        nexum_task::TaskState::Created
+    );
+    let directory = File::open(&fixture.0).unwrap();
+    let mut file = File::open(fixture.0.join("partial")).unwrap();
+    let cancelled = FtpTransferControl::default();
+    cancelled.cancel();
+    assert!(matches!(
+        restarted.verify_ftp_completion(&claimed, &mut file, &directory, &cancelled),
+        Err(nexum_core::CoreError::Engine(
+            nexum_engine::EngineError::Cancelled
+        ))
+    ));
+    assert_eq!(cancelled.progress(), None);
+    assert!(
+        restarted
+            .verify_ftp_completion(
+                &previous,
+                &mut file,
+                &directory,
+                &FtpTransferControl::default()
+            )
+            .is_err()
+    );
+    let successful_control = FtpTransferControl::default();
+    assert_eq!(
+        restarted
+            .verify_ftp_completion(&claimed, &mut file, &directory, &successful_control)
+            .unwrap(),
+        Progress::new(8, Some(8))
+    );
+    assert_eq!(successful_control.progress(), None);
+    fs::rename(fixture.0.join("partial"), fixture.0.join("original")).unwrap();
+    fs::write(fixture.0.join("partial"), b"firstend").unwrap();
+    let mut replacement = File::open(fixture.0.join("partial")).unwrap();
+    assert!(
+        restarted
+            .verify_ftp_completion(
+                &claimed,
+                &mut replacement,
+                &directory,
+                &FtpTransferControl::default()
+            )
+            .is_err()
+    );
+    assert_eq!(fs::read(fixture.0.join("partial")).unwrap(), b"firstend");
+}
+
+#[test]
+fn completion_save_failure_preserves_core_memory_events_and_sqlite_until_retry() {
+    for statement in [
+        "CREATE TRIGGER reject_completion BEFORE UPDATE OF completion_proof ON ftp_attempts BEGIN SELECT RAISE(ABORT,'reject completion'); END",
+        "CREATE TRIGGER reject_completion BEFORE UPDATE OF downloaded_bytes ON tasks BEGIN SELECT RAISE(ABORT,'reject task'); END",
+    ] {
+        let fixture = Fixture::new();
+        let mut owner = core(fixture.db());
+        create(&mut owner);
+        let id = TaskId::from("ftp");
+        let attempt = owner.claim_ftp_attempt(&id, None).unwrap();
+        let mut file = fixture.file();
+        let directory = File::open(&fixture.0).unwrap();
+        let (endpoint, source) = origin(false);
+        let proof = ftp::receive_complete(
+            endpoint,
+            FtpCredentials::Anonymous,
+            &mut file,
+            &directory,
+            ftp::FtpCompletionRequest {
+                binding: attempt.binding(),
+                attempt_generation: attempt.generation(),
+            },
+            &FtpTransferControl::default(),
+        )
+        .unwrap();
+        source.join().unwrap();
+        let before_memory = owner.tasks.get(&id).unwrap().clone();
+        let before_sqlite = owner.repository.get(&id).unwrap().unwrap();
+        let db = rusqlite::Connection::open(fixture.db()).unwrap();
+        db.execute_batch(statement).unwrap();
+        assert!(owner.save_ftp_completion(&attempt, &proof).is_err());
+        let current = owner.load_ftp_attempt(&id).unwrap().unwrap();
+        assert_eq!(current.generation(), attempt.generation());
+        assert_eq!(current.revision(), attempt.revision());
+        assert!(current.completion().is_none());
+        assert_eq!(owner.tasks.get(&id).unwrap(), &before_memory);
+        assert_eq!(owner.repository.get(&id).unwrap().unwrap(), before_sqlite);
+        assert!(owner.drain_task_events().is_empty());
+        assert_eq!(fs::read(fixture.0.join("partial")).unwrap(), b"firstend");
+        db.execute_batch("DROP TRIGGER reject_completion").unwrap();
+        let saved = owner.save_ftp_completion(&attempt, &proof).unwrap();
+        assert_eq!(
+            saved.completion().unwrap().encode().unwrap(),
+            proof.encode().unwrap()
+        );
+        assert_eq!(
+            owner.tasks.get(&id).unwrap().progress,
+            Progress::new(8, Some(8))
+        );
+        assert_eq!(
+            owner.repository.get(&id).unwrap().unwrap().progress,
+            Progress::new(8, Some(8))
+        );
+    }
+}
+
+#[test]
+fn sqlite_immediate_lock_allows_read_but_final_fence_times_out_and_bounds_cancel() {
+    use ftp::{FtpCompletionRequest, FtpReceiveError};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    struct Guard<'a>(nexum_storage::ftp_resume::FtpAttemptGuard<'a>);
+    impl ftp::FtpCompletionGuard for Guard<'_> {
+        fn release(self) -> Result<(), FtpReceiveError> {
+            self.0
+                .release()
+                .map_err(|_| FtpReceiveError::ResumeBindingMismatch)
+        }
+    }
+    let fixture = Fixture::new();
+    let mut owner = core(fixture.db());
+    let record = create(&mut owner);
+    let id = TaskId::from("ftp");
+    let attempt = owner.claim_ftp_attempt(&id, None).unwrap();
+    let mut file = fixture.file();
+    let directory = File::open(&fixture.0).unwrap();
+    let (endpoint, source) = origin(false);
+    let proof = ftp::receive_complete(
+        endpoint,
+        FtpCredentials::Anonymous,
+        &mut file,
+        &directory,
+        FtpCompletionRequest {
+            binding: attempt.binding(),
+            attempt_generation: attempt.generation(),
+        },
+        &FtpTransferControl::default(),
+    )
+    .unwrap();
+    source.join().unwrap();
+    let saved = owner.save_ftp_completion(&attempt, &proof).unwrap();
+    let locker = rusqlite::Connection::open(fixture.db()).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let snapshot = owner.repository.ftp_attempt(&record).unwrap().unwrap();
+    let check = FtpTransferControl::default();
+    let began = Instant::now();
+    assert!(matches!(
+        owner.verify_ftp_completion(&saved, &mut file, &directory, &check),
+        Err(nexum_core::CoreError::Storage(
+            nexum_storage::StorageError::Busy
+        ))
+    ));
+    assert!(began.elapsed() < Duration::from_secs(2));
+    assert_eq!(check.progress(), None);
+    let (tx, rx) = mpsc::channel();
+    let control = FtpTransferControl::default();
+    let worker_control = control.clone();
+    let worker = thread::spawn(move || {
+        ftp::verify_completion_with_guard(
+            &mut file,
+            &directory,
+            FtpCompletionRequest {
+                binding: saved.binding(),
+                attempt_generation: saved.completion_generation().unwrap(),
+            },
+            saved.completion().unwrap(),
+            &worker_control,
+            || {
+                tx.send(()).unwrap();
+                owner
+                    .repository
+                    .guard_ftp_attempt(&snapshot)
+                    .map(Guard)
+                    .map_err(|_| FtpReceiveError::ResumeBindingMismatch)
+            },
+        )
+    });
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let began = Instant::now();
+    control.cancel();
+    let elapsed = began.elapsed();
+    let result = worker.join().unwrap();
+    assert_eq!(result, Err(FtpReceiveError::ResumeBindingMismatch));
+    assert_eq!(control.progress(), None);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "cancel remained blocked for {elapsed:?}"
+    );
+    locker.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn damaged_or_missing_sqlite_completion_never_authorizes_reclaim_or_changes_files() {
+    use ftp::FtpCompletionRequest;
+    for mutation in [
+        "UPDATE ftp_attempts SET completion_proof=x'00' WHERE task_id='ftp'",
+        "UPDATE ftp_attempts SET completion_generation='forged' WHERE task_id='ftp'",
+        "UPDATE ftp_attempts SET completion_version=9 WHERE task_id='ftp'",
+        "UPDATE ftp_attempts SET completion_version=NULL,completion_proof=NULL,completion_generation=NULL,completion_bytes=NULL WHERE task_id='ftp'",
+        "UPDATE tasks SET downloaded_bytes=7 WHERE id='ftp'",
+    ] {
+        let fixture = Fixture::new();
+        let mut owner = core(fixture.db());
+        create(&mut owner);
+        let id = TaskId::from("ftp");
+        let attempt = owner.claim_ftp_attempt(&id, None).unwrap();
+        let mut file = fixture.file();
+        let directory = File::open(&fixture.0).unwrap();
+        let (endpoint, source) = origin(false);
+        let proof = ftp::receive_complete(
+            endpoint,
+            FtpCredentials::Anonymous,
+            &mut file,
+            &directory,
+            FtpCompletionRequest {
+                binding: attempt.binding(),
+                attempt_generation: attempt.generation(),
+            },
+            &FtpTransferControl::default(),
+        )
+        .unwrap();
+        source.join().unwrap();
+        let saved = owner.save_ftp_completion(&attempt, &proof).unwrap();
+        owner.drain_task_events();
+        let db = rusqlite::Connection::open(fixture.db()).unwrap();
+        db.execute_batch(mutation).unwrap();
+        assert!(owner.load_ftp_attempt(&id).is_err(), "{mutation}");
+        assert!(
+            owner.claim_ftp_attempt(&id, Some(&saved)).is_err(),
+            "{mutation}"
+        );
+        assert!(owner.drain_task_events().is_empty());
+        assert_eq!(fs::read(fixture.0.join("partial")).unwrap(), b"firstend");
+        assert_eq!(
+            db.query_row(
+                "SELECT completion_seen FROM ftp_attempts WHERE task_id='ftp'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
+fn sqlite_claim_is_fenced_until_guarded_verification_decision() {
+    use ftp::{FtpCompletionRequest, FtpReceiveError};
+    use nexum_storage::ftp_resume::FtpAttemptGuard;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    struct ObservedGuard<'a> {
+        _held: FtpAttemptGuard<'a>,
+        control: FtpTransferControl,
+        observed: mpsc::Sender<Option<Progress>>,
+    }
+    impl ftp::FtpCompletionGuard for ObservedGuard<'_> {
+        fn release(self) -> Result<(), ftp::FtpReceiveError> {
+            self.observed.send(self.control.progress()).unwrap();
+            self._held
+                .release()
+                .map_err(|_| ftp::FtpReceiveError::ResumeBindingMismatch)
+        }
+    }
+    let fixture = Fixture::new();
+    let mut owner = core(fixture.db());
+    let origin_record = create(&mut owner);
+    let id = TaskId::from("ftp");
+    let attempt = owner.claim_ftp_attempt(&id, None).unwrap();
+    let mut file = fixture.file();
+    let directory = File::open(&fixture.0).unwrap();
+    let (endpoint, source) = origin(false);
+    let proof = ftp::receive_complete(
+        endpoint,
+        FtpCredentials::Anonymous,
+        &mut file,
+        &directory,
+        FtpCompletionRequest {
+            binding: attempt.binding(),
+            attempt_generation: attempt.generation(),
+        },
+        &FtpTransferControl::default(),
+    )
+    .unwrap();
+    source.join().unwrap();
+    let saved = owner.save_ftp_completion(&attempt, &proof).unwrap();
+    let snapshot = owner
+        .repository
+        .ftp_attempt(&origin_record)
+        .unwrap()
+        .unwrap();
+    let mut contender = SqliteRepository::open(fixture.db()).unwrap();
+    let (start_tx, start_rx) = mpsc::channel();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let record = origin_record.clone();
+    let previous = snapshot.clone();
+    let worker = thread::spawn(move || {
+        start_rx.recv().unwrap();
+        entered_tx.send(()).unwrap();
+        result_tx
+            .send(contender.claim_ftp_attempt(&record, Some(&previous)))
+            .unwrap();
+    });
+    let control = FtpTransferControl::default();
+    let (observed_tx, observed_rx) = mpsc::channel();
+    let result = ftp::verify_completion_with_guard(
+        &mut file,
+        &directory,
+        FtpCompletionRequest {
+            binding: saved.binding(),
+            attempt_generation: saved.completion_generation().unwrap(),
+        },
+        saved.completion().unwrap(),
+        &control,
+        || {
+            let held = owner
+                .repository
+                .guard_ftp_attempt(&snapshot)
+                .map_err(|_| FtpReceiveError::ResumeBindingMismatch)?;
+            start_tx.send(()).unwrap();
+            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(
+                matches!(
+                    result_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    Err(nexum_storage::StorageError::Busy)
+                ),
+                "claim must reach SQLite and fail busy while guard is held"
+            );
+            Ok(ObservedGuard {
+                _held: held,
+                control: control.clone(),
+                observed: observed_tx,
+            })
+        },
+    );
+    assert_eq!(result.unwrap(), Progress::new(8, Some(8)));
+    assert_eq!(
+        observed_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        None
+    );
+    worker.join().unwrap();
+    let reclaimed = owner
+        .repository
+        .claim_ftp_attempt(&origin_record, Some(&snapshot))
+        .unwrap();
+    assert_ne!(reclaimed.generation, snapshot.generation);
+    assert_eq!(reclaimed.completion, snapshot.completion);
+}
+
+#[test]
 fn corrupted_or_unknown_engine_proof_is_retained_and_rejected_by_the_consumer() {
     for unknown in [false, true] {
         let fixture = Fixture::new();

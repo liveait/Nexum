@@ -4,7 +4,8 @@ mod completion;
 mod reply;
 mod resume;
 pub use completion::{
-    FtpCompletionProof, FtpCompletionRequest, receive_complete, resume_complete, verify_completion,
+    FtpCompletionGuard, FtpCompletionProof, FtpCompletionRequest, receive_complete,
+    resume_complete, verify_completion, verify_completion_with_guard,
 };
 pub use resume::{
     FtpCheckpointRequest, FtpCredentialBinding, FtpPathMode, FtpPrefixProof, FtpResumeBinding,
@@ -168,7 +169,16 @@ impl FtpTransferControl {
         &self,
         progress: Option<Progress>,
     ) -> Result<(), FtpReceiveError> {
+        self.finish_success_checked(progress, || Ok(()))
+    }
+
+    fn finish_success_checked<G: FtpCompletionGuard>(
+        &self,
+        progress: Option<Progress>,
+        check: impl FnOnce() -> Result<G, FtpReceiveError>,
+    ) -> Result<(), FtpReceiveError> {
         let (lock, wake) = &*self.0.worker.inner;
+        let mut check = Some(check);
         loop {
             self.checkpoint()?;
             let mut state = lock.lock().expect("FTP transfer control mutex poisoned");
@@ -176,10 +186,20 @@ impl FtpTransferControl {
                 return Err(FtpReceiveError::Cancelled);
             }
             if !state.pause_requested {
+                let guard = check.take().expect("FTP final check is called once")()?;
                 if let Some(progress) = progress {
                     self.0.worker.record_session_progress(progress);
                 }
                 state.finished = true;
+                if let Err(error) = guard.release() {
+                    *self
+                        .0
+                        .worker
+                        .session_progress
+                        .lock()
+                        .expect("FTP progress mutex poisoned") = None;
+                    return Err(error);
+                }
                 wake.notify_all();
                 return Ok(());
             }

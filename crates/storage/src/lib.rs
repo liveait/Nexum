@@ -224,7 +224,7 @@ impl SqliteRepository {
             })
             .map_err(|e| StorageError::Other(e.to_string()))?;
 
-        if version > 4 {
+        if version > 5 {
             return Err(StorageError::Other(format!(
                 "unsupported schema version: {version}"
             )));
@@ -272,7 +272,13 @@ impl SqliteRepository {
         }
 
         self.migrate_origins()?;
-        self.migrate_ftp_resume()
+        if version < 4 {
+            self.migrate_ftp_resume()?;
+        }
+        if version < 5 {
+            self.migrate_ftp_completion()?;
+        }
+        Ok(())
     }
 
     fn insert_task(
@@ -479,7 +485,7 @@ mod sqlite_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[test]
@@ -524,7 +530,7 @@ mod sqlite_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         drop(repository);
         let _ = std::fs::remove_file(path);
     }
