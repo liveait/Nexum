@@ -280,6 +280,21 @@ Migrate schema 4 without altering old records or origins. Reject unknown version
 
 ## 完成、文件安全与兼容 / Completion, file safety and compatibility
 
+<a id="held-publication-convergence"></a>
+### 持有对象发布与离线完成收敛方案 / Held-object publication and offline completion convergence design
+
+基线 `dbc479b6b52012812ef55f461a9d27c888aee9fc`。本包在已接受的普通桌面范围内使用单一 directory-relative `linkat(..., 0)` 不覆盖发布，保留来源别名，不执行自动清理或 copy／clone／rename 回退。不接 Server／CLI／App、FTPS、BT 或 M4；平台／文件系统不支持时具体失败，不宣称未验平台能力。
+
+At the stated base, use one directory-relative linkat no-clobber publication algorithm under the accepted ordinary-desktop scope. Retain the source alias without automatic cleanup or copy/clone/rename fallback. No Server/CLI/App, FTPS, BT or M4 integration; unsupported platforms/filesystems fail explicitly without an unverified capability claim.
+
+独立 `ftp-publication/v1` 有界 plan 绑定原完成证明、来源 incarnation、真实绝对目标、held parent、两个单叶名称、原 producer 与当前 owner/authorization。schema 6 的独立 intent 及 observed marker 先于发布保存，claim 保留旧授权但不自动 rearm。实际发布在 control 决定锁内重新核对完整 Downloading task／attempt／intent，持有 SQLite 预约跨 linkat；hash 在外。发布后错误保留 committed 事实和文件，最终进度／Completed／intent completed 另经完整 CAS 同事务保存。
+
+A bounded versioned plan binds the original completion, origin incarnation, real absolute destination, held parent, strict leaves, original producer and current owner/authorization. Persist a separate schema-6 intent/observed marker before publication. Claims retain old authorization without automatically rearming. Under the control decision lock, revalidate the entire Downloading task/attempt/intent and hold a SQLite reservation across linkat; hash outside final locks. Preserve committed facts/files on postpublication errors, then atomically CAS final progress, Completed and completed intent separately.
+
+专用恢复领取保留整文件进度与调度／事件原子性，Failed＋pending intent 不得被普通恢复漏掉。Completed／orphan 采用独立只读诊断接口，任务移除及同 ID 重建不能重新授权旧 journal。检测已观察记录丢失，不声称任意数据库历史防篡改。[实施计划](../superpowers/plans/2026-11-21-ftp-publication.md) 记录任务、直接测试与真实跨进程消费者；本段为实现方案，不代表代码或行为验收。
+
+Dedicated recovery claims preserve whole-file progress and scheduler/event atomicity, including Failed tasks with pending intents. Separate read-only Completed/orphan diagnostics cannot reauthorize removed/recreated tasks. Detect observed-record loss without generic historical-tamper claims. The [implementation plan](../superpowers/plans/2026-11-21-ftp-publication.md) defines tasks/direct/process consumers; this is a design rather than implementation/behavioral acceptance.
+
 停写、长度验证和 sync 后先保存完成证明，再在同一取消决定锁内安全地不覆盖发布，最后原子保存最终进度和 Completed。保存失败保留证明，重启优先离线对账，不发额外 RETR。沿用旧 HTTP v1 路径／读取，FTP 新格式与目录独立版本化，不能静默修改 `http-completions` 含义。
 
 After quiescence, length validation and sync, persist completion proof before safe no-clobber publication under the cancellation decision lock, then atomically persist final progress and Completed. Retain proof on failure and reconcile offline before another RETR. Keep legacy HTTP v1 paths/readers; separately version FTP formats/directories without silently changing `http-completions` semantics.
