@@ -4,7 +4,9 @@ mod completion;
 mod reply;
 mod resume;
 pub use completion::{
-    FtpCompletionGuard, FtpCompletionProof, FtpCompletionRequest, receive_complete,
+    FtpCompletionGuard, FtpCompletionProof, FtpCompletionRequest, FtpPublicationError,
+    FtpPublicationPlan, FtpPublicationRequest, FtpPublishedCompletion,
+    publish_completion_with_guard, receive_complete, reconcile_publication_with_guard,
     resume_complete, verify_completion, verify_completion_with_guard,
 };
 pub use resume::{
@@ -148,6 +150,12 @@ impl FtpTransferControl {
 
     pub fn progress(&self) -> Option<Progress> {
         self.0.worker.session_progress()
+    }
+
+    /// A publication installed or verified the matching final entry, even if
+    /// subsequent validation, reservation release, or directory sync failed.
+    pub fn is_committed(&self) -> bool {
+        self.0.worker.is_committed()
     }
 
     pub fn is_finished(&self) -> bool {
