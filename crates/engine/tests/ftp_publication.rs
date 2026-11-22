@@ -29,8 +29,12 @@ impl Fixture {
     }
 
     fn with_names(source_leaf: &str, final_leaf: &str) -> Self {
+        Self::with_prefix("nexum-publication", source_leaf, final_leaf)
+    }
+
+    fn with_prefix(prefix: &str, source_leaf: &str, final_leaf: &str) -> Self {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "nexum-publication-{}-{}",
+            "{prefix}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -446,4 +450,24 @@ fn replaced_parent_and_parent_symlink_are_rejected() {
     assert!(replacement.is_err() && alias.is_err());
     assert_eq!(fs::read(f.root.join("partial")).unwrap(), DATA);
     assert!(!f.root.join("final").exists());
+}
+
+#[test]
+fn multibyte_leaves_and_ancestors_publish_and_reconcile() {
+    let long = "文".repeat(86);
+    for (parent, source, target) in [
+        ("nexum-publication", "partial", "文".repeat(255)),
+        ("nexum-publication", long.as_str(), "final".into()),
+        (long.as_str(), "partial", "final".into()),
+    ] {
+        let f = Fixture::with_prefix(parent, source, &target);
+        let plan = FtpPublicationPlan::prepare(&f.file, &f.parent, source, f.request()).unwrap();
+        f.publish(&plan, &FtpTransferControl::default()).unwrap();
+        f.reconcile(&plan, &FtpTransferControl::default()).unwrap();
+        assert_eq!(fs::read(f.root.join(&target)).unwrap(), DATA);
+        assert_eq!(
+            fs::metadata(f.root.join(source)).unwrap().ino(),
+            fs::metadata(f.root.join(target)).unwrap().ino()
+        );
+    }
 }

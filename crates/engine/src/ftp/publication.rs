@@ -111,7 +111,8 @@ impl FtpPublicationPlan {
         plan.check_request(&request)?;
         request.proof.matches(file, directory)?;
         platform::check_parent(directory, &plan)?;
-        platform::check_leaf(directory, source_leaf, request.proof)?;
+        let source = platform::check_leaf(directory, source_leaf, request.proof)?;
+        platform::check_opened_name(directory, source_leaf, &source)?;
         Ok(plan)
     }
 
@@ -215,7 +216,9 @@ fn valid_authority(request: &FtpPublicationRequest<'_>) -> bool {
 }
 
 fn valid_leaf(value: &str) -> bool {
-    valid_arg(value, 255, false) && !matches!(value, "." | "..") && !value.contains(['/', '\\'])
+    valid_arg(value, MAX_PROOF_BYTES, false)
+        && !matches!(value, "." | "..")
+        && !value.contains(['/', '\\'])
 }
 
 fn destination_leaf(destination: &str) -> Result<&str> {
@@ -318,6 +321,9 @@ impl Publication<'_> {
             return Err(FtpReceiveError::LocalPrefixMismatch.into());
         }
 
+        // Enumerate exact entry spellings outside the control/SQLite locks.
+        // Detect changes during enumeration and while acquiring the guard.
+        let names = platform::entry_names(self.directory, self.plan, || self.control.checkpoint())?;
         let (lock, _) = &*self.control.0.worker.inner;
         let (validation, release) = loop {
             self.control.checkpoint()?;
@@ -329,7 +335,7 @@ impl Publication<'_> {
                 continue;
             }
             let reservation = guard()?;
-            let validation = self.decide(observed_final, &mut state.committed);
+            let validation = self.decide(observed_final, &names, &mut state.committed);
             // Release explicitly on every acquired path, including pre-link errors.
             break (validation, reservation.release());
         };
@@ -344,45 +350,94 @@ impl Publication<'_> {
         release?;
         let adopted_existing = validation?;
         synchronized?;
-        self.check_entries(adopted_existing)?;
+        let names = platform::entry_names(self.directory, self.plan, || Ok(()))?;
+        self.check_entries(adopted_existing, &names)?;
+        names.check_current(self.directory)?;
         Ok(FtpPublishedCompletion(self.plan.clone()))
     }
 
-    fn check_entries(&self, adopted_existing: bool) -> Result<()> {
+    fn check_entries(&self, adopted_existing: bool, names: &EntryNames) -> Result<()> {
         platform::check_parent(self.directory, self.plan)?;
-        platform::check_leaf(self.directory, &self.plan.0.final_leaf, self.request.proof)?;
+        let target =
+            platform::check_leaf(self.directory, &self.plan.0.final_leaf, self.request.proof)?;
+        names.check_final(&target)?;
         if adopted_existing {
-            optional_leaf(self.directory, &self.plan.0.source_leaf, self.request.proof)?;
+            if let Some(source) =
+                optional_leaf(self.directory, &self.plan.0.source_leaf, self.request.proof)?
+            {
+                names.check_source(&source)?;
+            }
         } else {
-            platform::check_leaf(self.directory, &self.plan.0.source_leaf, self.request.proof)?;
+            let source =
+                platform::check_leaf(self.directory, &self.plan.0.source_leaf, self.request.proof)?;
+            names.check_source(&source)?;
         }
         Ok(())
     }
 
-    fn decide(&self, observed_final: bool, committed: &mut bool) -> Result<bool> {
+    fn decide(
+        &self,
+        observed_final: bool,
+        names: &EntryNames,
+        committed: &mut bool,
+    ) -> Result<bool> {
         platform::check_parent(self.directory, self.plan)?;
+        names.check_current(self.directory)?;
         if self.reconcile {
-            if optional_leaf(self.directory, &self.plan.0.final_leaf, self.request.proof)?.is_some()
+            if let Some(target) =
+                optional_leaf(self.directory, &self.plan.0.final_leaf, self.request.proof)?
             {
-                // We hashed this same identity outside the lock. Record the
-                // fact before any diagnostic check of the redundant alias.
+                names.check_final(&target)?;
+                // Record the independently verified final before diagnosing any
+                // conflict involving its redundant staging alias.
                 *committed = true;
-                self.check_entries(true)?;
+                self.check_entries(true, names)?;
                 return Ok(true);
             }
             if observed_final {
                 return Err(FtpPublicationError::Namespace(io::ErrorKind::NotFound));
             }
         }
-        platform::check_leaf(self.directory, &self.plan.0.source_leaf, self.request.proof)?;
+        let source =
+            platform::check_leaf(self.directory, &self.plan.0.source_leaf, self.request.proof)?;
+        names.check_source(&source)?;
         platform::link(
             self.directory,
             &self.plan.0.source_leaf,
             &self.plan.0.final_leaf,
         )?;
         *committed = true;
-        self.check_entries(false)?;
+        // linkat installed this exact new name. Recheck both identities now.
+        // After guard release, enumerate the resulting actual entries too.
+        let linked = EntryNames {
+            target: names.source,
+            ..*names
+        };
+        self.check_entries(false, &linked)?;
         Ok(false)
+    }
+}
+
+// macOS excludes atime: unrelated readers can legitimately change it.
+// Namespace changes conservatively invalidate a captured directory view.
+#[derive(Clone, Copy)]
+struct EntryNames {
+    stamp: (i64, i64, i64, i64),
+    source: Option<u64>,
+    target: Option<u64>,
+}
+impl EntryNames {
+    fn check_current(&self, directory: &File) -> Result<()> {
+        if platform::directory_stamp(directory)? != self.stamp {
+            return Err(FtpReceiveError::FileIdentityMismatch.into());
+        }
+        Ok(())
+    }
+    fn check_source(&self, file: &File) -> Result<()> {
+        platform::check_entry(self.source, file)
+    }
+    fn check_final(&self, file: &File) -> Result<()> {
+        platform::check_entry(self.target, file)
     }
 }
 
@@ -390,8 +445,8 @@ impl Publication<'_> {
 mod platform {
     use super::*;
     use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     use std::path::Path;
 
     fn fs_error(error: io::Error) -> FtpPublicationError {
@@ -452,21 +507,115 @@ mod platform {
         // SAFETY: successful openat returned a fresh owned descriptor.
         let file = unsafe { File::from_raw_fd(fd) };
         proof.matches(&file, directory)?;
-        // A case/normalization-insensitive lookup may have found a different
-        // spelling (including the other leaf). Require the actual entry name.
-        let mut path = [0_u8; libc::PATH_MAX as usize];
-        // SAFETY: F_GETPATH writes at most PATH_MAX bytes into this buffer.
-        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, path.as_mut_ptr()) } == -1 {
-            return Err(fs_error(io::Error::last_os_error()));
-        }
-        let end = path
-            .iter()
-            .position(|b| *b == 0)
-            .ok_or(FtpPublicationError::InvalidPlan)?;
-        if path[..end].rsplit(|b| *b == b'/').next() != Some(name.as_bytes()) {
+        Ok(file)
+    }
+
+    pub(super) fn directory_stamp(dir: &File) -> Result<(i64, i64, i64, i64)> {
+        let meta = dir.metadata().map_err(fs_error)?;
+        Ok((
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        ))
+    }
+
+    pub(super) fn check_entry(entry: Option<u64>, file: &File) -> Result<()> {
+        if Some(file.metadata().map_err(fs_error)?.ino()) != entry {
             return Err(FtpReceiveError::FileIdentityMismatch.into());
         }
-        Ok(file)
+        Ok(())
+    }
+
+    pub(super) fn check_opened_name(directory: &File, name: &str, file: &File) -> Result<()> {
+        let names = scan_names(directory, name, name, || Ok(()))?;
+        names.check_source(file)
+    }
+
+    pub(super) fn entry_names(
+        dir: &File,
+        plan: &FtpPublicationPlan,
+        checkpoint: impl FnMut() -> std::result::Result<(), FtpReceiveError>,
+    ) -> Result<EntryNames> {
+        scan_names(dir, &plan.0.source_leaf, &plan.0.final_leaf, checkpoint)
+    }
+
+    struct DirStream(*mut libc::DIR);
+    impl Drop for DirStream {
+        fn drop(&mut self) {
+            // SAFETY: fdopendir gave us exclusive ownership of the stream.
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+
+    fn scan_names(
+        dir: &File,
+        source: &str,
+        target: &str,
+        mut checkpoint: impl FnMut() -> std::result::Result<(), FtpReceiveError>,
+    ) -> Result<EntryNames> {
+        let mut names = EntryNames {
+            stamp: directory_stamp(dir)?,
+            source: None,
+            target: None,
+        };
+        // A new open description has its own cursor; dup shares the caller's.
+        // SAFETY: dir is live and "." is a constant NUL-terminated component.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(fs_error(io::Error::last_os_error()));
+        }
+        // SAFETY: openat returned a new descriptor. Ownership transfers only
+        // on successful fdopendir; otherwise OwnedFd closes it.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let stream = unsafe { libc::fdopendir(fd.as_raw_fd()) };
+        if stream.is_null() {
+            return Err(fs_error(io::Error::last_os_error()));
+        }
+        let _ = fd.into_raw_fd();
+        let stream = DirStream(stream);
+        loop {
+            checkpoint()?;
+            // SAFETY: the stream has a single reader, who consumes d_name
+            // before the next readdir. POSIX distinguishes EOF via errno.
+            unsafe { *libc::__error() = 0 };
+            let item = unsafe { libc::readdir(stream.0) };
+            if item.is_null() {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(0) {
+                    return Err(fs_error(error));
+                }
+                break;
+            }
+            // SAFETY: Darwin dirent records are variable-length. Read the
+            // initialized fixed fields and exactly the returned name bytes.
+            let (inode, spelling) = unsafe {
+                let name = (&raw const (*item).d_name).cast::<u8>();
+                (
+                    (*item).d_ino,
+                    std::slice::from_raw_parts(name, usize::from((*item).d_namlen)),
+                )
+            };
+            if spelling == source.as_bytes() {
+                names.source = Some(inode);
+            }
+            if spelling == target.as_bytes() {
+                names.target = Some(inode);
+            }
+            if names.source.is_some() && names.target.is_some() {
+                break;
+            }
+        }
+        names.check_current(dir)?;
+        Ok(names)
     }
 
     pub(super) fn link(directory: &File, source: &str, target: &str) -> Result<()> {
@@ -485,6 +634,22 @@ mod platform {
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use super::*;
+    pub(super) fn check_opened_name(_: &File, _: &str, _: &File) -> Result<()> {
+        Err(FtpPublicationError::UnsupportedPlatform)
+    }
+    pub(super) fn directory_stamp(_: &File) -> Result<(i64, i64, i64, i64)> {
+        Err(FtpPublicationError::UnsupportedPlatform)
+    }
+    pub(super) fn check_entry(_: Option<u64>, _: &File) -> Result<()> {
+        Err(FtpPublicationError::UnsupportedPlatform)
+    }
+    pub(super) fn entry_names(
+        _: &File,
+        _: &FtpPublicationPlan,
+        _: impl FnMut() -> std::result::Result<(), FtpReceiveError>,
+    ) -> Result<EntryNames> {
+        Err(FtpPublicationError::UnsupportedPlatform)
+    }
     pub(super) fn check_parent(_: &File, _: &FtpPublicationPlan) -> Result<()> {
         Err(FtpPublicationError::UnsupportedPlatform)
     }

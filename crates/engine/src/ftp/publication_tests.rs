@@ -390,3 +390,35 @@ fn directory_sync_failure_finishes_and_wakes_pending_pause() {
     assert!(control.is_committed() && control.is_finished());
     assert_eq!(fs::read(f.root.join("final")).unwrap(), b"payload");
 }
+
+#[test]
+fn opening_another_hardlink_between_open_and_name_check_preserves_both_entries() {
+    let f = Fixture::new();
+    fs::hard_link(f.root.join("part"), f.root.join("final")).unwrap();
+    for (wanted, other) in [("final", "part"), ("part", "final")] {
+        let opened = File::open(f.root.join(wanted)).unwrap();
+        // Both entries and their inode stay unchanged across this independent
+        // read-only open, exactly between opening and checking its name.
+        let _reader = File::open(f.root.join(other)).unwrap();
+        platform::check_opened_name(&f.dir, wanted, &opened).unwrap();
+    }
+}
+
+#[test]
+fn source_spelling_change_during_guard_acquisition_prevents_link() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    let control = FtpTransferControl::default();
+    let result = f.operation(&plan, &control, false).run(
+        || {
+            fs::rename(f.root.join("part"), f.root.join("PART")).unwrap();
+            Ok(())
+        },
+        digest,
+        File::sync_all,
+    );
+    assert!(result.is_err());
+    assert!(!control.is_committed() && control.is_finished());
+    assert_eq!(fs::read(f.root.join("PART")).unwrap(), b"payload");
+    assert!(!f.root.join("final").exists());
+}
