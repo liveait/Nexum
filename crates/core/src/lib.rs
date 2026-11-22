@@ -1,4 +1,5 @@
 //! Nexum Core orchestration layer.
+pub mod ftp_publication;
 pub mod ftp_resume;
 
 pub use nexum_domain;
@@ -529,6 +530,13 @@ impl<R: TaskRepository> Core<R> {
         &mut self,
         mut has_pending_completion: impl FnMut(&StoredTask) -> bool,
     ) -> Result<usize, CoreError> {
+        self.recover_selecting(|_, task| Ok(has_pending_completion(task)))
+    }
+
+    fn recover_selecting(
+        &mut self,
+        mut has_pending_completion: impl FnMut(&R, &StoredTask) -> Result<bool, CoreError>,
+    ) -> Result<usize, CoreError> {
         let stored_tasks = self.repository.list()?;
         let mut restored = 0;
 
@@ -544,7 +552,7 @@ impl<R: TaskRepository> Core<R> {
                     | TaskState::Paused
                     | TaskState::Retrying
             ) || (stored.state == TaskState::Failed
-                && has_pending_completion(&stored));
+                && has_pending_completion(&self.repository, &stored)?);
             if queued {
                 let original = stored.clone();
                 stored.state = TaskState::Queued;
