@@ -507,6 +507,7 @@ fn foreign_existing_final_is_preserved_and_conflicting_staging_retains_committed
 }
 
 const CHILD_ROOT: &str = "NEXUM_PUBLICATION_CHILD_ROOT";
+const CRASH_POINT: &str = "NEXUM_PUBLICATION_POINT";
 const PROCESS_TEST: &str = "real_ftp_publication_converges_offline_after_process_crash";
 
 // The parent owns both private pipes. The marker is sent only once the exact
@@ -519,49 +520,67 @@ fn park(producer: &str) -> ! {
     panic!("producer's parent closed or wrote to the gate without killing it")
 }
 
-fn process_child(root: &Path, point: &str, endpoint: SocketAddr) {
+fn recover_child(root: &Path, producer: &str) {
     let mut owner = open(root);
     let downloads = root.join("downloads");
     let dir = File::open(&downloads).unwrap();
-    if let Ok(producer) = std::env::var("NEXUM_PUBLICATION_RECOVER") {
-        assert!(std::net::TcpStream::connect(endpoint).is_err());
-        assert_eq!(owner.recover_with_ftp_publications().unwrap(), 1);
-        assert_task(&owner, TaskState::Queued, 0);
-        let old = owner.load_ftp_attempt(&id()).unwrap().unwrap();
-        assert_eq!(old.completion_generation(), Some(producer.as_str()));
-        let claimed = owner.claim_queued_ftp_completion(&old).unwrap().unwrap();
-        assert_ne!(claimed.generation(), producer);
-        assert_eq!(claimed.completion_generation(), Some(producer.as_str()));
-        assert_task(&owner, TaskState::Downloading, 1);
-        assert_eq!(
-            owner.drain_scheduler_events(),
-            vec![SchedulerEvent::Started { task_id: id() }]
-        );
-        owner.drain_task_events();
-        let file = File::open(downloads.join(if point == "final-only" {
-            "final"
-        } else {
-            "partial"
-        }))
+    assert!(
+        std::env::var_os(CRASH_POINT).is_none(),
+        "restart inherited the producer crash point"
+    );
+    assert_eq!(owner.recover_with_ftp_publications().unwrap(), 1);
+    assert_task(&owner, TaskState::Queued, 0);
+    let old = owner.load_ftp_attempt(&id()).unwrap().unwrap();
+    let endpoint: SocketAddr = old
+        .binding()
+        .source_origin
+        .strip_prefix("ftp://")
+        .unwrap()
+        .parse()
         .unwrap();
-        let intent = if point == "proof" {
-            owner
-                .prepare_ftp_publication(&claimed, &file, &dir, "partial")
-                .unwrap()
-        } else {
-            owner.rearm_ftp_publication(&claimed, &file, &dir).unwrap()
+    assert!(std::net::TcpStream::connect(endpoint).is_err());
+    assert_eq!(old.completion_generation(), Some(producer));
+    let claimed = owner.claim_queued_ftp_completion(&old).unwrap().unwrap();
+    assert_ne!(claimed.generation(), producer);
+    assert_eq!(claimed.completion_generation(), Some(producer));
+    assert_task(&owner, TaskState::Downloading, 1);
+    assert_eq!(
+        owner.drain_scheduler_events(),
+        vec![SchedulerEvent::Started { task_id: id() }]
+    );
+    owner.drain_task_events();
+    let origin = owner.repository.active_origin(&id()).unwrap().unwrap();
+    let stored = owner.repository.ftp_attempt(&origin).unwrap().unwrap();
+    assert_eq!(stored.generation, claimed.generation());
+    let intent = if stored.publication.is_some() {
+        let held = match File::open(&claimed.binding().destination) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                File::open(downloads.join("partial")).unwrap()
+            }
+            opened => opened.unwrap(),
         };
-        let control = FtpTransferControl::default();
-        let result = owner
-            .reconcile_ftp_publication(&intent, &dir, &control)
-            .unwrap();
-        assert!(control.is_finished() && control.is_committed());
-        owner.complete_ftp_publication(&result).unwrap();
-        assert_completed_events(&mut owner);
-        assert_task(&owner, TaskState::Completed, 0);
-        assert_eq!(owner.completed_ftp_publications().unwrap().len(), 1);
-        return;
-    }
+        owner.rearm_ftp_publication(&claimed, &held, &dir).unwrap()
+    } else {
+        let staged = File::open(downloads.join("partial")).unwrap();
+        owner
+            .prepare_ftp_publication(&claimed, &staged, &dir, "partial")
+            .unwrap()
+    };
+    let control = FtpTransferControl::default();
+    let result = owner
+        .reconcile_ftp_publication(&intent, &dir, &control)
+        .unwrap();
+    assert!(control.is_finished() && control.is_committed());
+    owner.complete_ftp_publication(&result).unwrap();
+    assert_completed_events(&mut owner);
+    assert_task(&owner, TaskState::Completed, 0);
+    assert_eq!(owner.completed_ftp_publications().unwrap().len(), 1);
+}
+
+fn producer_child(root: &Path, point: &str, endpoint: SocketAddr) {
+    let mut owner = open(root);
+    let downloads = root.join("downloads");
+    let dir = File::open(&downloads).unwrap();
     let saved = receive(&mut owner, root, endpoint);
     if point == "proof" {
         park(saved.generation());
@@ -593,14 +612,18 @@ fn process_child(root: &Path, point: &str, endpoint: SocketAddr) {
 #[test]
 fn real_ftp_publication_converges_offline_after_process_crash() {
     if let Some(root) = std::env::var_os(CHILD_ROOT) {
-        process_child(
-            Path::new(&root),
-            &std::env::var("NEXUM_PUBLICATION_POINT").unwrap(),
-            std::env::var("NEXUM_PUBLICATION_ENDPOINT")
-                .unwrap()
-                .parse()
-                .unwrap(),
-        );
+        if let Ok(producer) = std::env::var("NEXUM_PUBLICATION_RECOVER") {
+            recover_child(Path::new(&root), &producer);
+        } else {
+            producer_child(
+                Path::new(&root),
+                &std::env::var(CRASH_POINT).unwrap(),
+                std::env::var("NEXUM_PUBLICATION_ENDPOINT")
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            );
+        }
         return;
     }
     for point in [
@@ -616,7 +639,8 @@ fn real_ftp_publication_converges_offline_after_process_crash() {
         command
             .args(["--exact", PROCESS_TEST, "--nocapture"])
             .env(CHILD_ROOT, &f.0)
-            .env("NEXUM_PUBLICATION_POINT", point)
+            .env(CRASH_POINT, point)
+            .env_remove("NEXUM_PUBLICATION_RECOVER")
             .env("NEXUM_PUBLICATION_ENDPOINT", endpoint.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
@@ -669,6 +693,8 @@ fn real_ftp_publication_converges_offline_after_process_crash() {
         drop(before);
 
         let recovery = command
+            .env_remove(CRASH_POINT)
+            .env_remove("NEXUM_PUBLICATION_ENDPOINT")
             .env("NEXUM_PUBLICATION_RECOVER", producer)
             .output()
             .unwrap();
