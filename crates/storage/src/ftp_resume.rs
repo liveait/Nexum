@@ -166,13 +166,19 @@ pub(super) fn read_attempt_for_phase(
 ) -> Result<Option<FtpAttempt>, StorageError> {
     let encoded = serde_json::to_string(record).map_err(|_| invalid())?;
     let publication = ftp_publication::read_intent(connection, record, instance, phase)?;
+    // The schema-5 completion column has no size constraint. Project only
+    // bounded blobs. X'' retains invalid presence for the marker check below.
     let row = connection.query_row(
         "SELECT version,instance_id,origin_record,generation,revision,
                 proof,trusted_bytes,total_bytes,
-                completion_version,completion_proof,completion_generation,completion_bytes,completion_seen,
+                completion_version,
+                CASE WHEN typeof(completion_proof)='null' THEN NULL
+                     WHEN typeof(completion_proof)='blob' AND length(completion_proof) BETWEEN 1 AND ?2
+                     THEN completion_proof ELSE X'' END,
+                completion_generation,completion_bytes,completion_seen,
                 publication_seen,publication_authorization
          FROM ftp_attempts WHERE task_id=?1",
-        [&record.task_id],
+        params![record.task_id, MAX_PROOF],
         |r| Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -540,6 +546,68 @@ impl SqliteRepository {
         let saved = read_attempt(&transaction, &attempt.origin, &instance)?.ok_or_else(conflict)?;
         transaction.commit().map_err(origin::database_error)?;
         Ok(saved)
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_completion_is_rejected_without_materializing_it_in_the_reader() {
+        let mut repo = SqliteRepository::open_in_memory().unwrap();
+        let origin = OriginRecord {
+            version: 1,
+            task_id: "ftp".into(),
+            operation_id: origin::random_id().unwrap(),
+            canonical_url: "ftp://example.com/file".into(),
+            origin: "ftp://example.com:21".into(),
+            destination: "/downloads/file".into(),
+            command_path: "file".into(),
+            security: "plain".into(),
+            path_mode: "login_relative".into(),
+            authenticated: false,
+            credential: None,
+        };
+        repo.reserve_origin(&origin).unwrap();
+        repo.activate_origin(
+            &origin,
+            nexum_task::DownloadTask::new(
+                "ftp",
+                nexum_domain::DownloadSource::new(&origin.canonical_url),
+                nexum_domain::Destination::new(&origin.destination),
+            )
+            .into(),
+        )
+        .unwrap();
+        repo.claim_ftp_attempt(&origin, None).unwrap();
+        // This schema permits a present completion blob even when its marker is clear.
+        repo.connection
+            .execute(
+                "UPDATE ftp_attempts SET completion_proof=zeroblob(?1)",
+                [MAX_PROOF + 1],
+            )
+            .unwrap();
+
+        // SAFETY: the limit belongs to this live, private in-memory connection.
+        // No statements are in flight. Its handle is only borrowed for this call.
+        unsafe {
+            rusqlite::ffi::sqlite3_limit(
+                repo.connection.handle(),
+                rusqlite::ffi::SQLITE_LIMIT_LENGTH,
+                MAX_PROOF as i32,
+            );
+        }
+        let raw = repo
+            .connection
+            .query_row("SELECT completion_proof FROM ftp_attempts", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .unwrap_err();
+        assert_eq!(raw.sqlite_error_code(), Some(rusqlite::ErrorCode::TooBig));
+        // The real reader can still classify the invalid attempt. Fetching raw
+        // bytes first would instead fail in SQLite before reaching validation.
+        assert_eq!(repo.ftp_attempt(&origin), Err(invalid()));
     }
 }
 

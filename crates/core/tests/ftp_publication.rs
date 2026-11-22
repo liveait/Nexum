@@ -849,3 +849,100 @@ fn retained_plan_is_validated_before_claim_and_rearm_failures_leave_old_authorit
     owner.complete_ftp_publication(&published).unwrap();
     assert_task(&owner, TaskState::Completed, 0);
 }
+
+#[test]
+fn damaged_completion_preserves_evidence_at_publication_fences_and_failed_startup() {
+    let (f, mut owner, saved) = seeded();
+    let (file, dir) = entries(&f.0);
+    let prepared = owner
+        .prepare_ftp_publication(&saved, &file, &dir, "partial")
+        .unwrap();
+    let db = Connection::open(f.0.join("state.db")).unwrap();
+    let damage = || {
+        db.execute(
+            "UPDATE ftp_attempts SET completion_proof=zeroblob(65537)",
+            [],
+        )
+        .unwrap()
+    };
+    let journal = || {
+        db.query_row(
+            "SELECT phase,authorization,owner_generation,revision,plan FROM ftp_publications",
+            [],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, u64>(3)?,
+                    r.get::<_, Vec<u8>>(4)?,
+                ))
+            },
+        )
+        .unwrap()
+    };
+    let retained = journal();
+    damage();
+    let control = FtpTransferControl::default();
+    assert!(matches!(
+        owner.publish_ftp_completion(&prepared, &dir, &control),
+        Err(CoreError::Storage(_))
+    ));
+    assert!(control.is_finished() && !control.is_committed());
+    assert_task(&owner, TaskState::Downloading, 1);
+    no_events(&mut owner);
+    assert!(!f.0.join("downloads/final").exists());
+    assert_eq!(
+        fs::read(f.0.join("downloads/partial")).unwrap(),
+        b"firstend"
+    );
+    assert_eq!(journal(), retained);
+
+    db.execute(
+        "UPDATE ftp_attempts SET completion_proof=?1",
+        [saved.completion().unwrap().encode().unwrap()],
+    )
+    .unwrap();
+    let published = owner
+        .publish_ftp_completion(&prepared, &dir, &FtpTransferControl::default())
+        .unwrap();
+    damage();
+    assert!(matches!(
+        owner.complete_ftp_publication(&published),
+        Err(CoreError::Storage(_))
+    ));
+    assert_task(&owner, TaskState::Downloading, 1);
+    no_events(&mut owner);
+    assert_eq!(journal(), retained);
+    owner
+        .fail_task_without_retry(&id(), "pending publication")
+        .unwrap();
+    drop(owner);
+    let mut restarted = open(&f.0);
+    assert!(matches!(
+        restarted.recover_with_ftp_publications(),
+        Err(CoreError::Storage(_))
+    ));
+    let task = restarted.repository.get(&id()).unwrap().unwrap();
+    assert_eq!(task.state, TaskState::Failed);
+    assert_eq!(task.progress, full());
+    assert!(restarted.tasks.get(&id()).is_none());
+    assert_eq!(restarted.scheduler.queued_len(), 0);
+    assert_eq!(restarted.scheduler.active_len(), 0);
+    no_events(&mut restarted);
+    assert_eq!(journal(), retained);
+    assert_eq!(
+        db.query_row(
+            "SELECT length(completion_proof) FROM ftp_attempts",
+            [],
+            |r| r.get::<_, u32>(0)
+        )
+        .unwrap(),
+        65537
+    );
+    assert_eq!(fs::read(f.0.join("downloads/final")).unwrap(), b"firstend");
+    assert_eq!(
+        file.metadata().unwrap().ino(),
+        fs::metadata(f.0.join("downloads/final")).unwrap().ino()
+    );
+}

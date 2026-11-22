@@ -704,3 +704,72 @@ fn removal_rolls_back_if_deleting_the_attempt_also_loses_the_retained_journal() 
         prepared.origin.operation_id
     );
 }
+
+#[test]
+fn migrated_completion_accepts_bounded_blobs_and_distinguishes_invalid_presence_from_null() {
+    let f = Fixture::new();
+    let mut repo = f.repo();
+    let (task, attempt) = create(&mut repo);
+    drop(repo);
+    let db = f.db();
+    db.execute_batch(
+        "DROP TABLE ftp_publications;
+         ALTER TABLE ftp_attempts DROP COLUMN publication_seen;
+         ALTER TABLE ftp_attempts DROP COLUMN publication_authorization;
+         UPDATE schema_version SET version=5;
+         UPDATE ftp_attempts SET completion_proof=zeroblob(65537);",
+    )
+    .unwrap();
+    let repo = f.repo();
+    assert_eq!(
+        db.query_row("SELECT version FROM schema_version", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        6
+    );
+    assert!(repo.ftp_attempt(&attempt.origin).is_err());
+    assert_eq!(
+        db.query_row(
+            "SELECT length(completion_proof) FROM ftp_attempts",
+            [],
+            |r| r.get::<_, u32>(0)
+        )
+        .unwrap(),
+        65537
+    );
+    assert_eq!(repo.get(&task.id).unwrap(), Some(task));
+
+    for len in [1, 65536] {
+        db.execute(
+            "UPDATE ftp_attempts SET completion_proof=zeroblob(?1)",
+            [len],
+        )
+        .unwrap();
+        let loaded = repo.ftp_attempt(&attempt.origin).unwrap().unwrap();
+        assert_eq!(loaded.completion.unwrap().proof, vec![0; len]);
+    }
+    // Genuine absence is valid only with a clear marker and all four fields NULL.
+    db.execute_batch("UPDATE ftp_attempts SET completion_proof=NULL")
+        .unwrap();
+    assert!(repo.ftp_attempt(&attempt.origin).is_err());
+    db.execute_batch(
+        "UPDATE ftp_attempts SET completion_seen=0,completion_version=NULL,
+        completion_generation=NULL,completion_bytes=NULL",
+    )
+    .unwrap();
+    assert!(
+        repo.ftp_attempt(&attempt.origin)
+            .unwrap()
+            .unwrap()
+            .completion
+            .is_none()
+    );
+    for value in ["zeroblob(65537)", "X''", "'malformed text'", "34", "1.25"] {
+        db.execute_batch(&format!("UPDATE ftp_attempts SET completion_proof={value}"))
+            .unwrap();
+        assert!(
+            repo.ftp_attempt(&attempt.origin).is_err(),
+            "invalid present field accepted as absent: {value}"
+        );
+    }
+}

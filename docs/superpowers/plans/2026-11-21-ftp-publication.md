@@ -72,14 +72,18 @@ Use one directory-relative linkat algorithm retaining the staging alias. A separ
 - [x] prepare/rearm 校验 Engine plan 与独立 origin/producer/current owner；实际发布阶段给新 Storage guard，保留真实 StorageError；最终 CAS 只接受对应 opaque published evidence。 / Refence each boundary.
 - [x] `recovery_claim_preserves_whole_progress_scheduler_and_events`、`intent_and_completion_write_faults_preserve_memory_and_events`、`stale_owner_cannot_publish_or_save_completed`、`atomic_completed_releases_slot_only_after_sqlite_commit`、`recreated_task_id_cannot_adopt_prior_intent` 直接调用新 Core 入口。 / Exercise actual consumers.
 - [x] `real_ftp_publication_converges_offline_after_process_crash`：实际绝对目标／held parent，公开来源和调度入口→真实 FTP→proof save→intent→publish→Completed；私有 pipe 屏障在 intent 后／link 前后／SQLite 拒写后 SIGKILL，独立进程在源站关闭后 recover/claim/rearm/reconcile/complete。核对哈希、原身份、全进度、终态、槽位／事件、无额外 RETR、同 inode 双名称及现有目标／无关哨兵。 / Test actual process boundaries and offline convergence.
-- [x] 全量 fmt、workspace all-targets check、workspace serial test、独立默认并行 managed、all-targets Clippy `-D warnings`；TRACE 检查凭据／URI/passkey 哨兵。新 API 还由独立仓库外消费者验证。 / Run complete gates and independent consumers.
+- [ ] 全量 fmt、workspace all-targets check、workspace serial test、独立默认并行 managed、all-targets Clippy `-D warnings`；TRACE 检查凭据／URI/passkey 哨兵。新 API 还由独立仓库外消费者验证。 / Run complete gates and independent consumers.
 - [ ] 固定最终 SHA 独立全分支审查，核对最新 base/head CI；按已有授权合并并验证实际 main push CI。只在全通过后更新交付状态和同步 checkout，保留未验原生／其他平台／分发缺口。 / Review and deliver with actual merged-main evidence.
 
 ## 验证状态 / Verification status
 
-Engine、Storage 和 Core 的实现及逐任务独立审查已通过。`9177e4af` 的完整本地检查通过：workspace 686 项、独立 managed 14 项，均无失败或忽略；fmt、all-targets check 与 Clippy 通过。仓库外消费者在 `260f390f` 通过 14 个场景，其中 5 个通过公开边界 SIGKILL 后由新进程离线恢复；其后的 `9177e4af` 仅修订永久进程测试，产品代码及 Cargo 输入未变。最终整包审查、最新 base/head CI、合并及实际 main push CI 仍待完成。
+Engine、Storage 和 Core 的实现及逐任务独立审查已通过。`9177e4af` 的完整本地检查通过：workspace 686 项、独立 managed 14 项，均无失败或忽略；fmt、all-targets check 与 Clippy 通过。仓库外消费者在 `260f390f` 通过 14 个场景，其中 5 个通过公开边界 SIGKILL 后由新进程离线恢复；其后的 `9177e4af` 仅修订永久进程测试，产品代码及 Cargo 输入未变。
 
-Engine, Storage and Core implementation and per-task independent reviews passed. Full local gates at `9177e4af` passed: 686 workspace cases and 14 separate managed cases, with no failures or ignored cases; fmt, all-targets check and Clippy passed. An external consumer passed 14 scenarios at `260f390f`, including five offline recoveries by a new process after SIGKILL at public boundaries. The subsequent `9177e4af` changes only the permanent process tests, with product code and Cargo inputs unchanged. Final whole-branch review, latest base/head CI, merge and actual main push CI remain pending.
+Engine, Storage and Core implementation and per-task independent reviews passed. Full local gates at `9177e4af` passed: 686 workspace cases and 14 separate managed cases, with no failures or ignored cases; fmt, all-targets check and Clippy passed. An external consumer passed 14 scenarios at `260f390f`, including five offline recoveries by a new process after SIGKILL at public boundaries. The subsequent `9177e4af` changes only the permanent process tests, with product code and Cargo inputs unchanged.
+
+整包独立审查在 `2dca2ba7` 发现一项 P2。schema 5 遗留列允许存储超过 64 KiB 的完成证明，原查询在校验前读取整列。修复在 SQLite 查询中先核对类型与字节长度，保留 NULL 与非法已存在值的区别。修复后的本地 Storage 45 项、Core 53 项及两者的 all-targets check、Clippy、全仓 fmt 已通过。新提交的完整 workspace、独立 managed、TRACE、仓库外消费者、固定 SHA 复审、最新 base/head CI 和实际 main push CI 待验证。
+
+Whole-branch independent review at `2dca2ba7` found one P2. The schema-5 column permits completion proofs larger than 64 KiB, and the original query fetched the entire value before validation. The corrected SQLite query checks type and byte length while preserving genuine NULL and invalid present values as distinct cases. The fix passed all 45 Storage and 53 Core tests, all-targets check and Clippy for both crates, and workspace formatting. Full workspace, separate managed, TRACE, external consumer and fixed-SHA re-review remain pending on the new commit, together with fresh base/head and actual main push CI.
 
 本切片仍不代表 Server／CLI／Desktop 已支持 FTP，不包含 FTPS、BT 数据传输或别名自动清理，也不宣称在 linkat／release／sync 内部精确杀进程已验收。
 
