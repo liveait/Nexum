@@ -41,12 +41,12 @@ Use one directory-relative linkat algorithm retaining the staging alias. A separ
 
 **接口 / Interfaces:** 产出 / Produce `FtpPublicationPlan`、`FtpPublicationRequest<'a>`、`FtpPublishedCompletion`、`FtpPublicationError`；`publish_completion_with_guard`、`reconcile_publication_with_guard` 复用 `FtpCompletionGuard` 的 fallible release。plan 提供 `prepare`、bounded `encode/decode` 及 binding／producer／owner／authorization／progress 只读访问器；published 提供 plan／progress 只读访问器，禁止外部构造。精确 Rust 参数可在实现时按借用规则收敛，语义不可省略。 / Exact signatures may be consolidated for borrowing while preserving these boundaries.
 
-- [ ] 写直接测试，先记录缺少新行为的失败；不存在的 API 编译错误不计作基线行为缺陷。 / Write failing behavior tests; missing-API compilation is not a baseline behavior regression.
-- [ ] 实现 bounded plan：消费独立 `FtpCompletionRequest`、原 proof、held file/parent、source leaf、current owner/authorization；从 binding 校验真实 final leaf/parent。`same_inode_no_clobber_hardlink_retains_staging` 核对两个名称同 inode、完整哈希和 no unlink。 / Bind/validate independently supplied proof and destination.
-- [ ] 覆盖 `existing_regular_symlink_hardlink_and_directory_are_preserved`、`partial_or_parent_identity_mismatch_is_rejected`、`equal_bytes_replacement_and_corruption_are_retained`、`unknown_or_malformed_publication_plan_is_rejected`、`source_and_final_leaf_names_are_strictly_bound`。 / Test real filesystem results.
-- [ ] 增加新 control 的 committed 观测和最终决定边界；不复用已经结束的 receive/verify control。hash 分块可暂停／取消；最后 control 锁内取得新 guard，重查身份后 linkat，立即记录 committed。release 后做必要目录 sync；控制运行保持至全部 I/O 返回，sync 失败保留 committed 事实。reconcile 已存在 final 经验证后同样表示已提交事实。 / Finish only after all I/O; committed errors never undo publication.
-- [ ] 用私有 barrier/fault injection 覆盖 `cancel_winning_before_syscall_prevents_publication`、`publication_winning_before_cancel_remains_committed`、`pause_and_cancel_during_hash_preserve_every_entry`、`release_validation_and_sync_failures_preserve_committed_intent`、`finished_controls_are_not_reused`；生产无环境／fixture URL 开关。 / Deterministic tests without production test backdoors.
-- [ ] 运行新 integration、completion／FTP 既有测试及 engine all-targets check/Clippy；保存实际 red/green 日志，提交并独立任务审查。 / Run targeted gates, retain logs, commit and review.
+- [x] 写直接测试，先记录缺少新行为的失败；不存在的 API 编译错误不计作基线行为缺陷。 / Write failing behavior tests; missing-API compilation is not a baseline behavior regression.
+- [x] 实现 bounded plan：消费独立 `FtpCompletionRequest`、原 proof、held file/parent、source leaf、current owner/authorization；从 binding 校验真实 final leaf/parent。`same_inode_no_clobber_hardlink_retains_staging` 核对两个名称同 inode、完整哈希和 no unlink。 / Bind/validate independently supplied proof and destination.
+- [x] 覆盖 `existing_regular_symlink_hardlink_and_directory_are_preserved`、`partial_or_parent_identity_mismatch_is_rejected`、`equal_bytes_replacement_and_corruption_are_retained`、`unknown_or_malformed_publication_plan_is_rejected`、`source_and_final_leaf_names_are_strictly_bound`。 / Test real filesystem results.
+- [x] 增加新 control 的 committed 观测和最终决定边界；不复用已经结束的 receive/verify control。hash 分块可暂停／取消；最后 control 锁内取得新 guard，重查身份后 linkat，立即记录 committed。release 后做必要目录 sync；控制运行保持至全部 I/O 返回，sync 失败保留 committed 事实。reconcile 已存在 final 经验证后同样表示已提交事实。 / Finish only after all I/O; committed errors never undo publication.
+- [x] 用私有 barrier/fault injection 覆盖 `cancel_winning_before_syscall_prevents_publication`、`publication_winning_before_cancel_remains_committed`、`pause_and_cancel_during_hash_preserve_every_entry`、`release_validation_and_sync_failures_preserve_committed_intent`、`finished_controls_are_not_reused`；生产无环境／fixture URL 开关。 / Deterministic tests without production test backdoors.
+- [x] 运行新 integration、completion／FTP 既有测试及 engine all-targets check/Clippy；保存实际 red/green 日志，提交并独立任务审查。 / Run targeted gates, retain logs, commit and review.
 
 ## Task 2: Storage schema 6 与发布授权 / Storage schema 6 and publication authority
 
@@ -54,12 +54,12 @@ Use one directory-relative linkat algorithm retaining the staging alias. A separ
 
 **接口 / Interfaces:** 消费 Task 1 opaque plan bytes；产出 `FtpPublicationIntent`、只读 completed/orphan record、prepare/rearm、专用 claim、`guard_ftp_publication`、`complete_ftp_publication`。Storage 不依赖 Engine；Core 负责 typed 解码匹配。 / Store bounded opaque bytes without an Engine dependency.
 
-- [ ] schema 6 新表 `ftp_publications` 以 instance/operation 为键，保存 version、task、authorization、owner、attempt revision、prepared/completed phase、opaque plan；`ftp_attempts` 增加 publication_seen/current-intent 绑定用于 observed loss。迁移拒绝未来版本，中途 ALTER／CREATE 及最终 version 更新故障均完整回滚。 / Persist incarnation-scoped authority and observed-loss markers atomically.
-- [ ] FtpAttempt 完整快照包含 intent；claim 新 generation 保留旧 owner/authorization，仅显式 prepare/rearm 才写新授权和 revision。所有旧 claim/save/guard 比较完整快照，不允许前缀或第二完成证明越过已存在 intent。 / Preserve complete snapshot CAS.
-- [ ] 在一个 Immediate 事务实现保进度的恢复 claim；prepared guard 与最终完成同时核对完整预期 StoredTask、Downloading、来源、completion、attempt、intent 和 current owner。namespace guard 保持至 Engine 决定后显式 release；不在 guard 做 hash／网络。 / Bind the full task and all authority fields.
-- [ ] 最终事务一次保存 whole progress、Completed 和 completed intent；返回值在 commit 前完成可失败验证，completed/orphan 只读接口不经 active-origin 检查。移除保留旧 journal，禁止同 ID 新 operation 采用。 / Atomically complete and retain non-executable diagnostics.
-- [ ] 覆盖 migration rollback、prepare/rearm/CAS、旧 owner、任务状态／字段改变而 generation 不变、writer busy／release 失败、missing marker/intent、Completed／orphan、同 ID 重建和最终写入失败重试；不弱化旧 schema 初始化／迁移断言。 / Direct real SQLite failure/race tests.
-- [ ] 运行 storage 全套测试和 all-targets check/Clippy，提交并独立任务审查。 / Verify, commit and review.
+- [x] schema 6 新表 `ftp_publications` 以 instance/operation 为键，保存 version、task、authorization、owner、attempt revision、prepared/completed phase、opaque plan；`ftp_attempts` 增加 publication_seen/current-intent 绑定用于 observed loss。迁移拒绝未来版本，中途 ALTER／CREATE 及最终 version 更新故障均完整回滚。 / Persist incarnation-scoped authority and observed-loss markers atomically.
+- [x] FtpAttempt 完整快照包含 intent；claim 新 generation 保留旧 owner/authorization，仅显式 prepare/rearm 才写新授权和 revision。所有旧 claim/save/guard 比较完整快照，不允许前缀或第二完成证明越过已存在 intent。 / Preserve complete snapshot CAS.
+- [x] 在一个 Immediate 事务实现保进度的恢复 claim；prepared guard 与最终完成同时核对完整预期 StoredTask、Downloading、来源、completion、attempt、intent 和 current owner。namespace guard 保持至 Engine 决定后显式 release；不在 guard 做 hash／网络。 / Bind the full task and all authority fields.
+- [x] 最终事务一次保存 whole progress、Completed 和 completed intent；返回值在 commit 前完成可失败验证，completed/orphan 只读接口不经 active-origin 检查。移除保留旧 journal，禁止同 ID 新 operation 采用。 / Atomically complete and retain non-executable diagnostics.
+- [x] 覆盖 migration rollback、prepare/rearm/CAS、旧 owner、任务状态／字段改变而 generation 不变、writer busy／release 失败、missing marker/intent、Completed／orphan、同 ID 重建和最终写入失败重试；不弱化旧 schema 初始化／迁移断言。 / Direct real SQLite failure/race tests.
+- [x] 运行 storage 全套测试和 all-targets check/Clippy，提交并独立任务审查。 / Verify, commit and review.
 
 ## Task 3: Core 恢复领取、完成 CAS 与真实跨进程消费者 / Core convergence and real process consumers
 
@@ -67,10 +67,20 @@ Use one directory-relative linkat algorithm retaining the staging alias. A separ
 
 **接口 / Interfaces:** `claim_queued_ftp_completion`、`prepare_ftp_publication`、`publish_ftp_completion`／`reconcile_ftp_publication`、`complete_ftp_publication`。接口分离持久 prepare、实际 namespace guard、最终 Completed CAS；不得拿旧 verify 返回 Progress 当未来许可。 / Keep three distinct authority boundaries.
 
-- [ ] 专用 claim 克隆候选 tasks/scheduler，保留已证明整文件进度，Storage 原子领取成功后才交换任务／槽位／事件。失败不改变内存、事件、SQLite 或文件。 / Publish candidate state only after durable success.
-- [ ] 为 Failed＋pending intent 使用窄恢复 selector／既有 recover-with-pending hook，保留 HTTP 行为，不扩大普通 claim。Completed 结果从独立诊断视图读取；commit 后不调用 active typed decode。 / Preserve failed pending recovery and completed diagnostics.
-- [ ] prepare/rearm 校验 Engine plan 与独立 origin/producer/current owner；实际发布阶段给新 Storage guard，保留真实 StorageError；最终 CAS 只接受对应 opaque published evidence。 / Refence each boundary.
-- [ ] `recovery_claim_preserves_whole_progress_scheduler_and_events`、`intent_and_completion_write_faults_preserve_memory_and_events`、`stale_owner_cannot_publish_or_save_completed`、`atomic_completed_releases_slot_only_after_sqlite_commit`、`recreated_task_id_cannot_adopt_prior_intent` 直接调用新 Core 入口。 / Exercise actual consumers.
-- [ ] `real_ftp_publication_converges_offline_after_process_crash`：实际绝对目标／held parent，公开来源和调度入口→真实 FTP→proof save→intent→publish→Completed；私有 pipe 屏障在 intent 后／link 前后／SQLite 拒写后 SIGKILL，独立进程在源站关闭后 recover/claim/rearm/reconcile/complete。核对哈希、原身份、全进度、终态、槽位／事件、无额外 RETR、同 inode 双名称及现有目标／无关哨兵。 / Test actual process boundaries and offline convergence.
-- [ ] 全量 fmt、workspace all-targets check、workspace serial test、独立默认并行 managed、all-targets Clippy `-D warnings`；TRACE 检查凭据／URI/passkey 哨兵。新 API 还由独立仓库外消费者验证。 / Run complete gates and independent consumers.
+- [x] 专用 claim 克隆候选 tasks/scheduler，保留已证明整文件进度，Storage 原子领取成功后才交换任务／槽位／事件。失败不改变内存、事件、SQLite 或文件。 / Publish candidate state only after durable success.
+- [x] 为 Failed＋pending intent 使用窄恢复 selector／既有 recover-with-pending hook，保留 HTTP 行为，不扩大普通 claim。Completed 结果从独立诊断视图读取；commit 后不调用 active typed decode。 / Preserve failed pending recovery and completed diagnostics.
+- [x] prepare/rearm 校验 Engine plan 与独立 origin/producer/current owner；实际发布阶段给新 Storage guard，保留真实 StorageError；最终 CAS 只接受对应 opaque published evidence。 / Refence each boundary.
+- [x] `recovery_claim_preserves_whole_progress_scheduler_and_events`、`intent_and_completion_write_faults_preserve_memory_and_events`、`stale_owner_cannot_publish_or_save_completed`、`atomic_completed_releases_slot_only_after_sqlite_commit`、`recreated_task_id_cannot_adopt_prior_intent` 直接调用新 Core 入口。 / Exercise actual consumers.
+- [x] `real_ftp_publication_converges_offline_after_process_crash`：实际绝对目标／held parent，公开来源和调度入口→真实 FTP→proof save→intent→publish→Completed；私有 pipe 屏障在 intent 后／link 前后／SQLite 拒写后 SIGKILL，独立进程在源站关闭后 recover/claim/rearm/reconcile/complete。核对哈希、原身份、全进度、终态、槽位／事件、无额外 RETR、同 inode 双名称及现有目标／无关哨兵。 / Test actual process boundaries and offline convergence.
+- [x] 全量 fmt、workspace all-targets check、workspace serial test、独立默认并行 managed、all-targets Clippy `-D warnings`；TRACE 检查凭据／URI/passkey 哨兵。新 API 还由独立仓库外消费者验证。 / Run complete gates and independent consumers.
 - [ ] 固定最终 SHA 独立全分支审查，核对最新 base/head CI；按已有授权合并并验证实际 main push CI。只在全通过后更新交付状态和同步 checkout，保留未验原生／其他平台／分发缺口。 / Review and deliver with actual merged-main evidence.
+
+## 验证状态 / Verification status
+
+Engine、Storage 和 Core 的实现及逐任务独立审查已通过。`9177e4af` 的完整本地检查通过：workspace 686 项、独立 managed 14 项，均无失败或忽略；fmt、all-targets check 与 Clippy 通过。仓库外消费者在 `260f390f` 通过 14 个场景，其中 5 个通过公开边界 SIGKILL 后由新进程离线恢复；其后的 `9177e4af` 仅修订永久进程测试，产品代码及 Cargo 输入未变。最终整包审查、最新 base/head CI、合并及实际 main push CI 仍待完成。
+
+Engine, Storage and Core implementation and per-task independent reviews passed. Full local gates at `9177e4af` passed: 686 workspace cases and 14 separate managed cases, with no failures or ignored cases; fmt, all-targets check and Clippy passed. An external consumer passed 14 scenarios at `260f390f`, including five offline recoveries by a new process after SIGKILL at public boundaries. The subsequent `9177e4af` changes only the permanent process tests, with product code and Cargo inputs unchanged. Final whole-branch review, latest base/head CI, merge and actual main push CI remain pending.
+
+本切片仍不代表 Server／CLI／Desktop 已支持 FTP，不包含 FTPS、BT 数据传输或别名自动清理，也不宣称在 linkat／release／sync 内部精确杀进程已验收。
+
+This slice does not enable FTP in Server, CLI or Desktop, nor include FTPS, BT payload transfer or automatic alias cleanup. It does not claim process-kill acceptance inside linkat, release or sync.
