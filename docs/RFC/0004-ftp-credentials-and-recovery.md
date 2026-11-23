@@ -280,6 +280,29 @@ Migrate schema 4 without altering old records or origins. Reject unknown version
 
 ## 完成、文件安全与兼容 / Completion, file safety and compatibility
 
+<a id="held-publication-convergence"></a>
+### 持有对象发布与离线完成收敛方案 / Held-object publication and offline completion convergence design
+
+基线 `dbc479b6b52012812ef55f461a9d27c888aee9fc`。本包在已接受的普通桌面范围内使用单一 directory-relative `linkat(..., 0)` 不覆盖发布，保留来源别名，不执行自动清理或 copy／clone／rename 回退。不接 Server／CLI／App、FTPS、BT 或 M4；平台／文件系统不支持时具体失败，不宣称未验平台能力。
+
+At the stated base, use one directory-relative linkat no-clobber publication algorithm under the accepted ordinary-desktop scope. Retain the source alias without automatic cleanup or copy/clone/rename fallback. No Server/CLI/App, FTPS, BT or M4 integration; unsupported platforms/filesystems fail explicitly without an unverified capability claim.
+
+独立 `ftp-publication/v1` 有界 plan 绑定原完成证明、来源 incarnation、真实绝对目标、held parent、两个单叶名称、原 producer 与当前 owner/authorization。schema 6 的独立 intent 及 observed marker 先于发布保存，claim 保留旧授权但不自动 rearm。实际发布在 control 决定锁内重新核对完整 Downloading task／attempt／intent，持有 SQLite 预约跨 linkat；hash 在外。发布后错误保留 committed 事实和文件，最终进度／Completed／intent completed 另经完整 CAS 同事务保存。
+
+A bounded versioned plan binds the original completion, origin incarnation, real absolute destination, held parent, strict leaves, original producer and current owner/authorization. Persist a separate schema-6 intent/observed marker before publication. Claims retain old authorization without automatically rearming. Under the control decision lock, revalidate the entire Downloading task/attempt/intent and hold a SQLite reservation across linkat; hash outside final locks. Preserve committed facts/files on postpublication errors, then atomically CAS final progress, Completed and completed intent separately.
+
+专用恢复领取保留整文件进度与调度／事件原子性，Failed＋pending intent 不得被普通恢复漏掉。Completed／orphan 采用独立只读诊断接口，任务移除及同 ID 重建不能重新授权旧 journal。检测已观察记录丢失，不声称任意数据库历史防篡改。[实施计划](../superpowers/plans/2026-11-21-ftp-publication.md) 记录任务、直接测试与真实跨进程消费者；以下记录实现及消费者自测。
+
+Dedicated recovery claims preserve whole-file progress and scheduler/event atomicity, including Failed tasks with pending intents. Separate read-only Completed/orphan diagnostics cannot reauthorize removed/recreated tasks. Detect observed-record loss without generic historical-tamper claims. The [implementation plan](../superpowers/plans/2026-11-21-ftp-publication.md) defines tasks/direct/process consumers; implementation and consumer self-tests are recorded below.
+
+实现与自测从合并 Engine／Storage 的 Task 3 基线 `f15c9179` 继续。Core 从持久来源／尝试构建 plan，为首次 prepare 和每次 rearm 生成新授权。持有目录与文件由调用方提供。普通 claim 保留既有语义。专用 `claim_queued_ftp_completion` 保留已证整文件进度。实际 publish／reconcile 在新的 SQLite 预约内重新核对完整任务与 intent。成功证据为私有构造，单独提交 Completed。当 SQLite 提交成功，Core 才交换任务、槽位及事件。完成与孤立诊断只返回身份、revision 和阶段。
+
+Core implementation and self-tests use the integrated Engine/Storage base `f15c9179`. Core builds plans from the persisted origin/attempt and generates fresh authorization for prepare and each rearm. The caller supplies the held directory and file. Ordinary claims keep their existing semantics. The dedicated `claim_queued_ftp_completion` preserves proven whole-file progress. Publication and reconciliation recheck the entire task and intent under a fresh SQLite reservation. Their privately constructed outcome feeds a separate Completed commit. Core swaps tasks, slots and events after successful SQLite commits. Completed and orphan diagnostics expose identity, revision and phase.
+
+本机 APFS 测试使用真实回环 FTP 和私有 SQLite，在完成证明保存后、intent 保存且尚未 link 时、link 后及最终事务拒写后以私有管道同步 SIGKILL。独立恢复进程在源站停机后核对原 inode、字节摘要及事件，并覆盖仅余原目标的 rearm。实际文件内容哈希在 Engine 决定锁和 SQLite 预约之外执行。未来 Server 调用方仍须在长时间 I/O 前释放外层 RPC Core 锁，先回收旧 Worker 并保持目标独占写入权。250 ms SQLite busy timeout 仅限制数据库争用。其他卷、平台、原生 App 和发布产物仍待各自验收。
+
+Local APFS tests use real loopback FTP and private SQLite with pipe-synchronized SIGKILL after proof persistence, after intent persistence before link, after link, and after final transaction rejection. A separate offline recovery process converges, including rearming from the surviving original final alone. The test checks original inode, content digest and events. Engine hashes outside its decision lock and the SQLite reservation. Future Server callers must release any outer RPC Core lock before long-running I/O, join the old worker and retain exclusive writer ownership. The 250 ms SQLite busy timeout bounds database contention. Other volumes, platforms, native App and release artifacts retain their own acceptance gates.
+
 停写、长度验证和 sync 后先保存完成证明，再在同一取消决定锁内安全地不覆盖发布，最后原子保存最终进度和 Completed。保存失败保留证明，重启优先离线对账，不发额外 RETR。沿用旧 HTTP v1 路径／读取，FTP 新格式与目录独立版本化，不能静默修改 `http-completions` 含义。
 
 After quiescence, length validation and sync, persist completion proof before safe no-clobber publication under the cancellation decision lock, then atomically persist final progress and Completed. Retain proof on failure and reconcile offline before another RETR. Keep legacy HTTP v1 paths/readers; separately version FTP formats/directories without silently changing `http-completions` semantics.

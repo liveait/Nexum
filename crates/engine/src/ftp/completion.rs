@@ -6,6 +6,13 @@ use super::*;
 use crate::file_identity::FileIdentity;
 use resume::{digest, held_identity, prepare_resume, validate_binding};
 
+#[path = "publication.rs"]
+mod publication;
+pub use publication::{
+    FtpPublicationError, FtpPublicationPlan, FtpPublicationRequest, FtpPublishedCompletion,
+    publish_completion_with_guard, reconcile_publication_with_guard,
+};
+
 const FORMAT: &str = "ftp-held-completion/v1";
 const MAX_PROOF_BYTES: usize = 64 * 1024;
 
@@ -17,12 +24,12 @@ pub struct FtpCompletionRequest<'a> {
 
 /// Evidence of a positive terminal FTP response and a synced complete held file.
 /// Persistence, namespace ownership and publication remain caller responsibilities.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FtpCompletionProof {
     inner: CompletionData,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CompletionData {
     format: String,
@@ -32,6 +39,14 @@ struct CompletionData {
     file_identity: FileIdentity,
     length: u64,
     sha256: [u8; 32],
+}
+
+impl fmt::Debug for FtpCompletionProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FtpCompletionProof")
+            .finish_non_exhaustive()
+    }
 }
 
 impl FtpCompletionProof {

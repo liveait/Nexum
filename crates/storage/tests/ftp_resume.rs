@@ -79,7 +79,7 @@ fn schema_four_migration_preserves_existing_checkpoint_and_progress() {
     let expected = repo.save_ftp_checkpoint(&attempt, &checkpoint()).unwrap();
     drop(repo);
     let db = rusqlite::Connection::open(fixture.db()).unwrap();
-    db.execute_batch("ALTER TABLE ftp_attempts DROP COLUMN completion_seen; ALTER TABLE ftp_attempts DROP COLUMN completion_version; ALTER TABLE ftp_attempts DROP COLUMN completion_proof; ALTER TABLE ftp_attempts DROP COLUMN completion_generation; ALTER TABLE ftp_attempts DROP COLUMN completion_bytes; UPDATE schema_version SET version=4;").unwrap();
+    db.execute_batch("DROP TABLE ftp_publications; ALTER TABLE ftp_attempts DROP COLUMN publication_seen; ALTER TABLE ftp_attempts DROP COLUMN publication_authorization; ALTER TABLE ftp_attempts DROP COLUMN completion_seen; ALTER TABLE ftp_attempts DROP COLUMN completion_version; ALTER TABLE ftp_attempts DROP COLUMN completion_proof; ALTER TABLE ftp_attempts DROP COLUMN completion_generation; ALTER TABLE ftp_attempts DROP COLUMN completion_bytes; UPDATE schema_version SET version=4;").unwrap();
     drop(db);
     let repo = SqliteRepository::open(fixture.db()).unwrap();
     assert_eq!(repo.ftp_attempt(&origin).unwrap(), Some(expected));
@@ -167,7 +167,7 @@ fn completion_migration_failure_rolls_back_all_columns_and_preserves_retry() {
         let expected = repo.save_ftp_checkpoint(&attempt, &checkpoint()).unwrap();
         drop(repo);
         let db = rusqlite::Connection::open(fixture.db()).unwrap();
-        db.execute_batch("ALTER TABLE ftp_attempts DROP COLUMN completion_seen; ALTER TABLE ftp_attempts DROP COLUMN completion_version; ALTER TABLE ftp_attempts DROP COLUMN completion_proof; ALTER TABLE ftp_attempts DROP COLUMN completion_generation; ALTER TABLE ftp_attempts DROP COLUMN completion_bytes; UPDATE schema_version SET version=4;").unwrap();
+        db.execute_batch("DROP TABLE ftp_publications; ALTER TABLE ftp_attempts DROP COLUMN publication_seen; ALTER TABLE ftp_attempts DROP COLUMN publication_authorization; ALTER TABLE ftp_attempts DROP COLUMN completion_seen; ALTER TABLE ftp_attempts DROP COLUMN completion_version; ALTER TABLE ftp_attempts DROP COLUMN completion_proof; ALTER TABLE ftp_attempts DROP COLUMN completion_generation; ALTER TABLE ftp_attempts DROP COLUMN completion_bytes; UPDATE schema_version SET version=4;").unwrap();
         if mid_alter {
             // Deliberately malformed schema: the first ALTER can succeed but
             // the second must fail. It must leave no additional partial DDL.
@@ -340,7 +340,7 @@ fn migrates_schema_three_preserving_origins_tasks_and_instance_identity() {
     drop(repo);
     let connection = rusqlite::Connection::open(fixture.db()).unwrap();
     connection
-        .execute_batch("DROP TABLE ftp_attempts; UPDATE schema_version SET version=3;")
+        .execute_batch("DROP TABLE ftp_publications; DROP TABLE ftp_attempts; UPDATE schema_version SET version=3;")
         .unwrap();
     drop(connection);
     let mut repo = SqliteRepository::open(fixture.db()).unwrap();
@@ -363,10 +363,10 @@ fn migrates_schema_three_preserving_origins_tasks_and_instance_identity() {
     let version: i64 = connection
         .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     drop(repo);
     connection
-        .execute("UPDATE schema_version SET version=6", [])
+        .execute("UPDATE schema_version SET version=7", [])
         .unwrap();
     assert!(SqliteRepository::open(fixture.db()).is_err());
     assert_eq!(

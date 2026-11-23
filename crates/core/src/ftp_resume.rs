@@ -16,9 +16,20 @@ use nexum_storage::{
 
 use crate::{Core, CoreError};
 
-struct CompletionGuard<'a> {
+pub(super) struct CompletionGuard<'a> {
     inner: nexum_storage::ftp_resume::FtpAttemptGuard<'a>,
     failure: &'a std::cell::RefCell<Option<StorageError>>,
+}
+impl<'a> CompletionGuard<'a> {
+    pub(super) fn capture(
+        guard: Result<nexum_storage::ftp_resume::FtpAttemptGuard<'a>, StorageError>,
+        failure: &'a std::cell::RefCell<Option<StorageError>>,
+    ) -> Result<Self, ftp::FtpReceiveError> {
+        guard.map(|inner| Self { inner, failure }).map_err(|error| {
+            failure.replace(Some(error));
+            ftp::FtpReceiveError::ResumeBindingMismatch
+        })
+    }
 }
 impl ftp::FtpCompletionGuard for CompletionGuard<'_> {
     fn release(self) -> Result<(), ftp::FtpReceiveError> {
@@ -29,12 +40,20 @@ impl ftp::FtpCompletionGuard for CompletionGuard<'_> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FtpResumeAttempt {
-    stored: FtpAttempt,
+    pub(super) stored: FtpAttempt,
     binding: FtpResumeBinding,
     proof: Option<FtpPrefixProof>,
     completion: Option<FtpCompletionProof>,
+}
+
+impl std::fmt::Debug for FtpResumeAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FtpResumeAttempt")
+            .field("revision", &self.revision())
+            .finish_non_exhaustive()
+    }
 }
 
 impl FtpResumeAttempt {
@@ -102,7 +121,7 @@ fn binding(origin: &OriginRecord, instance: &str) -> Result<FtpResumeBinding, Co
     })
 }
 
-fn typed(stored: FtpAttempt) -> Result<FtpResumeAttempt, CoreError> {
+pub(super) fn typed(stored: FtpAttempt) -> Result<FtpResumeAttempt, CoreError> {
     let binding = binding(&stored.origin, &stored.instance_id)?;
     let proof = stored
         .checkpoint
@@ -260,16 +279,10 @@ impl Core<SqliteRepository> {
             proof,
             control,
             || {
-                self.repository
-                    .guard_ftp_attempt(&attempt.stored)
-                    .map(|inner| CompletionGuard {
-                        inner,
-                        failure: &failure,
-                    })
-                    .map_err(|error| {
-                        failure.replace(Some(error));
-                        ftp::FtpReceiveError::ResumeBindingMismatch
-                    })
+                CompletionGuard::capture(
+                    self.repository.guard_ftp_attempt(&attempt.stored),
+                    &failure,
+                )
             },
         );
         if let Some(error) = failure.into_inner() {

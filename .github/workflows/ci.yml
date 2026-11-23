@@ -62,6 +62,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Test native Engine and Core
+        run: cargo test --locked -p nexum-engine -p nexum-core -- --test-threads=1
+
       - name: Install Desktop dependencies
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile

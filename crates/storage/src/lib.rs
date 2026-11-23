@@ -1,5 +1,6 @@
 //! Persistence boundaries for Nexum task state.
 
+pub mod ftp_publication;
 pub mod ftp_resume;
 pub mod origin;
 
@@ -224,7 +225,7 @@ impl SqliteRepository {
             })
             .map_err(|e| StorageError::Other(e.to_string()))?;
 
-        if version > 5 {
+        if version > 6 {
             return Err(StorageError::Other(format!(
                 "unsupported schema version: {version}"
             )));
@@ -277,6 +278,9 @@ impl SqliteRepository {
         }
         if version < 5 {
             self.migrate_ftp_completion()?;
+        }
+        if version < 6 {
+            self.migrate_ftp_publication()?;
         }
         Ok(())
     }
@@ -485,7 +489,7 @@ mod sqlite_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]
@@ -530,7 +534,7 @@ mod sqlite_tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         drop(repository);
         let _ = std::fs::remove_file(path);
     }
